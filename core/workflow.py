@@ -14,7 +14,7 @@ from tools.patch_applier import PatchApplier
 from tools.log_filter import LogFilter
 from tools.qemu_oracle import QemuOracle
 
-from graph_rag.build_graph import ZephyrGraphRAG
+from agents.knowledge_expert import knowledge_expert_node
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -60,47 +60,6 @@ def analyzer_node(state: ZephyrAgentState) -> Dict[str, Any]:
     return {
         "search_keywords": result.search_keywords,
         "messages": [f"Analyzer 診斷 ({result.error_category}): {result.reasoning}"]
-    }
-
-def knowledge_node(state: ZephyrAgentState) -> Dict[str, Any]:
-    keywords = state.get("search_keywords", [])
-    if not keywords:
-        return {"retrieved_context": "無需檢索圖譜。"}
-
-    print(f"\n📚 [Knowledge Expert] 針對關鍵字 {keywords} 檢索圖譜...")
-    
-    # 1. 啟動並建構 Graph RAG
-    workspace_path = state.get("workspace_path", "")
-    rag = ZephyrGraphRAG(workspace_path)
-    rag.build_graph()
-    
-    # 2. 擷取原始的拓樸結構
-    raw_graph_context = rag.retrieve_context(keywords, depth=1)
-    print(f"   ↳ 提取圖譜資料: \n{raw_graph_context[:200]}...\n")
-    
-    # 3. 使用 Gemini 1.5 Flash 將生硬的圖譜資料總結為人類可讀的診斷報告
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1)
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """你是一位嵌入式硬體架構師。
-你的任務是讀取從 NetworkX 擷取出來的 Graph RAG 拓樸資料，並將其總結為對「軟體修補專家」有用的上下文。
-請指出硬體節點 (DTS) 與軟體開關 (Kconfig) 之間的相依性，並點出可能遺漏的設定。
-輸出請保持精簡 (100字以內)。"""),
-        ("human", "錯誤日誌分析關鍵字: {keywords}\n\n擷取到的圖譜拓樸:\n{graph_context}")
-    ])
-    
-    chain = prompt | llm
-    response = chain.invoke({
-        "keywords": keywords,
-        "graph_context": raw_graph_context
-    })
-    
-    summarized_context = response.content
-    print(f"   ↳ 專家總結: {summarized_context}")
-    
-    return {
-        "retrieved_context": summarized_context,
-        "messages": [f"Knowledge Expert 檢索總結: {summarized_context}"]
     }
 
 def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
@@ -228,7 +187,7 @@ def route_after_devops(state: ZephyrAgentState) -> str:
 def build_zephyr_graph() -> StateGraph:
     workflow = StateGraph(ZephyrAgentState)
     workflow.add_node("Analyzer", analyzer_node)
-    workflow.add_node("Knowledge", knowledge_node)
+    workflow.add_node("Knowledge", knowledge_expert_node)
     workflow.add_node("Patch", patch_node)
     workflow.add_node("DevOps", devops_node)
 

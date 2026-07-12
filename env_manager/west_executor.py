@@ -46,10 +46,20 @@ class WestExecutor:
         """
         啟動一個用完即棄 (Disposable) 的容器來執行指令。
         Starts a disposable container to execute the command.
+
+        注意：我們手動走 create() -> start() -> wait() -> logs() -> remove()，
+        而不是用 containers.run()。docker-py 的 run() 在容器以非零狀態碼結束時，
+        內部會捨棄已收集的輸出並改用 container.logs(stdout=False, stderr=True) 重抓，
+        導致 west/cmake/ninja 印在 stdout 上的實際編譯錯誤全部遺失。
+        Note: we manually do create() -> start() -> wait() -> logs() -> remove()
+        instead of containers.run(). docker-py's run() discards the collected
+        output and refetches with stdout=False, stderr=True when the container
+        exits non-zero, which silently drops the actual west/cmake/ninja build
+        errors (which are printed to stdout).
         """
+        container = None
         try:
-            # 啟動容器 (等同於 docker run --rm -v ...)
-            container = self.client.containers.run(
+            container = self.client.containers.create(
                 image=self.image_name,
                 command=["/bin/bash", "-c", command],
                 # 將宿主機的程式碼以唯讀 (ro) 模式掛載，徹底防止污染
@@ -58,29 +68,20 @@ class WestExecutor:
                     self.target_project_path: {'bind': '/workspace', 'mode': 'ro'}
                 },
                 working_dir="/workspace",
-                detach=False,   # 阻塞直到執行完畢 (Block until finished)
-                remove=True,    # 執行完自動刪除容器 (Auto-remove after run)
-                stdout=True,
-                stderr=True
             )
-            
-            # 若無例外拋出，代表退出碼 (exit code) 為 0，建置成功
-            return {
-                "success": True,
-                "output": container.decode('utf-8'),
-                "error": ""
-            }
-            
-        except docker.errors.ContainerError as e:
-            # 建置失敗 (Exit code != 0)
+            container.start()
+            exit_status = container.wait()["StatusCode"]
+
+            # 無論成功或失敗，都完整抓取合併後的 stdout + stderr
+            # Fetch the full combined stdout + stderr regardless of exit status
+            full_log = container.logs(stdout=True, stderr=True).decode('utf-8')
+
+            if exit_status == 0:
+                return {"success": True, "output": full_log, "error": ""}
+
             self.logger.error("指令執行失敗 (Command execution failed).")
-            # docker-py 的 ContainerError 只有 stderr 屬性 (包含合併的輸出)
-            error_output = e.stderr.decode('utf-8') if hasattr(e, 'stderr') and e.stderr else str(e)
-            return {
-                "success": False,
-                "output": error_output,
-                "error": ""
-            }
+            return {"success": False, "output": full_log, "error": ""}
+
         except Exception as e:
             # 其他 Docker 相關錯誤
             self.logger.critical(f"Docker 環境錯誤 (Docker environment error): {str(e)}")
@@ -89,6 +90,12 @@ class WestExecutor:
                 "output": "",
                 "error": str(e)
             }
+        finally:
+            if container is not None:
+                try:
+                    container.remove(force=True)
+                except Exception:
+                    pass
 
 # ==========================================
 # 測試區塊 (Testing Block)

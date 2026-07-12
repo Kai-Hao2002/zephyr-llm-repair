@@ -1,98 +1,82 @@
 # graph_rag/build_graph.py
-import os
-import re
 import networkx as nx
-import logging
-from typing import List
+import yaml
+import pickle
+import os
+from typing import Dict, Any
 
-logger = logging.getLogger(__name__)
+from .parsers.kconfig_parser import KconfigParser
+from .parsers.dts_parser import DTSParser
 
-class ZephyrGraphRAG:
-    """
-    負責掃描 Zephyr 專案的硬體 (.overlay) 與軟體 (prj.conf, Kconfig) 設定檔，
-    將其建構為 NetworkX 記憶體圖譜，並提供子圖檢索功能。
-    """
-    def __init__(self, workspace_path: str):
-        self.workspace_path = workspace_path
+class ZephyrGraphBuilder:
+    def __init__(self):
         self.graph = nx.DiGraph()
-        
-    def build_graph(self):
-        """掃描專案目錄並建構圖譜"""
-        self.graph.clear()
-        
-        # 1. 掃描 prj.conf (軟體配置)
-        prj_conf_path = os.path.join(self.workspace_path, "prj.conf")
-        if os.path.exists(prj_conf_path):
-            with open(prj_conf_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("CONFIG_") and "=" in line:
-                        key, val = line.split("=", 1)
-                        self.graph.add_node(key, type="kconfig", value=val)
-                        
-        # 2. 掃描 app.overlay 或其他 .overlay 檔案 (硬體配置)
-        # 使用輕量級 Regex 提取硬體節點與 compatible 屬性
-        node_pattern = re.compile(r"([a-zA-Z0-9_]+)@[0-9a-fA-F]+\s*\{")
-        comp_pattern = re.compile(r'compatible\s*=\s*"([^"]+)"')
-        
-        for root, _, files in os.walk(self.workspace_path):
-            for file in files:
-                if file.endswith(".overlay"):
-                    filepath = os.path.join(root, file)
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        content = f.read()
-                        
-                        # 尋找所有硬體節點
-                        current_nodes = node_pattern.findall(content)
-                        compatibles = comp_pattern.findall(content)
-                        
-                        for idx, node_name in enumerate(current_nodes):
-                            node_id = f"DTS_{node_name}"
-                            comp_val = compatibles[idx] if idx < len(compatibles) else "unknown"
-                            self.graph.add_node(node_id, type="dts_node", compatible=comp_val)
-                            
-                            # 建立軟硬體假想依賴 (例如 i2c 節點依賴 CONFIG_I2C)
-                            if "i2c" in node_name.lower():
-                                self.graph.add_edge(node_id, "CONFIG_I2C", relation="requires_config")
-                            if "spi" in node_name.lower():
-                                self.graph.add_edge(node_id, "CONFIG_SPI", relation="requires_config")
 
-        logger.info(f"🕸️ 圖譜建構完成: {self.graph.number_of_nodes()} 個節點, {self.graph.number_of_edges()} 條邊界。")
-
-    def retrieve_context(self, keywords: List[str], depth: int = 1) -> str:
+    def build_graph(self, kconfig_path: str, dts_path: str, zephyr_base: str = "") -> nx.DiGraph:
         """
-        給定關鍵字，透過 NetworkX ego_graph 擷取周圍的關聯節點。
+        利用 Parser 萃取資料並建構完整的知識圖譜。
+        Extract data using Parsers and build the complete knowledge graph.
         """
-        if self.graph.number_of_nodes() == 0:
-            return "圖譜為空或專案中沒有設定檔。"
-
-        context_lines = []
-        retrieved_nodes = set()
-
-        for kw in keywords:
-            # 模糊比對圖譜中的節點
-            matched_nodes = [n for n in self.graph.nodes() if kw.lower() in n.lower()]
+        # 1. 解析與載入 Kconfig (Parse and ingest Kconfig)
+        k_parser = KconfigParser(zephyr_base=zephyr_base)
+        k_data = k_parser.parse(kconfig_path)
+        
+        for node_id, attrs in k_data["nodes"].items():
+            self.graph.add_node(node_id, domain="Kconfig", **attrs)
             
-            for target_node in matched_nodes:
-                if target_node in retrieved_nodes:
-                    continue
-                
-                # 擷取子圖 (半徑為 depth)
-                subgraph = nx.ego_graph(self.graph, target_node, radius=depth, undirected=True)
-                retrieved_nodes.update(subgraph.nodes())
+        for source, target, relation in k_data["edges"]:
+            self.graph.add_edge(source, target, relation=relation)
 
-                context_lines.append(f"\n=== 節點焦點: {target_node} ===")
-                attrs = self.graph.nodes[target_node]
-                for k, v in attrs.items():
-                    context_lines.append(f"  [{k}]: {v}")
+        # 2. 解析與載入 DTS (Parse and ingest DTS)
+        d_parser = DTSParser()
+        d_data = d_parser.parse(dts_path)
+        
+        for node_id, attrs in d_data["nodes"].items():
+            self.graph.add_node(node_id, domain="DTS", **attrs)
+            
+        for source, target, relation in d_data["edges"]:
+            self.graph.add_edge(source, target, relation=relation)
 
-                out_edges = self.graph.out_edges(target_node, data=True)
-                if out_edges:
-                    context_lines.append("  [依賴 ->]:")
-                    for _, dst, data in out_edges:
-                        context_lines.append(f"    --({data.get('relation')})--> {dst}")
+        return self.graph
 
-        if not context_lines:
-            return f"⚠️ 找不到與 '{keywords}' 相關的圖譜拓樸。"
+    def save(self, filepath: str):
+        with open(filepath, 'wb') as f:
+            pickle.dump(self.graph, f)
 
-        return "\n".join(context_lines)
+    def load(self, filepath: str):
+        with open(filepath, 'rb') as f:
+            self.graph = pickle.load(f)
+
+def subgraph_to_yaml_context(subgraph: nx.DiGraph) -> str:
+    """
+    將 NetworkX 子圖轉化為 LLM 友善的 YAML 格式。
+    Convert a NetworkX subgraph into an LLM-friendly YAML format.
+    """
+    context_dict = {"nodes": {}, "relationships": []}
+
+    for node, attrs in subgraph.nodes(data=True):
+        clean_attrs = {k: v for k, v in attrs.items() if v}
+        context_dict["nodes"][node] = clean_attrs
+
+    for source, target, attrs in subgraph.edges(data=True):
+        relation = attrs.get('relation', 'related_to')
+        context_dict["relationships"].append(f"{source} --[{relation}]--> {target}")
+
+    return yaml.dump(context_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+# ===== CLI: 建置並快取知識圖譜 (Build and cache the knowledge graph) =====
+# 執行方式 (Usage): python -m graph_rag.build_graph --kconfig $ZEPHYR_BASE/Kconfig --dts <board>.dts --zephyr-base $ZEPHYR_BASE
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Parse Zephyr Kconfig/DTS and cache the resulting NetworkX graph.")
+    parser.add_argument("--kconfig", required=True, help="Path to the root Kconfig file (e.g. $ZEPHYR_BASE/Kconfig)")
+    parser.add_argument("--dts", required=True, help="Path to the board's .dts file")
+    parser.add_argument("--zephyr-base", default=os.environ.get("ZEPHYR_BASE", ""), help="Zephyr source root (defaults to $ZEPHYR_BASE)")
+    parser.add_argument("--output", default="zephyr_graph_cache.pkl", help="Output path for the cached graph")
+    args = parser.parse_args()
+
+    builder = ZephyrGraphBuilder()
+    builder.build_graph(args.kconfig, args.dts, zephyr_base=args.zephyr_base)
+    builder.save(args.output)
+    print(f"✅ 圖譜已快取至 {args.output}: {builder.graph.number_of_nodes()} 個節點, {builder.graph.number_of_edges()} 條邊界。")
