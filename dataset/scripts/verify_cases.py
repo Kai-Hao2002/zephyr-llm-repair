@@ -13,6 +13,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from tools.log_filter import LogFilter
 from tools.qemu_oracle import QemuOracle
+from tools.fault_injector import FaultInjector
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger("CaseVerifier")
@@ -50,6 +51,10 @@ class ZephyrCaseVerifier:
         # causing candidates with no real bug to be wrongly discarded as
         # timeouts. Raised to 600s for headroom.
         self.oracle = QemuOracle(timeout=600)
+        # 合成注入案例走 FaultInjector 的雙向驗證閘，而不是 git checkout 歷史 commit。
+        # Synthetic injected cases go through FaultInjector's two-sided gate
+        # instead of checking out a historical commit.
+        self.injector = FaultInjector(timeout=600)
         self.limit = limit
         self.offset = offset
         self.max_workers = max_workers
@@ -108,12 +113,61 @@ class ZephyrCaseVerifier:
     def _verify_one_case(self, case: dict):
         """
         驗證單一案例，供 ThreadPoolExecutor 並行呼叫。
-        回傳驗證通過(已補上 initial_error_log/error_type)的 case，或 None 代表捨棄。
+        依 case 是否帶有 "injection" 欄位，分派給合成注入或真實挖礦兩條驗證路徑。
         Verifies a single case for parallel execution via ThreadPoolExecutor.
-        Returns the case (with initial_error_log/error_type filled in) if verified,
-        or None if it should be discarded.
+        Dispatches to the synthetic-injection or real-mined verification path
+        depending on whether the case carries an "injection" field.
         """
         tag = f"[{case['id']}]"
+        if "injection" in case:
+            return self._verify_injected_case(case, tag)
+        return self._verify_mined_case(case, tag)
+
+    def _verify_injected_case(self, case: dict, tag: str):
+        """
+        驗證合成注入案例：透過 FaultInjector 的雙向驗證閘 (注入後必須重現
+        預期類別的失敗、還原後必須建置並執行成功)。
+        Verifies a synthetic fault-injection case via FaultInjector's
+        two-sided gate (must reproduce the intended failure when mutated,
+        must build and run successfully when reverted).
+        """
+        injection = case["injection"]
+        target_app = case.get("target_app", "samples/hello_world")
+        board = case.get("board", "native_sim")
+        category = case.get("category", "other")
+
+        logger.info(f"🧬 {tag} 開始驗證注入案例: {case['title']}")
+        logger.info(f"   ↳ {tag} 目標檔案: {injection['target_file']} | Operator: {injection['operator']} | App: {target_app} | Board: {board}")
+
+        gate_result = self.injector.inject_and_verify(
+            case_id=case["id"],
+            baseline_commit=case["broken_commit"],
+            target_file=injection["target_file"],
+            operator=injection["operator"],
+            category=category,
+            target_app=target_app,
+            board=board,
+        )
+
+        if not gate_result["accepted"]:
+            logger.warning(f"   ⚠️ {tag} 注入驗證未通過: {gate_result['reason']}")
+            return None
+
+        logger.info(f"   ✅ {tag} 注入後成功重現預期失敗、還原後成功建置！這是一個完美的合成評估案例。")
+
+        mutated_result = gate_result["mutated_result"]
+        compressed_log = self.log_filter.compress_log(mutated_result["log"])
+        case["initial_error_log"] = compressed_log
+        case["error_type"] = mutated_result["status"]
+        return case
+
+    def _verify_mined_case(self, case: dict, tag: str):
+        """
+        驗證真實挖礦案例：checkout broken_commit 後直接建置，
+        期望重現明確的崩潰或建置失敗。
+        Verifies a real mined case: checks out broken_commit and builds it
+        directly, expecting an explicit crash or build failure.
+        """
         logger.info(f"🧪 {tag} 開始驗證: {case['title']} | Commit: {case['broken_commit'][:10]}")
 
         # 測試目標應用程式 (預設使用 hello_world，您也可以根據 Bug 模組動態調整)

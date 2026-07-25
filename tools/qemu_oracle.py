@@ -20,21 +20,71 @@ class QemuOracle:
 
         # 定義預期的成功字串 (Zephyr 啟動特徵)
         # Expected success signatures (Zephyr boot signatures)
+        # "Hello World" 這個 pattern 錨定在行首：main.c 編譯失敗時，gcc 的
+        # 診斷輸出常常會原樣印出出錯的那一行原始碼 (例如
+        # `11 | printf("Hello World! %s\n", ...)`)，這行文字裡也包含
+        # "Hello World" 字樣，但那是編譯器診斷、不是程式真的執行後印出來的
+        # stdout。沒錨定行首的話，這種編譯錯誤反而會被誤判為「成功啟動」，
+        # 而且是真正的錯誤剛好被自己的錯誤訊息蓋掉，非常隱蔽。真正的
+        # printf() 輸出是完全獨立、沒有行號/管線符號前綴的一行。
+        # Anchored at line start: when main.c fails to compile, gcc's
+        # diagnostic often echoes back the offending source line verbatim
+        # (e.g. `11 | printf("Hello World! %s\n", ...)`), which also
+        # contains the text "Hello World" — but that's a compiler
+        # diagnostic, not genuine program stdout. Without the anchor, this
+        # exact kind of compile failure gets misclassified as "successful
+        # boot" — the real failure gets masked by its own error message.
+        # Genuine printf() output is its own standalone line with no line
+        # number/pipe-character prefix.
         self.success_patterns = [
             r"\*\*\* Booting Zephyr OS",
             r"Booting Zephyr OS",
-            r"Hello World" # 針對 Hello World 範例的額外檢查
+            r"^Hello World!? " # 針對 Hello World 範例的額外檢查
         ]
 
         # 定義 Zephyr 常見的 Fatal Error 特徵
         # Common Zephyr Fatal Error signatures
+        # 前六個是「真的模擬硬體」(QEMU 上的 ARM/x86 等) 才會出現的、由 Zephyr
+        # 自己的 fault handler 印出來的字串。但 native_sim 是把 Zephyr 應用
+        # 編譯成一支 host 原生執行檔直接跑在 Linux 上，記憶體錯誤是由「host
+        # 的 kernel 對這個 process 送出真正的 POSIX 訊號」造成，殼層印出來的
+        # 是 "Segmentation fault"/"Aborted"/"Illegal instruction" 這種訊息，
+        # 完全不會出現任何一個上面的字串——沒有這幾個 pattern，native_sim 上
+        # 的任何一種真實記憶體錯誤都會被監控迴圈直接放過。
+        # The first six only appear on *actual emulated hardware* (ARM/x86 on
+        # QEMU etc.) via Zephyr's own fault handler. native_sim, though,
+        # compiles the Zephyr app into a native host executable that runs
+        # directly on Linux — a memory error there kills the process via a
+        # real POSIX signal from the host kernel, and the shell reports it as
+        # "Segmentation fault"/"Aborted"/"Illegal instruction", none of which
+        # match any of the patterns above. Without these, any genuine memory
+        # error on native_sim slips straight past the monitoring loop.
+        # "PROJECT EXECUTION FAILED" 是 ztest 測試套件真的跑到最後、但有測試
+        # 案例斷言失敗時印出的總結——這不是記憶體錯誤/程序被訊號殺死，而是
+        # 一個乾淨結束但结果不對的程序，所以既不會出現在上面任何一個訊號類
+        # pattern，也不是 build 失敗。對 runtime_crash 類別來說，這種「測試
+        # 套件真的執行了、但行為不對」跟真的當機一樣是「這個 commit 真的有
+        # 問題」的有效證據，甚至更精確 (有明確是哪個測試案例失敗)。
+        # "PROJECT EXECUTION FAILED" is ztest's own summary line when the
+        # suite ran to completion but one or more assertions failed — not a
+        # memory error/signal-killed process, just a process that exited
+        # cleanly with the wrong outcome. It won't match any signal-based
+        # pattern above, nor is it a build failure. For the runtime_crash
+        # category, a ztest suite that genuinely ran and misbehaved is just
+        # as valid evidence that "this commit is genuinely broken" as an
+        # actual crash — arguably more precise, since it names which test
+        # case failed.
         self.crash_patterns = [
             r"Kernel Panic",
             r"Fatal fault",
             r"ASSERTION FAIL",
             r"Usage Fault",
             r"Bus Fault",
-            r"CPU Page Fault"
+            r"CPU Page Fault",
+            r"Segmentation fault",
+            r"Aborted",
+            r"Illegal instruction",
+            r"PROJECT EXECUTION FAILED",
         ]
 
         # 某些真實硬體板子不支援 QEMU/native 模擬，west 會印出這句話然後直接
@@ -85,7 +135,8 @@ class QemuOracle:
         self.crash_regex = [re.compile(p) for p in self.crash_patterns]
         self.unsupported_regex = [re.compile(p) for p in self.unsupported_patterns]
 
-    def evaluate(self, command: str, container_name: Optional[str] = None) -> Dict[str, Any]:
+    def evaluate(self, command: str, container_name: Optional[str] = None,
+                 wait_for_completion: bool = False) -> Dict[str, Any]:
         """
         執行指令並監聽 QEMU 輸出。
 
@@ -94,6 +145,15 @@ class QemuOracle:
             `child.close(force=True)` 終止本地 pexpect 子進程 (docker run 這個 CLI
             進程收到 SIGKILL 時不一定來得及通知 daemon 停掉容器，導致殭屍容器持續
             佔用 CPU/網路，拖垮後續所有驗證直到全部逾時)。
+        :param wait_for_completion: 像 samples/hello_world 這種印一次訊息就進入
+            idle loop、永遠不會自己結束的 app，一看到成功特徵就必須馬上停止監控
+            (否則會一路空等到 timeout)。但 ztest 類的 app 在印出開機橫幅
+            "Booting Zephyr OS" 之後才會真正開始跑測試——那正是 runtime_crash
+            類別注入的錯誤預期會被觸發的地方。如果看到開機橫幅就馬上停止監控，
+            等於保證永遠觀察不到「開機後、測試執行期間」才發生的崩潰，
+            runtime_crash 類別就變成不可能被偵測到的類別。設成 True 時，看到
+            成功特徵只會先暫定為 "success"，繼續監控到 EOF/timeout 或真的等到
+            crash 特徵出現為止。
         Executes the command and listens to the QEMU output.
 
         :param container_name: If the command starts a Docker container with
@@ -104,6 +164,18 @@ class QemuOracle:
             to stop the container before it's SIGKILLed, leaking a zombie
             container that keeps eating CPU/network and stalls every
             subsequent verification until they all time out).
+        :param wait_for_completion: Apps like samples/hello_world print once
+            and then sit in an idle loop forever, so monitoring must stop the
+            instant a success signature is seen (otherwise we'd just wait out
+            the full timeout for nothing). ztest-based apps, though, only
+            start actually running tests *after* printing the "Booting Zephyr
+            OS" boot banner — which is exactly where a runtime_crash
+            injection is expected to fire. Stopping at the boot banner makes
+            it structurally impossible to ever observe a crash that happens
+            during test execution, i.e. the runtime_crash category could
+            never be detected. When True, a success signature is only
+            tentatively recorded; monitoring continues until EOF/timeout or
+            an actual crash signature appears.
         """
         self.logger.info("啟動 Test Oracle 並監控 QEMU 輸出... (Starting Test Oracle to monitor QEMU...)")
         
@@ -173,13 +245,14 @@ class QemuOracle:
                             break
 
                         # 2. 檢查是否成功啟動 (Check for success)
-                        for pattern in self.success_regex:
-                            if pattern.search(line):
-                                self.logger.info("偵測到成功啟動特徵！ (Successful boot signature detected!)")
-                                result["status"] = "success"
-                                break
-                                
-                        if result["status"] == "success":
+                        if result["status"] != "success":
+                            for pattern in self.success_regex:
+                                if pattern.search(line):
+                                    self.logger.info("偵測到成功啟動特徵！ (Successful boot signature detected!)")
+                                    result["status"] = "success"
+                                    break
+
+                        if result["status"] == "success" and not wait_for_completion:
                             break
 
                 except pexpect.TIMEOUT:
@@ -189,10 +262,19 @@ class QemuOracle:
                     break
                 
                 except pexpect.EOF:
-                    # 程式自然結束 (例如建置失敗根本沒啟動 QEMU)
-                    # Process exited normally (e.g., build failed, QEMU never started)
+                    # 程式自然結束。若先前已經看到開機成功特徵、且一路監控到
+                    # 現在都沒再出現 crash 特徵 (wait_for_completion=True 的
+                    # ztest 情境)，代表整個流程真的順利跑完，維持 "success"；
+                    # 否則就是建置失敗根本沒啟動 QEMU，才是 "eof_no_boot"。
+                    # Process exited normally. If we'd already seen a boot
+                    # success signature and no crash appeared while we kept
+                    # watching (the wait_for_completion=True ztest case), the
+                    # whole run genuinely completed cleanly — keep "success".
+                    # Otherwise this is the build-failed-before-QEMU-ever-
+                    # started case, i.e. "eof_no_boot".
                     self.logger.info("進程已結束 (Process exited).")
-                    result["status"] = "eof_no_boot"
+                    if result["status"] != "success":
+                        result["status"] = "eof_no_boot"
                     break
 
         finally:
