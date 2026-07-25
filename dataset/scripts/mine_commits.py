@@ -63,49 +63,55 @@ BOARD_PATH_RE = re.compile(r"boards/[^/]+/([^/]+)/")
 # candidates.
 INJECTION_CATALOG = [
     # --- Kconfig Dependency and Configuration Conflicts ---
-    # samples/hello_world 在 native_sim 上實際 =y 的 libc/logging 符號其實是
-    # picolibc + 沒有啟用 CONFIG_LOG，所以原本 target 在 lib/libc/Kconfig /
-    # subsys/logging/Kconfig 上的 mutation 根本沒被建置圖用到 (改了等於沒
-    # 改，變成「意外建置成功」)。POSIX_ARCH_CONSOLE 才是這個 board 真正靠
-    # `depends on ARCH_POSIX` + `select CONSOLE_HAS_DRIVER` 撐起 Hello
-    # World 主控台輸出的符號 (已用一次 recon build 的 .config 確認
-    # CONFIG_POSIX_ARCH_CONSOLE=y)，改動它保證會被建置圖實際看到。
-    # The libc/logging symbols mutated before weren't actually =y for
-    # samples/hello_world on native_sim (it uses picolibc, CONFIG_LOG is
-    # off), so those mutations never touched anything the build graph used
-    # — silently succeeding. POSIX_ARCH_CONSOLE is what actually carries
-    # Hello World's console output on this board (confirmed via a recon
-    # build's .config: CONFIG_POSIX_ARCH_CONSOLE=y), so mutating it is
-    # guaranteed to be exercised.
-    # 已實測過 target_app=samples/hello_world 和 target_app=tests/subsys/fs/fcb
-    # 兩種組合，兩者都對 POSIX_ARCH_CONSOLE 的 mutation 完全沒反應
-    # (west build -t run 依然乾淨成功)。native_sim 上的 stdout 顯然是透過某個
-    # 不受這個 Kconfig 開關控制的底層機制送到終端機，這兩筆還沒找到能真正
-    # 讓建置/執行失敗的 kconfig mutation 目標，需要之後換一個完全不同的
-    # 切入點 (例如改動一個會讓 CMake/Kconfig 本身組態檢查失敗、而不是只影響
-    # 某個 driver 是否被編譯進去的符號)。
-    # Tried both target_app=samples/hello_world and
-    # target_app=tests/subsys/fs/fcb — neither reacts to a POSIX_ARCH_CONSOLE
-    # mutation at all (west build -t run still succeeds cleanly either way).
-    # stdout on native_sim evidently reaches the terminal through some
-    # mechanism this Kconfig switch doesn't gate. These two still need a
-    # genuinely different kconfig mutation target — something that fails
-    # CMake/Kconfig's own configuration validation, not just whether one
-    # driver gets compiled in.
+    # 兩次都失敗的教訓：console 相關的 Kconfig 符號 (lib/libc/Kconfig 的
+    # MINIMAL_LIBC_SUPPORTED、drivers/console/Kconfig 的 POSIX_ARCH_CONSOLE)
+    # 對 samples/hello_world 完全無效——因為 native_sim 上它的 printf()
+    # 是直接呼叫 host 真正的 libc (NATIVE_LIBC)，繞過了整個 Zephyr console
+    # 子系統；換成 target_app=tests/subsys/fs/fcb 一樣沒用，代表 native_sim
+    # 的 stdout 是透過某個不受這些 Kconfig 開關控制的底層機制送出的。
+    # 所以這次改找一個「符號被拿掉後，某個原本會被呼叫的函式就不會被編譯
+    # 進去，導致連結期 undefined reference」的目標，而不是又賭一次「這個
+    # driver 是否存在會影響 stdout 有沒有輸出」。subsys/fs/fcb/Kconfig 的
+    # `config FCB` 正好是這種型：`depends on FLASH_MAP` 反轉後，
+    # subsys/fs/fcb/*.c 整包都不會被編譯，但 tests/subsys/fs/fcb 的測試碼
+    # 仍然呼叫 fcb_init()/fcb_append() 等函式，保證連結失敗；`select CRC`
+    # 拿掉後，fcb_elem_info.c 呼叫的 crc8_ccitt() 找不到實作，一樣是連結
+    # 失敗。兩個 mutation 都精準命中 tests/subsys/fs/fcb 這個「已知會被完整
+    # 建置並執行」的測試目標本身依賴的基礎設施，不是賭邊緣的驅動程式。
+    # Lesson from two failed attempts: console-related Kconfig symbols
+    # (lib/libc/Kconfig's MINIMAL_LIBC_SUPPORTED, drivers/console/Kconfig's
+    # POSIX_ARCH_CONSOLE) have zero effect on samples/hello_world, because
+    # its printf() on native_sim calls the host's real libc directly
+    # (NATIVE_LIBC), bypassing the entire Zephyr console subsystem;
+    # retargeting to tests/subsys/fs/fcb didn't help either, meaning
+    # native_sim's stdout reaches the terminal through some mechanism these
+    # Kconfig switches don't gate at all. So this time the target is a
+    # symbol whose removal makes some already-called function stop being
+    # compiled in, guaranteeing a link-time undefined reference — not
+    # another bet on "does this driver's presence affect whether stdout
+    # appears". `config FCB` in subsys/fs/fcb/Kconfig fits exactly:
+    # inverting `depends on FLASH_MAP` makes the whole subsys/fs/fcb/*.c
+    # source set stop compiling, while tests/subsys/fs/fcb's test code still
+    # calls fcb_init()/fcb_append()/etc — guaranteed link failure. Removing
+    # `select CRC` means fcb_elem_info.c's call to crc8_ccitt() has no
+    # implementation — also a guaranteed link failure. Both mutations land
+    # squarely on infrastructure that tests/subsys/fs/fcb — a target already
+    # confirmed to build and run fully — itself depends on, not a bet on a
+    # peripheral driver.
     {
-        "id_suffix": "kconfig_libc_stdout",
+        "id_suffix": "kconfig_fcb_depends",
         "category": "kconfig",
-        "target_file": "drivers/console/Kconfig",
-        "operator": "kconfig_invert_depends:POSIX_ARCH_CONSOLE",
-        "target_app": "samples/hello_world",
+        "target_file": "subsys/fs/fcb/Kconfig",
+        "operator": "kconfig_invert_depends:FCB",
+        "target_app": "tests/subsys/fs/fcb",
         "board": "native_sim",
     },
     {
-        "id_suffix": "kconfig_logging_select",
+        "id_suffix": "kconfig_fcb_select",
         "category": "kconfig",
-        "target_file": "drivers/console/Kconfig",
-        "operator": "kconfig_remove_select:POSIX_ARCH_CONSOLE",
-        "target_app": "samples/hello_world",
+        "target_file": "subsys/fs/fcb/Kconfig",
+        "operator": "kconfig_remove_select:FCB",
+        "target_app": "tests/subsys/fs/fcb",
         "board": "native_sim",
     },
     # --- Device Tree (DTS) Node Errors ---
