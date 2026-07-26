@@ -436,6 +436,83 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/mutex/mutex_api",
         "board": "native_sim",
     },
+    # --- Scaling round 2 ---
+    # thread_priority_swap #3：tests/kernel/mem_protect/sys_sem 的
+    # test_sem_take_multiple 跟先前 tests/kernel/semaphore/semaphore 的
+    # 同名測試是同一種結構 (3 個不同優先權的執行緒依序搶 multiple_thread_sem，
+    # 逐輪驗證誰先拿到)，但這次是 sys_sem (userspace-safe 系統號誌) 這個
+    # 不同的 API/檔案。把 sem_tid (K_PRIO_PREEMPT(3)，low) 跟 sem_tid_2
+    # (K_PRIO_PREEMPT(1)，high) 的優先權對調，實測 (west build -t run) 只讓
+    # test_sem_take_multiple 這一個案例失敗 (斷言訊息精準是 "Higher
+    # priority threads didn't execute")，同一支 binary 裡橫跨
+    # sys_sem/sys_sem_1cpu 兩個 suite 共 13 個其他案例全過；revert 端 diff
+    # 確認逐位元組相同、重新建置執行全過。
+    # thread_priority_swap #3: tests/kernel/mem_protect/sys_sem's
+    # test_sem_take_multiple has the same structure as the earlier
+    # tests/kernel/semaphore/semaphore test of the same name (3 threads at
+    # distinct priorities racing multiple_thread_sem, with a per-round
+    # winner check), but against sys_sem (the userspace-safe system
+    # semaphore), a different API/file. Swapping sem_tid's
+    # (K_PRIO_PREEMPT(3), low) priority with sem_tid_2's (K_PRIO_PREEMPT(1),
+    # high) was empirically verified (west build -t run) to fail exactly
+    # test_sem_take_multiple (assertion message precisely "Higher priority
+    # threads didn't execute"), while the other 13 test cases spanning the
+    # sys_sem/sys_sem_1cpu suites in the same binary all still pass; the
+    # reverted side was confirmed byte-identical via diff and rebuilds/runs
+    # clean.
+    #
+    # Also fixes the naive-first-match trap for this operator itself:
+    # thread_priority_swap now supports an optional scope prefix,
+    # "<scope_name>@<value_a>:<value_b>" (resolved via _find_ztest_block,
+    # same helper c_api_substitute uses), for cases where the same literal
+    # priority value already appears earlier in the file in an unrelated
+    # function — hit empirically on tests/kernel/msgq/msgq_api (abandoned
+    # as a target: the mutation, once correctly scoped, still turned out to
+    # have no observable effect there — a legitimate "doesn't matter here"
+    # result, not a bug) before landing on this sys_sem target, which
+    # didn't need scoping (no earlier conflicting occurrence in the file).
+    {
+        "id_suffix": "thread_priority_swap_sys_sem",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/mem_protect/sys_sem/src/main.c",
+        "operator": "thread_priority_swap:K_PRIO_PREEMPT(3):K_PRIO_PREEMPT(1)",
+        "target_app": "tests/kernel/mem_protect/sys_sem",
+        "board": "native_sim",
+    },
+    # c_api_substitute #3：tests/kernel/mutex/sys_mutex 的 thread_09 (一個
+    # 一般的執行緒進入函式，不是直接寫在 ZTEST(...) 本體裡——用
+    # _find_ztest_block 的「一般 C 函式定義」退回比對機制鎖定) 有一行
+    # `k_sleep(K_MSEC(500));	/* Allow lower priority thread to run */`，
+    # 註解直接寫明用途。換成 `k_yield();` 後，實測 (west build -t run)
+    # 讓 test_mutex (mutex_complex suite 裡最複雜的多執行緒案例) 精準地在
+    # 「應該還沒能鎖到 mutex_1 卻鎖到了」這個檢查點失敗，其餘
+    # test_mutex_multithread_competition/test_supervisor_access 兩個案例
+    # 照常通過 (test_user_access 因為 CONFIG_ARCH_HAS_USERSPACE 在這個板子
+    # 上本來就是 SKIP，跟這次的注入無關，revert 端也一樣 SKIP)；revert 端
+    # diff 確認逐位元組相同、重新建置執行全過。
+    # c_api_substitute #3: tests/kernel/mutex/sys_mutex's thread_09 (a
+    # plain thread-entry function, not written directly inside a
+    # ZTEST(...) body — pinned via _find_ztest_block's "plain C function
+    # definition" fallback match) has a
+    # `k_sleep(K_MSEC(500));	/* Allow lower priority thread to run */`
+    # line, comment stating its purpose explicitly. Substituting
+    # `k_yield();` was empirically verified (west build -t run) to fail
+    # test_mutex (the most complex multi-thread case in the mutex_complex
+    # suite) precisely at the checkpoint that should NOT have been able to
+    # lock mutex_1 yet but did; test_mutex_multithread_competition and
+    # test_supervisor_access still pass as usual (test_user_access is
+    # SKIPped on this board regardless of CONFIG_ARCH_HAS_USERSPACE,
+    # unrelated to this injection — same on the reverted side); the
+    # reverted side was confirmed byte-identical via diff and rebuilds/runs
+    # clean.
+    {
+        "id_suffix": "api_substitute_sys_mutex_thread09",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/mutex/sys_mutex/src/main.c",
+        "operator": "c_api_substitute:thread_09:k_sleep(K_MSEC(500));:k_yield();",
+        "target_app": "tests/kernel/mutex/sys_mutex",
+        "board": "native_sim",
+    },
 ]
 
 

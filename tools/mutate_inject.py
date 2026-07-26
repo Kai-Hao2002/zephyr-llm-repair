@@ -305,11 +305,22 @@ def _thread_priority_swap(content: str, hint: Optional[str] = None) -> Optional[
     在檔案裡「第一次出現」的位置，把這兩個位置的文字互換。若兩者在檔案裡
     都只出現一次，就是單純對調這兩個執行緒的優先權；若某個值重複出現多次
     (例如多個執行緒共用同一個優先權)，只有各自的第一次出現會被換掉，讓
-    mutation 的影響範圍精確、可預期。沒有 hint 就直接判定無法套用——這個
-    operator 需要明確知道要對調的兩個字面值，沒有樸素的「檔案裡第一個/
-    第二個優先權」這種通用退回邏輯 (優先權常數在同一個檔案裡出現的順序，
-    不一定對應到「哪兩個執行緒之間對調才會影響排程結果」，樸素猜測很容易
-    像先前 kconfig/reg off-by-one 的教訓一樣抓到不影響建置結果的地方)。
+    mutation 的影響範圍精確、可預期。
+
+    也支援可選的函式/測試案例範圍限定，格式為
+    "<scope_name>@<value_a>:<value_b>" (用 `_find_ztest_block` 鎖定，同時
+    接受 ZTEST 巨集本體或一般 C 函式定義)：當同一個字面值在目標函式之前
+    就已經在檔案裡其他地方出現過時 (例如某個完全不相關的函式也用了
+    `K_PRIO_PREEMPT(0)`)，不加範圍限定的話「檔案裡第一次出現」很容易抓到
+    那個無關的地方而不是我們真正要對調的那一對——這正是實測 (west build
+    -t run 前，先讀 mutate 後的檔案內容確認) 在 msgq_thread_data_passing
+    這個案例上踩到的坑，加上範圍限定才修正。
+
+    沒有 hint 就直接判定無法套用——這個 operator 需要明確知道要對調的兩個
+    字面值，沒有樸素的「檔案裡第一個/第二個優先權」這種通用退回邏輯 (優先
+    權常數在同一個檔案裡出現的順序，不一定對應到「哪兩個執行緒之間對調才
+    會影響排程結果」，樸素猜測很容易像先前 kconfig/reg off-by-one 的教訓
+    一樣抓到不影響建置結果的地方)。
 
     Swaps the literal priority values given to two thread-creation sites
     (e.g. `K_PRIO_PREEMPT(0)` and `K_PRIO_PREEMPT(1)`, or between
@@ -325,6 +336,18 @@ def _thread_priority_swap(content: str, hint: Optional[str] = None) -> Optional[
     occurrences. If a value happens to repeat elsewhere (e.g. several
     threads sharing one priority), only each value's first occurrence is
     touched, keeping the mutation's blast radius precise and predictable.
+
+    Also supports an optional function/test-case scope, in the form
+    "<scope_name>@<value_a>:<value_b>" (resolved via `_find_ztest_block`,
+    which accepts either a ZTEST macro body or a plain C function
+    definition): when the same literal value already appears elsewhere in
+    the file *before* the target function (e.g. some unrelated function
+    also happens to use `K_PRIO_PREEMPT(0)`), an unscoped "first occurrence
+    in the file" search can land on that unrelated spot instead of the pair
+    actually intended — exactly the trap hit empirically (caught by reading
+    the mutated file's content before ever running west build) on the
+    msgq_thread_data_passing case; scoping fixes it.
+
     Without a hint this operator always declines — it needs to be told
     exactly which two literal values to swap; there's no naive "first two
     priority constants in the file" fallback, since their textual order
@@ -334,12 +357,24 @@ def _thread_priority_swap(content: str, hint: Optional[str] = None) -> Optional[
     """
     if not hint:
         return None
-    val_a, _, val_b = hint.partition(":")
+
+    scope_name, sep, rest = hint.partition("@")
+    if sep:
+        block = _find_ztest_block(content, scope_name)
+        if block is None:
+            return None
+        search_start, search_end = block
+        swap_hint = rest
+    else:
+        search_start, search_end = 0, len(content)
+        swap_hint = hint
+
+    val_a, _, val_b = swap_hint.partition(":")
     if not val_b or val_a == val_b:
         return None
 
-    pos_a = content.find(val_a)
-    pos_b = content.find(val_b)
+    pos_a = content.find(val_a, search_start, search_end)
+    pos_b = content.find(val_b, search_start, search_end)
     if pos_a == -1 or pos_b == -1:
         return None
 
@@ -380,6 +415,15 @@ def _find_ztest_block(content: str, test_name: str) -> Optional[tuple]:
     to reliably hit the intended target.
     """
     m = re.search(r'ZTEST(?:_USER)?(?:_F)?\([A-Za-z0-9_]+,\s*' + re.escape(test_name) + r'\)\s*\n\{', content)
+    if not m:
+        # 不少會被注入錯誤的 k_sleep/k_yield 呼叫其實寫在一般的執行緒進入
+        # 函式 (例如 thread_09(void *p1, void *p2, void *p3)) 裡，不是直接
+        # 寫在 ZTEST(...) 巨集本體——退回成比對「一般 C 函式定義」的寫法。
+        # A lot of the k_sleep/k_yield calls worth mutating live in plain
+        # thread-entry functions (e.g. thread_09(void *p1, void *p2, void
+        # *p3)), not directly inside a ZTEST(...) macro body — fall back to
+        # matching a plain C function definition.
+        m = re.search(r'\b' + re.escape(test_name) + r'\s*\([^;{}]*\)\s*\n\{', content)
     if not m:
         return None
     start = m.end()
