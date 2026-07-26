@@ -1,5 +1,6 @@
 # tools/fault_injector.py
 import os
+import re
 import time
 import logging
 from typing import Dict, Any
@@ -97,7 +98,48 @@ class FaultInjector:
         suffix = "revert" if revert else "mutate"
         container_name = f"inject_{case_id}_{suffix}_{int(time.time() * 1000)}"
 
-        mutate_cmd = f"python3 {MUTATE_SCRIPT_CONTAINER_PATH} /zephyrproject/zephyr/{target_file} {operator}"
+        # operator 字串裡的 shell 特殊字元 (例如 thread_priority_swap 的
+        # hint 常常是原始碼裡的字面文字 "K_PRIO_PREEMPT(0):K_PRIO_PREEMPT(1)"，
+        # 含有括號) 需要逐字元跳脫，而不能簡單包一層單引號了事：docker_cmd
+        # 這個字串會先被 pexpect.spawn 用 shlex.split() 解析一次 (組出
+        # exec docker 用的 argv)，之後容器內真正的 bash 才會把 -c 的內容
+        # 當成腳本再解析第二次。這裡本來就已經包在最外層那對單引號 (bash
+        # -c '...') 之內，若在裡面「再」包一層單引號，shlex 並不理解巢狀
+        # 引號，會把我加的這對單引號當成跟最外層同一種、用來切換
+        # 引用狀態的字元，等於把外層引用提早關閉、操作元反而變成「未加
+        # 引號」，實測 (shlex.split() + 真的 exec 一次) 確認引號會被吃掉，
+        # 括號依然原封不動被丟進容器內的 bash 造成語法錯誤。正確做法是
+        # 對括號 (以及其他保留字元) 做反斜線跳脫：shlex 在「已經處於單引號
+        # 模式」時完全不處理任何字元 (不只是引號，反斜線也不例外)，所以
+        # 反斜線能原封不動撐過 shlex.split() 那一層；等真正進入容器內的
+        # bash 重新解析這段未加引號的文字時，反斜線才會被當成「跳脫下一個
+        # 字元」正確處理掉，傳給 python3 的引數會是還原後的原始字面值。
+        # Shell metacharacters inside the operator string (e.g.
+        # thread_priority_swap's hint is often literal source text like
+        # "K_PRIO_PREEMPT(0):K_PRIO_PREEMPT(1)", containing parentheses)
+        # need per-character backslash escaping, not a simple single-quote
+        # wrap: this docker_cmd string first gets parsed once by
+        # pexpect.spawn's shlex.split() (to build the argv for exec'ing
+        # docker), and only then does the real bash inside the container
+        # parse the -c argument as a script a second time. It's already
+        # inside the outermost pair of single quotes (bash -c '...'); adding
+        # ANOTHER pair of single quotes around the operator doesn't nest —
+        # shlex has no concept of nesting and treats my added quotes as the
+        # same kind of quote-state toggle as the outer ones, which
+        # prematurely closes the outer quoting and leaves the operator
+        # effectively unquoted again. Empirically confirmed (shlex.split()
+        # + an actual exec) that the quotes just get consumed and the
+        # parentheses still reach the container's bash bare, causing the
+        # same syntax error. The fix is to backslash-escape the
+        # parentheses (and other reserved characters) instead: shlex, once
+        # already inside single-quote mode, passes every character through
+        # completely untouched (not even backslashes are special inside
+        # single quotes), so the backslashes survive shlex.split() intact;
+        # once the container's bash re-parses this now-unquoted text, the
+        # backslashes are correctly consumed as escape characters, and
+        # python3 receives the original, unescaped literal value.
+        escaped_operator = re.sub(r'([^A-Za-z0-9_./:-])', r'\\\1', operator)
+        mutate_cmd = f"python3 {MUTATE_SCRIPT_CONTAINER_PATH} /zephyrproject/zephyr/{target_file} {escaped_operator}"
         steps = [mutate_cmd]
         if revert:
             steps.append(f"{mutate_cmd} --revert")

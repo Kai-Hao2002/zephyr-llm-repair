@@ -243,6 +243,46 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/gpio/gpio_mmio_latch",
         "board": "qemu_cortex_m3",
     },
+    # 執行緒優先權對調：tests/kernel/sched/schedule_api 的
+    # test_sched_priority.c 裡，test_priority_preemptible_wait_prio 建立
+    # 4 個執行緒，tid[0]/tid[1] 用 K_PRIO_PREEMPT(0)、tid[2]/tid[3] 用
+    # K_PRIO_PREEMPT(1)，並斷言實際執行順序精準等於
+    # tid_chk={0,1,2,3} (memcmp)。把 tid[0] 跟 tid[2] 的優先權對調
+    # (K_PRIO_PREEMPT(0):K_PRIO_PREEMPT(1) 這個 hint 精準命中檔案裡這兩個
+    # 值「各自第一次出現」的位置，不會誤觸 tid[1]/tid[3] 共用的相同字面
+    # 值) 之後，tid[1] 跟 tid[2] 變成同一優先權，且 tid[2] 的等待時間比
+    # tid[1] 短 (K_MSEC(10) vs K_MSEC(20))，照排程規則會搶先於 tid[1]
+    # 執行，讓實際順序偏離 tid_chk。已用 west build -t run 實測驗證
+    # (讀完整日誌)：mutate 端只有這一個 test case 失敗 (斷言訊息精準是
+    # "scheduling priority failed")，同一個 binary 裡其餘 27 個測試案例
+    # 全過；revert 端全部通過、印出 PROJECT EXECUTION SUCCESSFUL。這是
+    # 語法完全合法、但排程結果錯誤的執行期行為缺陷，不是編譯/建置期錯誤。
+    # Thread priority swap: in tests/kernel/sched/schedule_api's
+    # test_sched_priority.c, test_priority_preemptible_wait_prio creates 4
+    # threads — tid[0]/tid[1] at K_PRIO_PREEMPT(0), tid[2]/tid[3] at
+    # K_PRIO_PREEMPT(1) — and asserts the actual run order exactly matches
+    # tid_chk={0,1,2,3} (via memcmp). Swapping tid[0]'s and tid[2]'s
+    # priorities (the "K_PRIO_PREEMPT(0):K_PRIO_PREEMPT(1)" hint pins
+    # exactly each value's first occurrence in the file, so it can't
+    # mis-hit the same literal values shared by tid[1]/tid[3]) makes
+    # tid[1] and tid[2] tie at the same priority, with tid[2] having
+    # waited less time (K_MSEC(10) vs K_MSEC(20)) — per the scheduler's
+    # tie-break rule it now runs ahead of tid[1], diverging from
+    # tid_chk. Empirically verified with west build -t run (full raw log
+    # read): on the mutated side, only this one test case fails (assertion
+    # message is precisely "scheduling priority failed"), the other 27
+    # test cases in the same binary all still pass; the reverted side
+    # passes everything and prints PROJECT EXECUTION SUCCESSFUL. A
+    # syntactically valid but behaviorally wrong runtime scheduling defect,
+    # not a compile/build-time error.
+    {
+        "id_suffix": "thread_priority_swap_sched",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/sched/schedule_api/src/test_sched_priority.c",
+        "operator": "thread_priority_swap:K_PRIO_PREEMPT(0):K_PRIO_PREEMPT(1)",
+        "target_app": "tests/kernel/sched/schedule_api",
+        "board": "native_sim",
+    },
 ]
 
 

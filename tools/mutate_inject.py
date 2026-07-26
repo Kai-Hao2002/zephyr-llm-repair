@@ -289,6 +289,77 @@ def _runtime_remove_null_check(content: str, hint: Optional[str] = None) -> Opti
     return None
 
 
+# ============================================================
+# 執行緒排程類別 mutation operators
+# ============================================================
+
+def _thread_priority_swap(content: str, hint: Optional[str] = None) -> Optional[str]:
+    """把兩個執行緒建立時指定的優先權數值對調 (例如 `K_PRIO_PREEMPT(0)`
+    跟 `K_PRIO_PREEMPT(1)`，或是 `K_PRIO_COOP(n)` 跟 `K_PRIO_PREEMPT(n)`
+    之間)，模擬「優先權重新指派算錯/複製貼上時對調了兩個執行緒」的真實
+    工程失誤，語法上完全合法，但會讓排程順序整個變掉，製造 priority
+    inversion/starvation 一類的執行期錯誤。
+
+    hint 格式為 "<value_a>:<value_b>" (兩者皆為出現在原始碼裡的字面文字，
+    例如 "K_PRIO_PREEMPT(0):K_PRIO_PREEMPT(1)")：分別找出 value_a、value_b
+    在檔案裡「第一次出現」的位置，把這兩個位置的文字互換。若兩者在檔案裡
+    都只出現一次，就是單純對調這兩個執行緒的優先權；若某個值重複出現多次
+    (例如多個執行緒共用同一個優先權)，只有各自的第一次出現會被換掉，讓
+    mutation 的影響範圍精確、可預期。沒有 hint 就直接判定無法套用——這個
+    operator 需要明確知道要對調的兩個字面值，沒有樸素的「檔案裡第一個/
+    第二個優先權」這種通用退回邏輯 (優先權常數在同一個檔案裡出現的順序，
+    不一定對應到「哪兩個執行緒之間對調才會影響排程結果」，樸素猜測很容易
+    像先前 kconfig/reg off-by-one 的教訓一樣抓到不影響建置結果的地方)。
+
+    Swaps the literal priority values given to two thread-creation sites
+    (e.g. `K_PRIO_PREEMPT(0)` and `K_PRIO_PREEMPT(1)`, or between
+    `K_PRIO_COOP(n)` and `K_PRIO_PREEMPT(n)`), modeling a real
+    "priority reassignment miscalculated / two threads' priorities swapped
+    during a copy-paste" engineering mistake — syntactically valid either
+    way, but it reshuffles scheduling order and can produce a genuine
+    priority-inversion/starvation class of runtime bug.
+
+    hint format is "<value_a>:<value_b>" (both are literal source text as
+    they appear in the file, e.g. "K_PRIO_PREEMPT(0):K_PRIO_PREEMPT(1)"):
+    finds the first occurrence of each in the file and swaps just those two
+    occurrences. If a value happens to repeat elsewhere (e.g. several
+    threads sharing one priority), only each value's first occurrence is
+    touched, keeping the mutation's blast radius precise and predictable.
+    Without a hint this operator always declines — it needs to be told
+    exactly which two literal values to swap; there's no naive "first two
+    priority constants in the file" fallback, since their textual order
+    doesn't reliably correspond to "swapping these two actually changes the
+    scheduling outcome" (the same naive-first-match trap documented for the
+    kconfig and dts_reg_offbyone operators above).
+    """
+    if not hint:
+        return None
+    val_a, _, val_b = hint.partition(":")
+    if not val_b or val_a == val_b:
+        return None
+
+    pos_a = content.find(val_a)
+    pos_b = content.find(val_b)
+    if pos_a == -1 or pos_b == -1:
+        return None
+
+    if pos_a < pos_b:
+        first_start, first_val, first_repl = pos_a, val_a, val_b
+        second_start, second_val, second_repl = pos_b, val_b, val_a
+    else:
+        first_start, first_val, first_repl = pos_b, val_b, val_a
+        second_start, second_val, second_repl = pos_a, val_a, val_b
+
+    if first_start + len(first_val) > second_start:
+        return None  # overlapping matches — ambiguous, decline rather than guess
+
+    return (
+        content[:first_start] + first_repl
+        + content[first_start + len(first_val):second_start] + second_repl
+        + content[second_start + len(second_val):]
+    )
+
+
 MUTATION_OPERATORS: Dict[str, Callable[..., Optional[str]]] = {
     "kconfig_remove_select": _kconfig_remove_select,
     "kconfig_invert_depends": _kconfig_invert_depends,
@@ -301,6 +372,7 @@ MUTATION_OPERATORS: Dict[str, Callable[..., Optional[str]]] = {
     "c_typo_macro": _c_typo_macro,
     "runtime_off_by_one": _runtime_off_by_one,
     "runtime_remove_null_check": _runtime_remove_null_check,
+    "thread_priority_swap": _thread_priority_swap,
 }
 
 
