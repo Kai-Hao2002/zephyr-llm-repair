@@ -639,6 +639,91 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/sched/schedule_api",
         "board": "native_sim",
     },
+    # --- Scaling round 5 ---
+    # 這輪先試了 tests/kernel/queue/src/test_queue_contexts.c 的
+    # test_queue_multithread_competition (同一種「最高優先權+等待最久」
+    # 樣式，用執行期運算式 "prio + 4"/"prio + 2" 而非字面 K_PRIO_PREEMPT
+    # 常數，thread_priority_swap 一樣能處理)：mutation 邏輯正確、實測也精準
+    #命中預期的斷言失敗，但後續測試案例 (test_queue_poll_race) 卡住直到
+    # 180 秒逾時，判斷是斷言失敗發生在「被喚起的 worker 執行緒本身」而非主
+    # 執行緒、而 teardown 用的是 k_thread_join(..., K_FOREVER) (無界等待)
+    # 而非 k_thread_abort()，可能導致該執行緒沒有乾淨結束、join 卡死。
+    # 已驗證過的 3 個「wait_prio」案例 (schedule_api/semaphore/sys_sem)
+    # 的斷言都是主執行緒讀取 side-channel 狀態 (陣列索引、semaphore
+    # count)，而 mslab 案例雖然斷言在 worker 執行緒內、但 teardown 用的是
+    # k_thread_abort()——這兩種組合都安全。已放棄這個 queue 目標並還原，
+    # 記錄這個新的風險判斷準則：「斷言寫在 worker 執行緒本身」加上
+    # 「teardown 用 k_thread_join(K_FOREVER)」的組合要避開，除非 join
+    # 帶的是有界逾時 (像下面這個 c_api_substitute 案例的 LONG_TIMEOUT)。
+    # This round first tried
+    # tests/kernel/queue/src/test_queue_contexts.c's
+    # test_queue_multithread_competition (same "highest priority + longest
+    # wait" idiom, expressed via runtime expressions "prio + 4"/"prio + 2"
+    # rather than literal K_PRIO_PREEMPT constants — thread_priority_swap
+    # handles that fine): the mutation applied correctly and empirically
+    # hit exactly the expected assertion failure, but a *later* test case
+    # (test_queue_poll_race) then hung until the 180s timeout. Root cause:
+    # the failing assertion lives inside the woken *worker* thread itself
+    # (not the main thread), and teardown uses an unbounded
+    # k_thread_join(..., K_FOREVER) rather than k_thread_abort() — likely
+    # leaving that thread not cleanly finished, hanging the join forever.
+    # The 3 already-verified "wait_prio" cases (schedule_api/semaphore/
+    # sys_sem) all assert from the *main* thread reading side-channel state
+    # (an array index, a semaphore count); mslab's assertion *is* inside a
+    # worker thread but its teardown uses k_thread_abort() — both
+    # combinations are safe. Abandoned this queue target and reverted;
+    # recording the new risk rule: avoid "assertion lives inside a worker
+    # thread" + "teardown uses unbounded k_thread_join(K_FOREVER)" together,
+    # unless the join carries a bounded timeout (as in the
+    # c_api_substitute case below, which uses LONG_TIMEOUT).
+    #
+    # c_api_substitute #6：tests/kernel/events/event_api 的
+    # test_event_reset_on_wait，第一個 sync point。接收端邏輯
+    # (reset_on_wait()) 完全沒有 zassert，只更新全域變數 test_events/
+    # test_event.events，真正的斷言都在驅動端函式
+    # drive_reset_on_wait()——這是安全樣式；且 teardown 是
+    # `k_thread_join(&treceiver, LONG_TIMEOUT)` (有界 1 秒逾時)，不是無界
+    # K_FOREVER，即使真的卡住也不會拖累整個 suite。接收端執行緒優先權是
+    # K_PRIO_PREEMPT(0)，明顯比 ztest 主執行緒預設的 K_PRIO_COOP(-1)
+    # (CONFIG_ZTEST_THREAD_PRIORITY 預設值) 低。把
+    # `k_sleep(DELAY);  /* Give receiver thread time to run */`
+    # 換成 `k_yield();` 後，接收端完全排不上，導致它在
+    # k_event_post(&test_event, 0x123) 執行「之後」才第一次真正開始等待
+    # ——`k_event_wait_all(..., reset_events=true, ...)` 的 reset 語意讓它
+    # 在開始等待時把已經存在的 0x123 直接清空，而不是像原本 (先等、後
+    # post) 那樣讓 0x123 落在等待期間乾淨地保留下來。實測 (west build
+    # -t run) 精準命中預期的那一行斷言 ("test_event.events == 0x123 is
+    # false")，同一支 binary 裡其餘 10 個案例全過；revert 端 diff 確認
+    # 逐位元組相同、重新建置執行全過。
+    # c_api_substitute #6: tests/kernel/events/event_api's
+    # test_event_reset_on_wait, first sync point. The receiver's own logic
+    # (reset_on_wait()) has zero zassert calls, it just updates the global
+    # test_events/test_event.events state; every actual assertion lives in
+    # the driving function drive_reset_on_wait() — the safe shape. Teardown
+    # is `k_thread_join(&treceiver, LONG_TIMEOUT)` (a bounded 1s timeout),
+    # not unbounded K_FOREVER, so even a genuine hang wouldn't stall the
+    # whole suite. The receiver thread runs at K_PRIO_PREEMPT(0), clearly
+    # lower than the ztest main thread's default K_PRIO_COOP(-1)
+    # (CONFIG_ZTEST_THREAD_PRIORITY's default). Substituting
+    # `k_sleep(DELAY);  /* Give receiver thread time to run */` for
+    # `k_yield();` completely starves the receiver, so it only starts
+    # actually waiting *after* `k_event_post(&test_event, 0x123)` has
+    # already run — `k_event_wait_all(..., reset_events=true, ...)`'s reset
+    # semantics clear the already-set 0x123 the instant it starts waiting,
+    # instead of the original (wait-then-post) ordering where 0x123 lands
+    # cleanly during an active wait and survives. Empirically verified
+    # (west build -t run) to hit exactly the expected assertion line
+    # ("test_event.events == 0x123 is false"), with the other 10 test
+    # cases in the same binary all still passing; the reverted side was
+    # confirmed byte-identical via diff and rebuilds/runs clean.
+    {
+        "id_suffix": "api_substitute_event_reset_on_wait",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/events/event_api/src/main.c",
+        "operator": "c_api_substitute:drive_reset_on_wait:k_sleep(DELAY);:k_yield();",
+        "target_app": "tests/kernel/events/event_api",
+        "board": "native_sim",
+    },
 ]
 
 
