@@ -360,6 +360,102 @@ def _thread_priority_swap(content: str, hint: Optional[str] = None) -> Optional[
     )
 
 
+def _find_ztest_block(content: str, test_name: str) -> Optional[tuple]:
+    """找出 `ZTEST(suite, test_name) { ... }` 這個測試函式本體的 (start, end)
+    範圍 (從左大括號之後，到配對的右大括號為止，用括號計數找配對，不是
+    抓下一個 ZTEST——測試函式內部常有巢狀的 for/if 區塊，樸素抓「下一行
+    `}`」很容易抓到函式中間的區塊結尾)。跟 Kconfig 的 `_find_config_block`
+    是同樣的設計理由：同一個字面文字 (例如 `k_sleep(K_MSEC(100));`) 常常在
+    同一個檔案裡的不同測試案例中重複出現，只鎖定「哪個測試案例」才能精準
+    命中我們真正要注入錯誤的地方。
+
+    Finds the (start, end) span of a `ZTEST(suite, test_name) { ... }` test
+    function's body (from just after the opening brace to the matching
+    closing brace, found via brace counting — not "the next `}`", since
+    test bodies routinely contain nested for/if blocks and a naive "next
+    closing brace" would land on one of those instead). Same rationale as
+    Kconfig's `_find_config_block`: the same literal text (e.g.
+    `k_sleep(K_MSEC(100));`) often repeats verbatim across different test
+    cases in the same file, so pinning to *which test case* is the only way
+    to reliably hit the intended target.
+    """
+    m = re.search(r'ZTEST\([A-Za-z0-9_]+,\s*' + re.escape(test_name) + r'\)\s*\n\{', content)
+    if not m:
+        return None
+    start = m.end()
+    depth = 1
+    i = start
+    while i < len(content) and depth > 0:
+        if content[i] == '{':
+            depth += 1
+        elif content[i] == '}':
+            depth -= 1
+        i += 1
+    if depth != 0:
+        return None
+    return start, i - 1
+
+
+def _c_api_substitute(content: str, hint: Optional[str] = None) -> Optional[str]:
+    """在指定測試案例的函式本體內，把一段呼叫替換成另一段行為相關但語意
+    不同的呼叫 (例如把 `k_sleep(K_MSEC(100));` 換成 `k_yield();`)——兩者
+    語法上都合法，但阻塞/排程語意不同：`k_sleep` 會讓目前的執行緒無條件
+    睡滿指定時間，讓包括「優先權比自己低」的所有就緒執行緒都有機會執行；
+    `k_yield` 只會讓「優先權跟自己相同或更高」的就緒執行緒有機會執行，
+    優先權更低的執行緒完全不會被排到，且沒有其他同/高優先權執行緒時幾乎
+    立刻繼續執行、不會有任何延遲。這個語意差異在有低優先權執行緒依賴
+    `k_sleep` 才能拿到 CPU 時間的地方會製造真正的 starvation。
+
+    hint 格式為 "<test_name>:<old_call>:<new_call>" (以第一個、第二個冒號
+    切開，old_call/new_call 皆為原始碼裡的字面文字，例如
+    "test_sleep_cooperative:k_sleep(K_MSEC(100));:k_yield();")：先用
+    `_find_ztest_block` 鎖定 `ZTEST(suite, test_name)` 這個測試函式本體，
+    只在該函式內找 old_call 的第一次出現並換成 new_call。沒有 hint 就直接
+    判定無法套用——理由與 `thread_priority_swap` 相同：呼叫的字面文字在
+    同一個檔案裡常常重複出現在不同測試案例中，樸素的「檔案裡第一個」
+    退回邏輯很容易抓錯地方。
+
+    Replaces one call with a behaviorally-related but semantically
+    different call (e.g. `k_sleep(K_MSEC(100));` -> `k_yield();`) inside a
+    named test case's function body — both are syntactically valid, but
+    their blocking/scheduling semantics differ: `k_sleep` unconditionally
+    blocks the calling thread for the given duration, letting *every*
+    ready thread run, including ones at a *lower* priority; `k_yield` only
+    lets threads at the *same or higher* priority run, never a lower-
+    priority one, and returns almost immediately if no such thread is
+    ready. Where a lower-priority thread depends on a `k_sleep` call to
+    ever get CPU time, this substitution creates genuine starvation.
+
+    hint format is "<test_name>:<old_call>:<new_call>" (split on the first
+    two colons; old_call/new_call are literal source text, e.g.
+    "test_sleep_cooperative:k_sleep(K_MSEC(100));:k_yield();"): pins the
+    mutation to the `ZTEST(suite, test_name)` function body via
+    `_find_ztest_block`, then replaces the first occurrence of old_call
+    with new_call inside just that function. Without a hint this operator
+    always declines — same reasoning as `thread_priority_swap`: the same
+    literal call text commonly repeats across different test cases in one
+    file, so a naive "first occurrence in the file" fallback is unreliable.
+    """
+    if not hint:
+        return None
+    parts = hint.split(":", 2)
+    if len(parts) != 3:
+        return None
+    test_name, old_call, new_call = parts
+    if not test_name or not old_call:
+        return None
+
+    block = _find_ztest_block(content, test_name)
+    if block is None:
+        return None
+    start, end = block
+
+    idx = content.find(old_call, start, end)
+    if idx == -1:
+        return None
+    return content[:idx] + new_call + content[idx + len(old_call):]
+
+
 MUTATION_OPERATORS: Dict[str, Callable[..., Optional[str]]] = {
     "kconfig_remove_select": _kconfig_remove_select,
     "kconfig_invert_depends": _kconfig_invert_depends,
@@ -373,6 +469,7 @@ MUTATION_OPERATORS: Dict[str, Callable[..., Optional[str]]] = {
     "runtime_off_by_one": _runtime_off_by_one,
     "runtime_remove_null_check": _runtime_remove_null_check,
     "thread_priority_swap": _thread_priority_swap,
+    "c_api_substitute": _c_api_substitute,
 }
 
 

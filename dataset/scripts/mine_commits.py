@@ -283,6 +283,62 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/sched/schedule_api",
         "board": "native_sim",
     },
+    # API 替換 (k_sleep <-> k_yield)：同一個 test app 的
+    # test_sched_timeslice_and_lock.c 裡，test_sleep_cooperative 建立 3 個
+    # 執行緒 (優先權分別比目前執行緒高、相同、低)，呼叫 k_sleep(K_MSEC(100))
+    # 之後斷言 3 個都執行過了。同檔案裡緊接在前面的 test_yield_cooperative
+    # 用的是完全一樣的 setup，只是呼叫 k_yield()，而且明確斷言優先權較低
+    # 的那個執行緒「不會」被執行——這正是 Zephyr 自己的測試套件已經記錄
+    # 下來的 k_sleep/k_yield 語意差異，不用臆測。把 test_sleep_cooperative
+    # 裡的 k_sleep(K_MSEC(100)) 換成 k_yield() (用 test_name 鎖定，因為同一
+    # 個檔案裡 test_lock_preemptible 也有一模一樣字面文字的
+    # k_sleep(K_MSEC(100)) 呼叫，樸素文字比對會抓錯測試案例)，已用
+    # west build -t run 實測驗證兩次、結果完全一致：mutate 端
+    # test_sleep_cooperative 先如預期斷言失敗，但因為那個被餓死的低優先權
+    # 執行緒從未被排程執行、卻仍被 teardown 呼叫 k_thread_abort()，殘留的
+    # 排程狀態接著讓後面幾個共用同一組靜態執行緒陣列的測試案例接連失敗，
+    # 最終在 test_unlock_nested_sched_lock 觸發 Segmentation fault (已是
+    # qemu_oracle.py 既有的 crash pattern)，整個 process 崩潰結束。這是
+    # starvation 造成的真實連鎖失效，比單一斷言失敗更貼近真實世界裡「餓死
+    # 的執行緒污染共用資源、在別處才真正炸掉」的診斷難度；revert 端跑兩次
+    # 都乾淨通過、印出 PROJECT EXECUTION SUCCESSFUL，且用 diff 確認還原後
+    # 的檔案內容跟原始檔逐位元組相同。
+    # API substitution (k_sleep <-> k_yield): in the same test app's
+    # test_sched_timeslice_and_lock.c, test_sleep_cooperative creates 3
+    # threads (priority higher/equal/lower than the current thread), calls
+    # k_sleep(K_MSEC(100)), then asserts all 3 ran. The immediately
+    # preceding test in the same file, test_yield_cooperative, uses the
+    # *identical* setup but calls k_yield() instead, and explicitly asserts
+    # the lower-priority thread does *not* run — this is the exact
+    # k_sleep/k_yield semantic difference already documented by Zephyr's
+    # own test suite, no guesswork needed. Swapping
+    # test_sleep_cooperative's k_sleep(K_MSEC(100)) for k_yield() (pinned
+    # via test_name, since test_lock_preemptible in the same file has a
+    # textually identical k_sleep(K_MSEC(100)) call that a naive text match
+    # would mis-hit) was empirically verified twice with west build -t run,
+    # with identical results both times: on the mutated side,
+    # test_sleep_cooperative fails its assertion as expected first, but
+    # because the starved lower-priority thread was never scheduled yet
+    # still gets k_thread_abort()'d during teardown, the leftover
+    # scheduling state cascades into failing several subsequent test cases
+    # that share the same static thread arrays, ultimately triggering a
+    # Segmentation fault (already one of qemu_oracle.py's crash patterns)
+    # in test_unlock_nested_sched_lock that crashes the whole process. This
+    # is a genuine starvation-driven cascading failure — a harder, more
+    # realistic diagnostic case than an isolated single-assertion failure,
+    # closer to how a starved thread corrupting shared state actually
+    # manifests in real embedded systems (the crash surfaces somewhere
+    # else entirely). The reverted side passed cleanly both runs (PROJECT
+    # EXECUTION SUCCESSFUL), and a diff confirmed the reverted file is
+    # byte-identical to the original.
+    {
+        "id_suffix": "api_substitute_sleep_yield",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/sched/schedule_api/src/test_sched_timeslice_and_lock.c",
+        "operator": "c_api_substitute:test_sleep_cooperative:k_sleep(K_MSEC(100));:k_yield();",
+        "target_app": "tests/kernel/sched/schedule_api",
+        "board": "native_sim",
+    },
 ]
 
 
