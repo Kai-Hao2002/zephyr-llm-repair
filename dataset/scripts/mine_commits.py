@@ -513,6 +513,58 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/mutex/sys_mutex",
         "board": "native_sim",
     },
+    # --- Scaling round 3: dts_reg_offbyone hit a dead end this round (all
+    # candidates checked — mem_attr_heap ruled out statically, arm64
+    # high-address tests use a 4-cell reg format the operator doesn't parse
+    # and don't fit the boundary-off-by-one semantics anyway, the GPIO
+    # aperture-gap idea on qemu_cortex_m3 has no existing consumer test,
+    # and the one remaining zephyr,retained-ram user (mps2_an385's mcuboot
+    # multiple_keys fixture) is a full sysbuild bootloader+app flow, too
+    # complex/risky for the value — so this round's budget went entirely to
+    # the other two operators instead, per discussion with the user.
+    #
+    # c_api_substitute #4：跟前一個 sys_mutex 案例是同一個檔案，但這次是
+    # ZTEST_USER_OR_NOT(mutex_complex, test_mutex) 這個最複雜的多執行緒案例
+    # 本體，而不是獨立的 thread_XX 函式——ZTEST_USER_OR_NOT 是這個檔案自訂
+    # 的巨集 (依 config 展開成 ZTEST_USER 或 ZTEST)，逼得
+    # _find_ztest_block 的比對規則從列舉固定巨集名稱改成「只要名稱裡含
+    # ZTEST」的通用寫法。目標是
+    # `k_sleep(K_MSEC(5));     /* Give thread_12 a chance to block on the
+    # mutex */`：thread_12 (K_PRIO_PREEMPT(12)，明顯比目前執行緒優先權低)
+    # 需要真的排到 CPU 才能呼叫 sys_mutex_lock() 進入等待佇列；換成
+    # k_yield() 後完全排不上，導致主執行緒解鎖兩次後，thread_12 根本沒在
+    # 等待佇列裡，讓後面「private mutex 應該還鎖著」的 K_NO_WAIT 檢查點
+    # 意外拿到鎖。實測 (west build -t run) 精準命中預期的斷言失敗
+    # ("Unexpectedly got lock on private mutex")，其餘 2 個未跳過的案例
+    # 全過；revert 端 diff 確認逐位元組相同、重新建置執行全過。
+    # c_api_substitute #4: same file as the previous sys_mutex case, but
+    # this time the target is the body of
+    # ZTEST_USER_OR_NOT(mutex_complex, test_mutex) itself (the most complex
+    # multi-thread case in the file), not a standalone thread_XX function.
+    # ZTEST_USER_OR_NOT is a locally-defined macro in this file (expands to
+    # ZTEST_USER or ZTEST depending on config), which forced
+    # _find_ztest_block's matching rule to go from enumerating fixed macro
+    # names to a general "anything containing ZTEST" match. Target:
+    # `k_sleep(K_MSEC(5));     /* Give thread_12 a chance to block on the
+    # mutex */` — thread_12 (K_PRIO_PREEMPT(12), clearly lower priority
+    # than the current thread) needs to actually get scheduled to call
+    # sys_mutex_lock() and join the wait queue; substituting k_yield()
+    # starves it entirely, so after the main thread unlocks the private
+    # mutex twice, thread_12 was never in the wait queue, and the later
+    # K_NO_WAIT check that expects the mutex to still be held unexpectedly
+    # succeeds. Empirically verified (west build -t run) to hit exactly the
+    # expected assertion failure ("Unexpectedly got lock on private
+    # mutex"), with the other 2 non-skipped test cases in the binary still
+    # passing; the reverted side was confirmed byte-identical via diff and
+    # rebuilds/runs clean.
+    {
+        "id_suffix": "api_substitute_sys_mutex_test_mutex",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/mutex/sys_mutex/src/main.c",
+        "operator": "c_api_substitute:test_mutex:k_sleep(K_MSEC(5));:k_yield();",
+        "target_app": "tests/kernel/mutex/sys_mutex",
+        "board": "native_sim",
+    },
 ]
 
 

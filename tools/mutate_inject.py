@@ -414,7 +414,18 @@ def _find_ztest_block(content: str, test_name: str) -> Optional[tuple]:
     cases in the same file, so pinning to *which test case* is the only way
     to reliably hit the intended target.
     """
-    m = re.search(r'ZTEST(?:_USER)?(?:_F)?\([A-Za-z0-9_]+,\s*' + re.escape(test_name) + r'\)\s*\n\{', content)
+    # 用 [A-Z_]*ZTEST[A-Z_]* 而不是列舉 ZTEST/ZTEST_USER/ZTEST_F/ZTEST_USER_F
+    # 這幾個標準巨集：有些測試檔案會自訂形如
+    # `#define ZTEST_USER_OR_NOT ZTEST_USER` 這種本地巨集，呼叫慣例
+    # (suite, test_name) 完全相同，只是巨集名稱多了前後綴——只要名稱裡包含
+    # "ZTEST" 就一併認得，不用每遇到一種新的自訂變體就再加一次列舉。
+    # Using [A-Z_]*ZTEST[A-Z_]* instead of enumerating
+    # ZTEST/ZTEST_USER/ZTEST_F/ZTEST_USER_F: some test files define their
+    # own local macro like `#define ZTEST_USER_OR_NOT ZTEST_USER`, with the
+    # exact same (suite, test_name) calling convention, just a
+    # different name — matching anything containing "ZTEST" covers these
+    # without having to special-case every new local variant we run into.
+    m = re.search(r'[A-Z_]*ZTEST[A-Z_]*\([A-Za-z0-9_]+,\s*' + re.escape(test_name) + r'\)\s*\n\{', content)
     if not m:
         # 不少會被注入錯誤的 k_sleep/k_yield 呼叫其實寫在一般的執行緒進入
         # 函式 (例如 thread_09(void *p1, void *p2, void *p3)) 裡，不是直接
