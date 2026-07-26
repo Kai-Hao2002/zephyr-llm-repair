@@ -845,6 +845,59 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/early_sleep",
         "board": "native_sim",
     },
+    # --- Scaling round 8 ---
+    # c_api_substitute #9：tests/kernel/context 的 test_k_yield，一個專門
+    # 測試 k_yield() 本身優先權語意的既有測試。真正的 k_yield() 呼叫跟
+    # zassert 都寫在 worker 函式 k_yield_entry() 裡，同一個函式範圍內有
+    # 兩個一模一樣的 `k_yield();` 呼叫 (一個測「該讓高優先權執行緒跑」，
+    # 一個測「不該讓低優先權執行緒跑」)——為了精準命中第二個而非第一個，
+    # 幫 c_api_substitute 加了 "<test_name>#N" 這種可選的出現次數語法
+    # (N=2)，而不是用內嵌換行的周圍文字當錨點 (那種寫法沒辦法安全穿過
+    # fault_injector.py 那段「先被 shlex 解析、再被容器內 bash 解析」的
+    # 雙重跳脫管線)。已用單元測試確認新語法運作正確、且不影響既有 (無 #N)
+    # 的 hint。實測 (west build -t run，重跑兩次結果一致) 精準命中預期的
+    # 那一行斷言 ("k_yield() yielded to a lower priority thread")——但因為
+    # test_k_yield 的 ZTEST 本體建立完 worker 執行緒後只給了 3 個
+    # semaphore 就直接回傳、沒有 join 等它跑完，這個非同步的斷言失敗被
+    # ztest 歸到「剛好在那個時間點執行」的下一個測試 test_timer_interrupts
+    # 名下，而不是 test_k_yield 自己——訊息本身完全正確地點名
+    # k_yield_entry 跟失敗原因，只是測試套件摘要裡掛的名字對不上，兩次
+    # 重跑結果一致 (皆歸到 test_timer_interrupts)，是決定性、可重現的。
+    # revert 端 diff 確認逐位元組相同、重新建置執行全過 (5/5 皆
+    # PASS，包含 test_timer_interrupts)。
+    # c_api_substitute #9: tests/kernel/context's test_k_yield, an existing
+    # test dedicated to k_yield()'s own priority semantics. The actual
+    # k_yield() calls and zasserts live in the worker function
+    # k_yield_entry(), which has two identical `k_yield();` calls in its
+    # own scope (one testing "should yield to a higher-priority thread",
+    # one testing "should NOT yield to a lower-priority thread") — to
+    # precisely hit the second, not the first, added an optional
+    # "<test_name>#N" occurrence-index syntax to c_api_substitute (N=2)
+    # rather than using surrounding text spanning a newline as an anchor
+    # (which can't safely survive fault_injector.py's two-layer parse:
+    # shlex.split() first, then the real bash inside the container).
+    # Verified the new syntax with unit tests, including that it doesn't
+    # affect existing hints without "#N". Empirically verified (west build
+    # -t run, re-run twice with identical results) to hit exactly the
+    # expected assertion line ("k_yield() yielded to a lower priority
+    # thread") — but because test_k_yield's ZTEST body only gives 3
+    # semaphores and returns immediately after creating the worker thread,
+    # without joining it, this asynchronous assertion failure gets
+    # attributed by ztest to whichever test happens to be running next
+    # (test_timer_interrupts) rather than test_k_yield itself. The message
+    # correctly names k_yield_entry and the real cause; only the test-suite
+    # summary's label is misleading, and it's deterministic (both re-runs
+    # landed on test_timer_interrupts). The reverted side was confirmed
+    # byte-identical via diff and rebuilds/runs clean (5/5 pass, including
+    # test_timer_interrupts).
+    {
+        "id_suffix": "api_substitute_k_yield_lower_prio",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/context/src/main.c",
+        "operator": "c_api_substitute:k_yield_entry#2:k_yield();:k_sleep(K_MSEC(50));",
+        "target_app": "tests/kernel/context",
+        "board": "native_sim",
+    },
 ]
 
 

@@ -490,6 +490,20 @@ def _c_api_substitute(content: str, hint: Optional[str] = None) -> Optional[str]
     always declines — same reasoning as `thread_priority_swap`: the same
     literal call text commonly repeats across different test cases in one
     file, so a naive "first occurrence in the file" fallback is unreliable.
+
+    test_name may carry an optional "#N" suffix (e.g.
+    "k_yield_entry#2:k_yield();:k_sleep(K_MSEC(50));") to target the Nth
+    occurrence of old_call within that function's scope instead of the
+    default first — the same literal call text often appears more than
+    once in one function (e.g. testing "should yield to a higher-priority
+    thread" and "should NOT yield to a lower-priority thread" back to
+    back, both spelled `k_yield();`), and picking the wrong one silently
+    tests the wrong thing. Deliberately not using "extra surrounding text
+    as an anchor" to disambiguate instead, since that text would likely
+    span a newline, and a literal newline can't safely survive
+    `fault_injector.py`'s two-layer parse (shlex.split(), then the real
+    bash inside the container) — bash collapses a backslash immediately
+    followed by a newline as a line-continuation, not a literal newline.
     """
     if not hint:
         return None
@@ -500,14 +514,27 @@ def _c_api_substitute(content: str, hint: Optional[str] = None) -> Optional[str]
     if not test_name or not old_call:
         return None
 
+    occurrence = 1
+    if "#" in test_name:
+        test_name, _, occurrence_str = test_name.rpartition("#")
+        if not test_name or not occurrence_str.isdigit():
+            return None
+        occurrence = int(occurrence_str)
+        if occurrence < 1:
+            return None
+
     block = _find_ztest_block(content, test_name)
     if block is None:
         return None
     start, end = block
 
-    idx = content.find(old_call, start, end)
-    if idx == -1:
-        return None
+    idx = -1
+    search_from = start
+    for _ in range(occurrence):
+        idx = content.find(old_call, search_from, end)
+        if idx == -1:
+            return None
+        search_from = idx + len(old_call)
     return content[:idx] + new_call + content[idx + len(old_call):]
 
 
