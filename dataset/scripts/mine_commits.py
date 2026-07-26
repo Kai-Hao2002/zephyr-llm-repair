@@ -898,6 +898,30 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/context",
         "board": "native_sim",
     },
+    # tests/kernel/pending/src/main.c defines two file-scope preemptible
+    # threads via K_THREAD_DEFINE: TASK_LOW (priority 7) and TASK_HIGH
+    # (priority 5). test_pending_fifo puts 4 items on a shared fifo while
+    # 4 threads (2 cooperative, 2 preemptible) are all pending on it, and
+    # asserts they wake in strict priority order (coop_high, coop_low,
+    # task_high, task_low). Swapping TASK_LOW's/TASK_HIGH's priority
+    # arguments (the bare "7, 0, 0);" / "5, 0, 0);" tail of each
+    # K_THREAD_DEFINE call — unique substrings in this file, so no scope
+    # needed) makes task_high now the lower-priority thread while keeping
+    # its name/body unchanged. An earlier, unrelated assertion in the same
+    # test (fifo *timeout* order) is keyed on each thread's fixed timeout
+    # duration, not priority, so it's unaffected — only the later
+    # priority-ordered wake-up assertion breaks. Empirically this doesn't
+    # surface as a clean zassert failure but as a genuine crash: mutated
+    # build segfaults deterministically (2/2 runs) right at
+    # test_pending_fifo; reverted build passes all 3 tests cleanly.
+    {
+        "id_suffix": "thread_priority_swap_pending_fifo",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/pending/src/main.c",
+        "operator": "thread_priority_swap:7, 0, 0);:5, 0, 0);",
+        "target_app": "tests/kernel/pending",
+        "board": "native_sim",
+    },
 ]
 
 
