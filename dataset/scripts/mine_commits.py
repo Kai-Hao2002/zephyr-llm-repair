@@ -197,6 +197,52 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/fs/fcb",
         "board": "native_sim",
     },
+    # --- Semantic Mutation Operators (thesis-proposal-mandated, 2026-07-26 revision) ---
+    # DTS reg range 邊界 off-by-one：native_sim 上的路已證實走不通——native
+    # 的 host-simulator 驅動 (flash_simulator/eeprom_simulator/otp_emulator)
+    # 全部都用「backing buffer 大小」跟「執行期邊界檢查」共用同一個 DT
+    # 運算式，reg 改多少兩邊就跟著變多少，永遠不會出現真正的 OOB 縫隙；像
+    # fcb/NVS 這類用硬編碼 C 常數的地方，DTS 的 reg 編輯又完全碰不到那段
+    # 邏輯。改探 QEMU 真實 SoC 板子 (qemu_cortex_m3/TI LM3S6965)：
+    # tests/drivers/gpio/gpio_mmio_latch 的 qemu_cortex_m3.overlay 把
+    # sram0 的 reg 縮小成 0xff00 (65280 bytes)，特意在真實 SRAM 頂端保留
+    # 0x100 bytes 給一個假的 "gpio-mmio-latch" 暫存器 (reg=<0x2000ff00 4>)，
+    # 該驅動直接 sys_write32/sys_read32 存取這個位址，完全沒有邊界檢查。
+    # 把這個位址加上 0x100 (= 0x20010000，剛好是這顆 MCU 真實 64KB SRAM
+    # 的實體終點) 之後，經實測 (west build -t run，讀完整日誌) 確認：
+    # mutate 端 5 個 ztest 全部因為 sys_read32 讀到錯誤的值而斷言失敗，印出
+    # "PROJECT EXECUTION FAILED" (qemu_oracle.py 既有的 crash_patterns 之
+    # 一)；revert 端 5 個全過，印出 "PROJECT EXECUTION SUCCESSFUL"。這是一
+    # 個貨真價實的執行期記憶體存取錯誤 (讀寫了不該讀寫的位址)，不是建置期
+    # 語法/binding 檢查擋下來的錯誤。
+    # DTS reg-range-boundary off-by-one: the native_sim route is a proven
+    # dead end — its host-simulator drivers (flash_simulator/
+    # eeprom_simulator/otp_emulator) all derive the backing buffer's size
+    # AND the runtime bounds check from the exact same DT expression, so a
+    # reg edit moves both in lockstep and never opens a real OOB gap; places
+    # using hardcoded C constants instead (fcb, NVS) are never reached by a
+    # DTS reg edit at all. Pivoted to a real QEMU SoC board
+    # (qemu_cortex_m3 / TI LM3S6965) instead:
+    # tests/drivers/gpio/gpio_mmio_latch's qemu_cortex_m3.overlay shrinks
+    # sram0's reg to 0xff00 (65280 bytes), deliberately reserving 0x100
+    # bytes at the top of *real* SRAM for a fake "gpio-mmio-latch" register
+    # (reg=<0x2000ff00 4>) that the driver accesses via a raw, unguarded
+    # sys_write32/sys_read32. Adding 0x100 to that address (-> 0x20010000,
+    # exactly this MCU's true 64KB SRAM end) was empirically verified
+    # (west build -t run, full raw log read): the mutated side fails all 5
+    # ztests on a wrong sys_read32 value and prints "PROJECT EXECUTION
+    # FAILED" (already one of qemu_oracle.py's crash_patterns); the
+    # reverted side passes all 5 and prints "PROJECT EXECUTION SUCCESSFUL".
+    # This is a genuine runtime memory-access fault (reading/writing an
+    # address it shouldn't), not a build-time syntax/binding rejection.
+    {
+        "id_suffix": "dts_gpio_latch_offbyone",
+        "category": "runtime_crash",
+        "target_file": "tests/drivers/gpio/gpio_mmio_latch/boards/qemu_cortex_m3.overlay",
+        "operator": "dts_reg_offbyone:0x2000ff00:0x100",
+        "target_app": "tests/drivers/gpio/gpio_mmio_latch",
+        "board": "qemu_cortex_m3",
+    },
 ]
 
 

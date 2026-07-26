@@ -129,6 +129,61 @@ def _dts_corrupt_reg(content: str, hint: Optional[str] = None) -> Optional[str]:
     return content[:m.start()] + m.group(1) + corrupted + m.group(3) + content[m.end():]
 
 
+def _dts_reg_offbyone(content: str, hint: Optional[str] = None) -> Optional[str]:
+    """對 `reg = <addr size>;` 的位址欄位做一個微小的數值位移 (加上一個
+    delta)，讓它從「精準落在某個實體邊界內」悄悄跨到邊界外——不像
+    `dts_corrupt_reg` 那樣整個刪掉一個 cell (那是結構性、建置期就會被
+    devicetree 綁定檢查擋下來的破壞)，這裡只改一個十六進位數字，模擬
+    「保留區大小算錯/邊界算式漏了一項」這種真實工程失誤，讓一段原本安全
+    的 MMIO 存取變成真正跨出映射範圍的存取，在執行期才會現形。
+
+    hint 格式為 "<addr_hex>:<delta_hex>" (兩者皆須是 `0x` 開頭的十六進位字
+    串)，例如 "0x2000ff00:0x100"：鎖定檔案裡精確等於 addr_hex 的 `reg`
+    位址值，把它加上 delta_hex 後寫回。沒有 hint 時退回「檔案裡第一個
+    `reg = <addr size>;` 的位址值加 1」。
+
+    Nudges the address cell of a `reg = <addr size>;` property by a small
+    numeric delta, so it silently slips past a physical boundary it was
+    supposed to stay within — unlike `dts_corrupt_reg` (which deletes a
+    whole cell, a structural break caught by devicetree binding validation
+    at build time), this only changes one hex value, modeling a real
+    "miscalculated reserved-region size / off-by-one boundary arithmetic"
+    engineering mistake that only manifests as a genuine out-of-bounds
+    access at runtime.
+
+    hint format is "<addr_hex>:<delta_hex>" (both must be `0x`-prefixed
+    hex strings), e.g. "0x2000ff00:0x100": pins the mutation to the `reg`
+    property whose address value exactly equals addr_hex, and adds
+    delta_hex to it. Without a hint, falls back to "the first
+    `reg = <addr size>;` in the file, address value + 1".
+    """
+    if hint:
+        addr_str, _, delta_str = hint.partition(":")
+        if not delta_str:
+            return None
+        try:
+            old_addr = int(addr_str, 16)
+            delta = int(delta_str, 16)
+        except ValueError:
+            return None
+        pattern = re.compile(r'(reg\s*=\s*<\s*)' + re.escape(addr_str) + r'(\s+[^>]+>\s*;)')
+        m = pattern.search(content)
+        if not m:
+            return None
+        new_addr = old_addr + delta
+        return content[:m.start()] + m.group(1) + f"0x{new_addr:x}" + m.group(2) + content[m.end():]
+
+    pattern = re.compile(r'(reg\s*=\s*<\s*)(0x[0-9A-Fa-f]+|\d+)(\s+[^>]+>\s*;)')
+    m = pattern.search(content)
+    if not m:
+        return None
+    old = m.group(2)
+    is_hex = old.lower().startswith("0x")
+    new_val = int(old, 16 if is_hex else 10) + 1
+    new_str = f"0x{new_val:x}" if is_hex else str(new_val)
+    return content[:m.start()] + m.group(1) + new_str + m.group(3) + content[m.end():]
+
+
 # ============================================================
 # C 語法/巨集類別 mutation operators
 # ============================================================
@@ -240,6 +295,7 @@ MUTATION_OPERATORS: Dict[str, Callable[..., Optional[str]]] = {
     "dts_remove_compatible": _dts_remove_compatible,
     "dts_break_phandle": _dts_break_phandle,
     "dts_corrupt_reg": _dts_corrupt_reg,
+    "dts_reg_offbyone": _dts_reg_offbyone,
     "c_remove_semicolon": _c_remove_semicolon,
     "c_remove_closing_brace": _c_remove_closing_brace,
     "c_typo_macro": _c_typo_macro,

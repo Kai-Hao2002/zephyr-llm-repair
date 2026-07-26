@@ -87,6 +87,33 @@ class QemuOracle:
             r"PROJECT EXECUTION FAILED",
         ]
 
+        # ztest 套件真正跑完、且全部通過時印出的總結行——跟上面的
+        # "PROJECT EXECUTION FAILED" 是同一段 ztest 收尾邏輯印出的一對訊息，
+        # 一個代表「跑完了、失敗」，一個代表「跑完了、成功」。native_sim 上
+        # ztest 應用程式跑完後行程會自然結束 (native_sim 的
+        # exit-on-completion 行為)，所以 wait_for_completion=True 時單靠
+        # pexpect.EOF 就能正確判斷 "success"；但在真正的 QEMU SoC 板子
+        # (例如 qemu_cortex_m3) 上，west build -t run 就算 ztest 套件已經跑
+        # 完並印出這行總結，QEMU 進程本身並不會自動退出，只會停在那裡直到
+        # 外部逾時砍掉它——若沒有這個 pattern，wait_for_completion=True 的
+        # 監控迴圈永遠等不到 EOF，只能一路等到 timeout，把一個真正成功的
+        # revert 端誤判成 "timeout"。
+        # ztest's own summary line printed when the suite ran to completion
+        # AND every test passed — the positive counterpart to
+        # "PROJECT EXECUTION FAILED" above, both printed by the same ztest
+        # teardown code. On native_sim, a ztest binary's process exits on
+        # its own once the suite finishes (native_sim's exit-on-completion
+        # behavior), so wait_for_completion=True can correctly land on
+        # "success" via plain pexpect.EOF. On a real QEMU SoC board (e.g.
+        # qemu_cortex_m3), though, `west build -t run` never terminates
+        # QEMU on its own after the suite finishes — it just sits there
+        # until an external timeout kills it — so without this pattern the
+        # wait_for_completion=True loop can never reach EOF and a genuinely
+        # successful revert-side run gets misclassified as "timeout".
+        self.completion_success_patterns = [
+            r"PROJECT EXECUTION SUCCESSFUL",
+        ]
+
         # 某些真實硬體板子不支援 QEMU/native 模擬，west 會印出這句話然後直接
         # 結束，跟目標 commit 是否有 bug 完全無關。若不特別排除，這種情況會
         # 落入 EOF 分支被誤判為「重現成功」。
@@ -134,6 +161,7 @@ class QemuOracle:
         self.success_regex = [re.compile(p) for p in self.success_patterns]
         self.crash_regex = [re.compile(p) for p in self.crash_patterns]
         self.unsupported_regex = [re.compile(p) for p in self.unsupported_patterns]
+        self.completion_success_regex = [re.compile(p) for p in self.completion_success_patterns]
 
     def evaluate(self, command: str, container_name: Optional[str] = None,
                  wait_for_completion: bool = False) -> Dict[str, Any]:
@@ -242,6 +270,24 @@ class QemuOracle:
                         
                         # 如果已經崩潰，跳出迴圈
                         if result["status"] == "crash":
+                            break
+
+                        # 1.5 檢查 ztest 是否已經跑完且全數通過 (Check for a
+                        # definitive "ztest suite completed and passed"
+                        # signal). 這比單純的開機橫幅更強的證據：它代表
+                        # wait_for_completion=True 想等待的「套件真的執行
+                        # 完畢」已經確定發生，不需要再靠行程自然退出
+                        # (EOF) 才能判定 success——在 QEMU SoC 板子上，行程
+                        # 完成測試後往往不會自己結束。
+                        suite_completed = False
+                        for pattern in self.completion_success_regex:
+                            if pattern.search(line):
+                                self.logger.info("偵測到 ztest 套件執行完畢且全數通過！ (ztest suite completed and passed!)")
+                                result["status"] = "success"
+                                suite_completed = True
+                                break
+
+                        if suite_completed:
                             break
 
                         # 2. 檢查是否成功啟動 (Check for success)
