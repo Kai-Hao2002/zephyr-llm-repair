@@ -565,6 +565,80 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/mutex/sys_mutex",
         "board": "native_sim",
     },
+    # --- Scaling round 4 ---
+    # thread_priority_swap #4：tests/kernel/mem_slab/mslab_concept 的
+    # test_mslab_alloc_wait_prio 跟先前兩個 "wait_prio" 案例是同一種樣式
+    # (最高優先權、等待最久的執行緒先拿到資源)，這次是 k_mem_slab_alloc。
+    # tid[0] 是「低優先權，預期逾時拿不到 block (斷言 -EAGAIN)」
+    # (K_PRIO_PREEMPT(1))，tid[1]/tid[2] 是「高優先權，預期成功拿到」
+    # (K_PRIO_PREEMPT(0))。把 tid[0] 跟 tid[1] 的優先權對調後，tid[0]
+    # 變成優先權最高、且從一開始 (K_NO_WAIT 建立，比 tid[1]/tid[2] 的
+    # K_MSEC(10)/K_MSEC(20) 延遲都早) 就在等，理當搶到唯一釋出的
+    # block——但它執行的函式主體 (tmslab_alloc_wait_timeout) 固定寫死斷言
+    # -EAGAIN，於是斷言失敗。實測 (west build -t run) 精準命中預期的
+    # 那一行斷言；revert 端 diff 確認逐位元組相同、重新建置執行通過 (這個
+    # test app 本來就只有這一個測試案例)。
+    # thread_priority_swap #4: tests/kernel/mem_slab/mslab_concept's
+    # test_mslab_alloc_wait_prio has the same "highest priority, longest
+    # waiting wins" idiom as two earlier cases, this time for
+    # k_mem_slab_alloc. tid[0] is "low priority, expected to time out"
+    # (K_PRIO_PREEMPT(1), asserts -EAGAIN); tid[1]/tid[2] are "high
+    # priority, expected to succeed" (K_PRIO_PREEMPT(0)). Swapping tid[0]'s
+    # and tid[1]'s priorities makes tid[0] both the highest priority AND
+    # the earliest waiter (created with K_NO_WAIT, ahead of tid[1]/tid[2]'s
+    # K_MSEC(10)/K_MSEC(20) delays), so it should now win the single freed
+    # block — but its thread body (tmslab_alloc_wait_timeout) still
+    # hard-codes an assertion expecting -EAGAIN, so the assertion fails.
+    # Empirically verified (west build -t run) to hit exactly that
+    # assertion line; the reverted side was confirmed byte-identical via
+    # diff and rebuilds/runs clean (this test app has only this one test
+    # case).
+    {
+        "id_suffix": "thread_priority_swap_mslab",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/mem_slab/mslab_concept/src/test_mslab_alloc_wait.c",
+        "operator": "thread_priority_swap:K_PRIO_PREEMPT(1):K_PRIO_PREEMPT(0)",
+        "target_app": "tests/kernel/mem_slab/mslab_concept",
+        "board": "native_sim",
+    },
+    # c_api_substitute #5：同一個 test_sched_timeslice_and_lock.c 檔案，
+    # 但這次是反方向的代換——test_unlock_preemptible 原本就用
+    # `k_yield();` (註解「ensure threads of equal priority can run」)，
+    # 緊接著斷言 tdata[2] (低優先權執行緒) 「沒有」被執行到
+    # (executed == 0)。把 k_yield() 換成 k_sleep(K_MSEC(100)) 之後，
+    # tdata[2] 反而會真的被排到、變成 executed == 1，讓「不應該執行」的
+    # 斷言失敗——這是跟先前 api_substitute_sleep_yield 完全對稱、方向相反
+    # 的語意變異 (那個是拿掉本該有的排程機會，這個是多給了不該有的排程
+    # 機會)，展示同一個 operator 兩個方向都能製造真正的行為缺陷。實測
+    # (west build -t run) 只有 test_unlock_preemptible 這一個案例失敗，
+    # 同一支 binary 裡其餘 27 個案例 (含 test_unlock_nested_sched_lock，
+    # 結構非常相似但沒被動到) 全過；revert 端 diff 確認逐位元組相同、
+    # 重新建置執行全過。
+    # c_api_substitute #5: same file as api_substitute_sleep_yield, but
+    # the reverse substitution direction — test_unlock_preemptible
+    # originally uses `k_yield();` (comment: "ensure threads of equal
+    # priority can run"), followed immediately by an assertion that
+    # tdata[2] (the lower-priority thread) did *not* run
+    # (executed == 0). Substituting k_sleep(K_MSEC(100)) instead lets
+    # tdata[2] actually get scheduled and run, flipping it to
+    # executed == 1 and failing the "should not have run" assertion — the
+    # exact mirror image of api_substitute_sleep_yield (that one removed a
+    # scheduling opportunity that should have existed; this one grants one
+    # that shouldn't), demonstrating the same operator produces genuine
+    # behavioral defects in both directions. Empirically verified (west
+    # build -t run) that only test_unlock_preemptible fails, while the
+    # other 27 test cases in the same binary (including
+    # test_unlock_nested_sched_lock, a structurally very similar but
+    # untouched neighbor) all still pass; the reverted side was confirmed
+    # byte-identical via diff and rebuilds/runs clean.
+    {
+        "id_suffix": "api_substitute_unlock_preemptible",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/sched/schedule_api/src/test_sched_timeslice_and_lock.c",
+        "operator": "c_api_substitute:test_unlock_preemptible:k_yield();:k_sleep(K_MSEC(100));",
+        "target_app": "tests/kernel/sched/schedule_api",
+        "board": "native_sim",
+    },
 ]
 
 
