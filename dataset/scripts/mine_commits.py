@@ -724,6 +724,75 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/events/event_api",
         "board": "native_sim",
     },
+    # --- Scaling round 6 ---
+    # thread_priority_swap #5：跟 tests/kernel/mutex/sys_mutex 已經用過的
+    # 兩個檔案是同一個 test app，這次是 thread_competition.c 的
+    # test_mutex_multithread_competition——又是「最高優先權+等待最久」
+    # 樣式 (這次是 sys_mutex_lock)，用執行期運算式 "prio + 4"/"prio + 2"。
+    # 這次特別確認過安全性：3 個 worker 執行緒本體
+    # (low_prio_wait_for_mutex 等) 完全沒有 zassert，只寫入全域 flag[]
+    # 陣列，真正的斷言都在主執行緒 (ZTEST 本體) 讀取 flag[]——即使
+    # teardown 用的是無界 k_thread_join(K_FOREVER)，因為 worker 執行緒
+    # 本身不會斷言失敗，也就不會有「執行緒沒有乾淨結束」的風險，跟上一輪
+    # queue 案例踩到的陷阱不同。把 thread_high_data1 (第一個 "prio + 2")
+    # 跟 thread_low_data ("prio + 4") 對調後，實測 (west build -t run)
+    # 精準命中一個乾淨的斷言失敗 (flag[1] == HIGH_T2)，其餘
+    # test_mutex/test_supervisor_access 兩個案例照常通過；revert 端 diff
+    # 確認逐位元組相同、重新建置執行全過。
+    # thread_priority_swap #5: same test app as two already-used
+    # tests/kernel/mutex/sys_mutex files, this time
+    # thread_competition.c's test_mutex_multithread_competition — another
+    # "highest priority + longest wait" idiom (this time for
+    # sys_mutex_lock), expressed via runtime expressions "prio + 4"/
+    # "prio + 2". Specifically verified safety this time: the 3 worker
+    # thread bodies (low_prio_wait_for_mutex etc.) have zero zassert calls,
+    # they only write to the global flag[] array; every actual assertion
+    # lives in the main thread (the ZTEST body itself) reading flag[] —
+    # so even though teardown uses unbounded k_thread_join(K_FOREVER),
+    # there's no "worker thread doesn't cleanly finish" risk since no
+    # worker thread can ever fail its own assertion, unlike last round's
+    # queue trap. Swapping thread_high_data1's priority (the first
+    # "prio + 2") with thread_low_data's ("prio + 4") was empirically
+    # verified (west build -t run) to hit a clean assertion failure
+    # (flag[1] == HIGH_T2), with test_mutex/test_supervisor_access still
+    # passing normally; the reverted side was confirmed byte-identical via
+    # diff and rebuilds/runs clean.
+    {
+        "id_suffix": "thread_priority_swap_thread_competition",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/mutex/sys_mutex/src/thread_competition.c",
+        "operator": "thread_priority_swap:prio + 4:prio + 2",
+        "target_app": "tests/kernel/mutex/sys_mutex",
+        "board": "native_sim",
+    },
+    # c_api_substitute #7：同一個 test_sched_timeslice_and_lock.c 檔案，
+    # 這次是 test_lock_preemptible——結構跟 test_sleep_cooperative 幾乎
+    # 一樣 (k_sched_lock() 鎖住排程器、產生 3 個執行緒、確認都還沒執行，
+    # 再靠 k_sleep(K_MSEC(100)) 讓包括低優先權的 tdata[2] 在內全部執行)，
+    # 但這次是透過排程器鎖定/解鎖 (k_sched_lock/k_sched_unlock) 而非直接
+    # 設定執行緒優先權來測試。換成 k_yield() 後，低優先權的 tdata[2]
+    # 依然排不上，讓「全部都執行過」的斷言失敗。實測 (west build -t run)
+    # 只有 test_lock_preemptible 這一個案例失敗，同一支 binary 裡其餘 27
+    # 個案例全過；revert 端 diff 確認逐位元組相同、重新建置執行全過。
+    # c_api_substitute #7: same file as several earlier cases, this time
+    # test_lock_preemptible — structurally almost identical to
+    # test_sleep_cooperative (k_sched_lock() locks the scheduler, spawns 3
+    # threads, confirms none ran yet, then k_sleep(K_MSEC(100)) lets all of
+    # them run including the lower-priority tdata[2]), but exercised via
+    # scheduler lock/unlock rather than direct thread-priority assignment.
+    # Substituting k_yield() still starves the lower-priority tdata[2],
+    # failing the "all threads ran" assertion. Empirically verified (west
+    # build -t run) that only test_lock_preemptible fails, with the other
+    # 27 test cases in the same binary all still passing; the reverted
+    # side was confirmed byte-identical via diff and rebuilds/runs clean.
+    {
+        "id_suffix": "api_substitute_lock_preemptible",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/sched/schedule_api/src/test_sched_timeslice_and_lock.c",
+        "operator": "c_api_substitute:test_lock_preemptible:k_sleep(K_MSEC(100));:k_yield();",
+        "target_app": "tests/kernel/sched/schedule_api",
+        "board": "native_sim",
+    },
 ]
 
 
