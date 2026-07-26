@@ -379,7 +379,7 @@ def _find_ztest_block(content: str, test_name: str) -> Optional[tuple]:
     cases in the same file, so pinning to *which test case* is the only way
     to reliably hit the intended target.
     """
-    m = re.search(r'ZTEST\([A-Za-z0-9_]+,\s*' + re.escape(test_name) + r'\)\s*\n\{', content)
+    m = re.search(r'ZTEST(?:_USER)?(?:_F)?\([A-Za-z0-9_]+,\s*' + re.escape(test_name) + r'\)\s*\n\{', content)
     if not m:
         return None
     start = m.end()

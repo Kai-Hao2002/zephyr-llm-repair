@@ -339,6 +339,103 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/sched/schedule_api",
         "board": "native_sim",
     },
+    # --- Scaling round: applying the 3 semantic operators to new targets for diversity ---
+    # thread_priority_swap #2：tests/kernel/semaphore/semaphore 的
+    # test_sem_take_multiple 建立 4 個不同優先權的執行緒搶同一個
+    # multiple_thread_sem，測試依序驗證「哪個優先權/等待時間組合的執行緒
+    # 先拿到 sem」。把 sem_tid_1 (K_PRIO_PREEMPT(3)，"low") 跟 sem_tid_3
+    # (K_PRIO_PREEMPT(1)，"high_prio_long"，第一個出現的 K_PRIO_PREEMPT(1)，
+    # sem_tid_4 也用同一個值但不會被誤觸) 的優先權對調，實測 (west build
+    # -t run) 只讓 test_sem_take_multiple 這一個案例失敗，同一支 binary
+    # 裡其餘 20 個案例全過；revert 端用 diff 確認還原後與原始檔逐位元組
+    # 相同、重新建置執行也全部通過。
+    # thread_priority_swap #2: tests/kernel/semaphore/semaphore's
+    # test_sem_take_multiple creates 4 threads at distinct priorities all
+    # racing for the same multiple_thread_sem, with the test asserting a
+    # precise priority/wait-time-based winner order at each step. Swapping
+    # sem_tid_1's (K_PRIO_PREEMPT(3), "low") priority with sem_tid_3's
+    # (K_PRIO_PREEMPT(1), "high_prio_long" — the first occurrence of
+    # K_PRIO_PREEMPT(1); sem_tid_4 uses the same value but isn't touched)
+    # was empirically verified (west build -t run) to fail exactly
+    # test_sem_take_multiple while the other 20 test cases in the same
+    # binary all still pass; the reverted side was confirmed byte-identical
+    # to the original via diff and rebuilds/runs clean.
+    {
+        "id_suffix": "thread_priority_swap_semaphore",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/semaphore/semaphore/src/main.c",
+        "operator": "thread_priority_swap:K_PRIO_PREEMPT(3):K_PRIO_PREEMPT(1)",
+        "target_app": "tests/kernel/semaphore/semaphore",
+        "board": "native_sim",
+    },
+    # dts_reg_offbyone #2：tests/drivers/retained_mem/api 的
+    # qemu_cortex_m3.overlay 跟 gpio_mmio_latch 是同一種手法——把 sram0 的
+    # reg 縮小成 DT_SIZE_K(60)，在真實 64KB SRAM 頂端保留 0x20 bytes 給
+    # "zephyr,retained-ram" 裝置 (reg=<0x2000ffe0 0x20>)。這個驅動
+    # (drivers/retained_mem/retained_mem_zephyr_ram.c) 的 read/write/clear
+    # 直接對 DT_REG_ADDR 轉型出來的 raw pointer 做 memcpy/memset，完全沒有
+    # 邊界檢查。把位址加上自己的大小 (0x20) 推到 0x20010000 (這顆 MCU 真實
+    # SRAM 的實體終點，跟 gpio_mmio_latch 案例是同一個邊界) 之後，實測
+    # (west build -t run) 確認 test_read_write/test_clear 兩個會實際做
+    # memcpy 的案例都因為讀回資料對不上而斷言失敗，不涉及記憶體存取的
+    # test_size 則不受影響、正常通過；revert 端 diff 確認逐位元組相同、
+    # 重新建置執行三個案例全過。
+    # dts_reg_offbyone #2: tests/drivers/retained_mem/api's
+    # qemu_cortex_m3.overlay uses the exact same technique as
+    # gpio_mmio_latch — sram0's reg is shrunk to DT_SIZE_K(60), reserving
+    # 0x20 bytes at the top of *real* 64KB SRAM for a "zephyr,retained-ram"
+    # device (reg=<0x2000ffe0 0x20>). Its driver
+    # (drivers/retained_mem/retained_mem_zephyr_ram.c) does raw
+    # memcpy/memset straight through a pointer cast from DT_REG_ADDR, with
+    # zero bounds checking. Adding the region's own size (0x20) to push the
+    # address to 0x20010000 (this MCU's true SRAM end — the same boundary
+    # as the gpio_mmio_latch case) was empirically verified (west build -t
+    # run): both test_read_write and test_clear (which actually memcpy)
+    # fail on a data mismatch, while test_size (no memory access) is
+    # unaffected and passes; the reverted side was confirmed byte-identical
+    # via diff and all 3 test cases pass on rebuild.
+    {
+        "id_suffix": "dts_retained_mem_offbyone",
+        "category": "runtime_crash",
+        "target_file": "tests/drivers/retained_mem/api/boards/qemu_cortex_m3.overlay",
+        "operator": "dts_reg_offbyone:0x2000ffe0:0x20",
+        "target_app": "tests/drivers/retained_mem/api",
+        "board": "qemu_cortex_m3",
+    },
+    # c_api_substitute #2：tests/kernel/mutex/mutex_api 的
+    # test_mutex_recursive (test_mutex_apis.c) 遞迴鎖住一個 mutex 兩次，
+    # 期間讓一個優先權 K_PRIO_PREEMPT(12) 的等待執行緒 (明顯比預設的 ztest
+    # 主執行緒優先權低) 卡在 mutex 上；主執行緒解鎖兩次後呼叫
+    # `k_sleep(K_MSEC(1));` (註解直接寫「Give thread_waiter a chance to
+    # get the mutex」)，才斷言 `thread_ret == TC_PASS`。換成 `k_yield();`
+    # 後，這個明顯較低優先權的等待執行緒完全排不上，跟
+    # test_sched_timeslice_and_lock.c 的第一個案例是同一種語意差異，但這次
+    # 影響範圍更乾淨：實測 (west build -t run) 只有 test_mutex_recursive
+    # 這一個案例失敗，同一支 binary 裡橫跨 mutex_api/mutex_api_1cpu 兩個
+    # suite 共 10 個其他案例全過，沒有級聯效應；revert 端 diff 確認逐位元
+    # 組相同、重新建置執行全過。
+    # c_api_substitute #2: tests/kernel/mutex/mutex_api's
+    # test_mutex_recursive (test_mutex_apis.c) locks a mutex recursively
+    # twice while a K_PRIO_PREEMPT(12) waiter thread (clearly lower
+    # priority than the default ztest main thread) blocks on it; after
+    # unlocking twice, the main thread calls `k_sleep(K_MSEC(1));` (the
+    # comment literally reads "Give thread_waiter a chance to get the
+    # mutex") before asserting `thread_ret == TC_PASS`. Substituting
+    # `k_yield();` starves that clearly-lower-priority waiter entirely —
+    # the same semantic gap as the first api_substitute case, but this time
+    # with a much cleaner blast radius: empirically verified (west build -t
+    # run) that only test_mutex_recursive fails, while the other 10 test
+    # cases spanning the mutex_api/mutex_api_1cpu suites in the same binary
+    # all still pass — no cascading failure this time; the reverted side
+    # was confirmed byte-identical via diff and rebuilds/runs clean.
+    {
+        "id_suffix": "api_substitute_mutex_recursive",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/mutex/mutex_api/src/test_mutex_apis.c",
+        "operator": "c_api_substitute:test_mutex_recursive:k_sleep(K_MSEC(1));:k_yield();",
+        "target_app": "tests/kernel/mutex/mutex_api",
+        "board": "native_sim",
+    },
 ]
 
 
