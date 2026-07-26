@@ -793,6 +793,58 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/sched/schedule_api",
         "board": "native_sim",
     },
+    # --- Scaling round 7 ---
+    # 這輪 thread_priority_swap 沒找到新目標：complex_inversion.c 的 5
+    # 執行緒優先權繼承鏈太複雜且優先權是用 CREATE_PARTICIPANT_THREAD(id,
+    # pri) 巨集呼叫的純數字參數，直接對調兩個完整呼叫文字只會讓「哪一行先
+    # 執行」互換、優先權指派本身不變 (等同於先前 mem_attr_heap 那次 #define
+    # 換位置的無效 swap 陷阱)；tests/kernel/stack/stack 的
+    # wait_prio 案例斷言在 worker 執行緒內、又是無界 k_thread_join，符合
+    # 上一輪歸納的卡住風險組合，直接跳過沒有實測浪費建置週期。
+    # No new thread_priority_swap target this round: complex_inversion.c's
+    # 5-thread priority-inheritance chain is too intricate, and its
+    # priorities are passed as bare numeric arguments to a
+    # CREATE_PARTICIPANT_THREAD(id, pri) macro call — swapping the two
+    # full macro-call texts would just swap *which line runs first*, not
+    # the actual priority assignment (the same "swap NAME+VALUE together"
+    # trap identified with mem_attr_heap earlier). tests/kernel/stack/
+    # stack's wait_prio case has its assertions inside worker threads
+    # combined with an unbounded k_thread_join teardown — exactly the
+    # hang-risk combination identified last round — skipped without
+    # burning a build cycle on it.
+    #
+    # c_api_substitute #8：tests/kernel/early_sleep 的唯一測試案例
+    # test_early_sleep。共用函式 ticks_to_sleep() 裡的
+    # `k_sleep(K_MSEC(k_ticks_to_ms_floor64(ticks)));`
+    # 同時被兩個 SYS_INIT 鉤子 (POST_KERNEL/APPLICATION 階段) 跟 ZTEST
+    # 本體共用，換成 k_yield() 後，POST_KERNEL 階段那次呼叫實際睡眠時間
+    # 趨近於 0，讓「睡眠時長至少達到要求」的斷言 (在 ZTEST 本體檢查
+    # SYS_INIT 階段記錄下來的結果) 先失敗，比原本設計要測的「低優先權
+    # 執行緒有沒有跑到」那個斷言更早觸發——這個 test app 本來就只有一個
+    # 測試案例，仍是乾淨、單一、確定性的失敗。實測 (west build -t run)
+    # 精準命中預期；revert 端 diff 確認逐位元組相同、重新建置執行通過。
+    # c_api_substitute #8: tests/kernel/early_sleep's sole test case,
+    # test_early_sleep. The shared helper function ticks_to_sleep()'s
+    # `k_sleep(K_MSEC(k_ticks_to_ms_floor64(ticks)));` is called from both
+    # two SYS_INIT hooks (POST_KERNEL/APPLICATION stages) and the ZTEST
+    # body itself; substituting k_yield() means the POST_KERNEL-stage call
+    # sleeps for approximately zero time, so the "slept at least the
+    # required duration" assertion (checked later in the ZTEST body
+    # against the SYS_INIT-recorded result) fires first — earlier than the
+    # test's own "did the lower-priority thread run" assertion it was
+    # originally designed to exercise. This test app has only this one
+    # test case, so it's still a clean, single, deterministic failure.
+    # Empirically verified (west build -t run) to hit exactly the expected
+    # outcome; the reverted side was confirmed byte-identical via diff and
+    # rebuilds/runs clean.
+    {
+        "id_suffix": "api_substitute_early_sleep",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/early_sleep/src/main.c",
+        "operator": "c_api_substitute:ticks_to_sleep:k_sleep(K_MSEC(k_ticks_to_ms_floor64(ticks)));:k_yield();",
+        "target_app": "tests/kernel/early_sleep",
+        "board": "native_sim",
+    },
 ]
 
 
