@@ -1006,6 +1006,59 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/device",
         "board": "native_sim",
     },
+    # A third, cleaner instance of the "ordering mechanism" vein, this time
+    # outside tests/kernel entirely: tests/lib/devicetree/devices/src/main.c.
+    # All 12 devices here share the SAME generic dev_init() function, which
+    # just appends device_handle_get(dev) to a shared init_order[] array —
+    # no per-device identifying constant needed, the array itself records
+    # *which* device ran at each position. test_init_order asserts the
+    # array matches DEVICE_DT_DEFINE priority order exactly, position by
+    # position. Swapped TEST_I2C's and TEST_DEVA's POST_KERNEL priorities
+    # (10 <-> 20, anchored on the unique full call tails "POST_KERNEL, 10,
+    # NULL);" / "POST_KERNEL, 20, NULL);" since bare "10"/"20" would risk
+    # matching other devices' priority values or unrelated numbers) so
+    # TEST_DEVA now inits before TEST_I2C. Mutated build deterministically
+    # fails test_init_order at the very first affected position
+    # ("init_order[1] not equal to DEV_HDL(TEST_I2C)", 2/2 runs); the other
+    # 5 tests in the suite (test_get_or_null, test_init_get, test_injected,
+    # test_requires, test_supports) all pass. Reverted build passes the
+    # full 6-test suite cleanly.
+    {
+        "id_suffix": "thread_priority_swap_devicetree_init_order",
+        "category": "runtime_crash",
+        "target_file": "tests/lib/devicetree/devices/src/main.c",
+        "operator": "thread_priority_swap:POST_KERNEL, 10, NULL);:POST_KERNEL, 20, NULL);",
+        "target_app": "tests/lib/devicetree/devices",
+        "board": "native_sim",
+    },
+    # A fourth instance of the vein, back in test_driver_init.c (same file
+    # as the DEVICE_DEFINE-priority target above) but targeting the sibling
+    # test_device_init_level instead of test_device_init_priority.
+    # my_driver_level_1/2/3 each write their own hardcoded
+    # LEVEL_PRE_KERNEL_1/2/LEVEL_POST_KERNEL constant into
+    # init_level_sequence[], DEVICE_DEFINE'd at PRE_KERNEL_1/PRE_KERNEL_2/
+    # POST_KERNEL respectively; test_device_init_level expects [1,2,3].
+    # Swapped level_1's and level_2's DEVICE_DEFINE *level* arguments
+    # (anchored on "NULL, NULL, NULL, PRE_KERNEL_1," / "NULL, NULL, NULL,
+    # PRE_KERNEL_2," — bare PRE_KERNEL_1/PRE_KERNEL_2 each appear 3x in
+    # this file: once in a #define, once inside a LEVEL_PRE_KERNEL_N write,
+    # once in the actual DEVICE_DEFINE call, so needed the longer
+    # positional-argument prefix to disambiguate) so level_2 now inits
+    # first (pre-kernel-1) and level_1 second (pre-kernel-2), giving
+    # sequence [2, 1, 3]. Mutated build deterministically fails
+    # test_device_init_level ("init sequence is not correct" at line 333,
+    # 2/2 runs) while test_device_init_priority (the other mutation in this
+    # same file, different DEVICE_DEFINE block) is unaffected — confirmed
+    # the two catalog entries coexist independently. Reverted build passes
+    # the full 25-test device suite cleanly.
+    {
+        "id_suffix": "thread_priority_swap_device_init_level",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/device/src/test_driver_init.c",
+        "operator": "thread_priority_swap:NULL, NULL, NULL, PRE_KERNEL_1,:NULL, NULL, NULL, PRE_KERNEL_2,",
+        "target_app": "tests/kernel/device",
+        "board": "native_sim",
+    },
 ]
 
 
