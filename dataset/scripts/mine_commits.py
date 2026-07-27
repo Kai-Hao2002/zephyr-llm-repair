@@ -1059,6 +1059,63 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/device",
         "board": "native_sim",
     },
+    # Same file/test as the entry above (test_driver_init.c's
+    # test_device_init_level), but the specific PRE_KERNEL_1 <-> POST_KERNEL
+    # cross-boundary combination requested explicitly (as opposed to the
+    # within-pre-kernel PRE_KERNEL_1 <-> PRE_KERNEL_2 swap above): swapped
+    # my_driver_level_1's (PRE_KERNEL_1) and my_driver_level_3's
+    # (POST_KERNEL) DEVICE_DEFINE level arguments. Anchoring note: the first
+    # occurrence of the bare tail "NULL, NULL, NULL, POST_KERNEL," in this
+    # file happens to be level_3's own line (the later my_driver_priority_N
+    # / fakedomain_N occurrences all have a numeric priority argument
+    # immediately after POST_KERNEL, so their text doesn't match this exact
+    # substring) — confirmed via grep before relying on it, no @scope
+    # needed. Sequence becomes [3, 2, 1] (level_3 now inits first writing
+    # 3, level_2 unchanged writing 2, level_1 now inits last writing 1).
+    # Mutated build deterministically fails test_device_init_level (2/2
+    # runs); coexists independently with the other two mutations already
+    # registered against this same file. Reverted build passes cleanly.
+    {
+        "id_suffix": "thread_priority_swap_device_init_level_cross_boundary",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/device/src/test_driver_init.c",
+        "operator": "thread_priority_swap:NULL, NULL, NULL, PRE_KERNEL_1,:NULL, NULL, NULL, POST_KERNEL,",
+        "target_app": "tests/kernel/device",
+        "board": "native_sim",
+    },
+    # A much higher-stakes instance of the same vein:
+    # tests/subsys/pm/power_mgmt/src/main.c's test_device_order. Device A
+    # (PRE_KERNEL_1), device B (PRE_KERNEL_2), and device C (POST_KERNEL)
+    # are 3 PM-aware devices whose init level determines the actual
+    # suspend/resume traversal order under CONFIG_PM_DEVICE_SYSTEM_MANAGED
+    # (resume runs in forward init order A->B->C, suspend in reverse
+    # C->B->A) — device_b_pm_action's own PM callback checks device A's and
+    # C's *live* PM state at the moment B suspends/resumes, expecting
+    # A-active/C-suspended in both directions per the correct order.
+    # Swapped device B's and device C's DEVICE_DT_DEFINE levels (PRE_KERNEL_2
+    # <-> POST_KERNEL, anchored on the call tail plus
+    # CONFIG_KERNEL_INIT_PRIORITY_DEVICE — device A's own PRE_KERNEL_1 tail
+    # is *not* unique on its own, since an unrelated no-PM device_e uses an
+    # identical line earlier in the file, so device A was deliberately left
+    # untouched to avoid that anchor ambiguity rather than fighting it).
+    # New order (A, C, B) means when B now suspends/resumes third instead
+    # of second, C's state is wrong in both directions. Unlike every other
+    # ordering-mechanism target so far, this doesn't surface as a clean
+    # zassert-then-continue failure: the assertion fires from *inside* a PM
+    # action callback running in the idle thread's context, and Zephyr
+    # escalates that to a genuine kernel panic ("ZEPHYR FATAL ERROR 4:
+    # Kernel panic on CPU 0"), not just a ztest-level failure — a more
+    # severe, crash-category-appropriate manifestation than the pure
+    # device/init-order examples above. Verified deterministic (2/2 runs,
+    # identical panic); reverted build passes the full 8-test suite cleanly.
+    {
+        "id_suffix": "thread_priority_swap_pm_device_order",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/pm/power_mgmt/src/main.c",
+        "operator": "thread_priority_swap:PRE_KERNEL_2, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,:POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,",
+        "target_app": "tests/subsys/pm/power_mgmt",
+        "board": "native_sim",
+    },
 ]
 
 

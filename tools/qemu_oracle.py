@@ -74,6 +74,18 @@ class QemuOracle:
         # as valid evidence that "this commit is genuinely broken" as an
         # actual crash — arguably more precise, since it names which test
         # case failed.
+        # 19th systemic bug found in this project's fault-injection pipeline:
+        # ZEPHYR FATAL ERROR handler prints "Kernel panic" (lowercase "p"),
+        # but this pattern was written as "Kernel Panic" (capital "P") and
+        # compiled case-sensitively — so a genuine kernel panic (triggered
+        # by a zassert failing inside a PM device-action callback running
+        # in idle-thread/ISR-like context, escalating past a normal ztest
+        # failure) slipped through unmatched, the process hit a clean EOF,
+        # and wait_for_completion=True's fallback logic mis-classified a
+        # real crash as "success". Fixed by compiling crash_regex with
+        # re.IGNORECASE below instead of only fixing this one pattern's
+        # casing, since any future pattern is equally exposed to the same
+        # class of case-mismatch.
         self.crash_patterns = [
             r"Kernel Panic",
             r"Fatal fault",
@@ -159,7 +171,7 @@ class QemuOracle:
         # 將上述字串編譯為正規表示式以加速匹配
         # Compile patterns to regex for faster matching
         self.success_regex = [re.compile(p) for p in self.success_patterns]
-        self.crash_regex = [re.compile(p) for p in self.crash_patterns]
+        self.crash_regex = [re.compile(p, re.IGNORECASE) for p in self.crash_patterns]
         self.unsupported_regex = [re.compile(p) for p in self.unsupported_patterns]
         self.completion_success_regex = [re.compile(p) for p in self.completion_success_patterns]
 
