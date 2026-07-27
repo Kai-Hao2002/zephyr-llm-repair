@@ -922,6 +922,33 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/pending",
         "board": "native_sim",
     },
+    # tests/kernel/common/src/constructor.c is not a thread-scheduling test
+    # at all — it verifies GCC __constructor__ attribute priorities run in
+    # ascending order before main(). Reused the generic thread_priority_swap
+    # operator (it just swaps two literal source-text spans, nothing
+    # thread-specific about the implementation) on the two constructors'
+    # attribute values themselves: __constructor__(101) <-> __constructor__(
+    # 1000). Each constructor's own function body still writes its own
+    # fixed identifying value (101 or 1000) into constructor_values[], so
+    # swapping only the attribute priority makes the "1000" constructor run
+    # first and the "101" one run second, while the test still asserts
+    # constructor_values[0] == 101. This is a deterministic, non-race
+    # ordering bug (GCC constructor ordering is fixed at compile/link time,
+    # no scheduling nondeterminism at all) — a different flavor of "priority
+    # reassignment mistake" than the thread-scheduling instances above, but
+    # the same fault class the thesis's motivating example describes.
+    # Mutated build fails test_constructor deterministically and cleanly
+    # (2/2 runs, identical assertion message); every other suite in the
+    # binary (byteorder, clock, common, irq_offload, multilib, pow2, ...)
+    # still passes. Reverted build passes all suites cleanly.
+    {
+        "id_suffix": "thread_priority_swap_constructor_order",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/common/src/constructor.c",
+        "operator": "thread_priority_swap:__constructor__(101))):__constructor__(1000)))",
+        "target_app": "tests/kernel/common",
+        "board": "native_sim",
+    },
 ]
 
 
