@@ -949,6 +949,63 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/common",
         "board": "native_sim",
     },
+    # tests/kernel/device/src/main.c's test_pre_kernel_detection registers
+    # 4 SYS_INIT hooks (pre1_fn@PRE_KERNEL_1, pre2_fn@PRE_KERNEL_2,
+    # post_fn@POST_KERNEL, app_fn@APPLICATION), each appending a record of
+    # its own hardcoded "pre_kernel" flag plus the *actual* k_is_pre_kernel()
+    # reading at call time. The test's own assertions don't care which
+    # named function ran at which level — they just count how many
+    # consecutive records (from the start) have .pre_kernel==true and
+    # expect exactly 2. Swapping pre2_fn's and post_fn's SYS_INIT *levels*
+    # (PRE_KERNEL_2 <-> POST_KERNEL, anchored on the unique ", 0);" call
+    # tails rather than the bare level names — POST_KERNEL alone repeats
+    # 8x in this file for unrelated DEVICE_DEFINE calls) moves post_fn to
+    # run pre-kernel and pre2_fn to run post-kernel, while each function's
+    # body keeps writing its OLD hardcoded pre_kernel flag. This breaks the
+    # consecutive-count invariant: post_fn's record (still .pre_kernel=
+    # false) now lands second in the array, truncating the "count records
+    # while pre_kernel==true" loop at 1 instead of 2. A different
+    # SYS_INIT-based variant of the same "reuse thread_priority_swap on a
+    # non-thread ordering mechanism" trick as the constructor-priority
+    # entry above. Mutated build deterministically fails
+    # test_pre_kernel_detection ("bad pre-kernel count", 2/2 identical
+    # runs); every other test in the device suite (22 pass, 2 skip) is
+    # unaffected. Reverted build passes the full suite cleanly.
+    {
+        "id_suffix": "thread_priority_swap_sys_init_level",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/device/src/main.c",
+        "operator": "thread_priority_swap:PRE_KERNEL_2, 0);:POST_KERNEL, 0);",
+        "target_app": "tests/kernel/device",
+        "board": "native_sim",
+    },
+    # Same test_app (tests/kernel/device), a different source file
+    # (test_driver_init.c) and a different init-ordering mechanism:
+    # DEVICE_DEFINE priority (not SYS_INIT level). my_driver_priority_1/2/3/4
+    # each have their own init function that writes its OWN identifying
+    # constant (PRIORITY_1..4) into init_priority_sequence[], and are
+    # DEVICE_DEFINE'd with distinct POST_KERNEL priorities 1, 2, 3, and 20
+    # respectively (20 chosen deliberately in the upstream code to catch
+    # sorting bugs against literal "2"). test_device_init_priority expects
+    # the sequence to read [1, 2, 3, 4] — i.e. actual init order sorted by
+    # priority number. Swapped priority_1's and priority_3's numeric
+    # priority arguments (anchored on "POST_KERNEL, 1," / "POST_KERNEL, 3,"
+    # — each unique in the file since it's pinned to end-of-line before the
+    # multi-line call wraps) so priority_3 now inits first (writing 3) and
+    # priority_1 inits third (writing 1), while priority_2/4 stay put —
+    # sequence becomes [3, 2, 1, 4]. Mutated build deterministically fails
+    # test_device_init_priority ("init sequence is not correct", 2/2 runs);
+    # every other test in the same 25-test suite (including
+    # test_pre_kernel_detection above, unaffected since it's a different
+    # file/mechanism) passes. Reverted build passes the full suite cleanly.
+    {
+        "id_suffix": "thread_priority_swap_device_init_priority",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/device/src/test_driver_init.c",
+        "operator": "thread_priority_swap:POST_KERNEL, 1,:POST_KERNEL, 3,",
+        "target_app": "tests/kernel/device",
+        "board": "native_sim",
+    },
 ]
 
 
