@@ -1221,6 +1221,34 @@ INJECTION_CATALOG = [
         "target_app": "tests/misc/iterable_sections",
         "board": "native_sim",
     },
+    # First target in tests/subsys/zbus, and a genuinely different
+    # mechanism than every prior entry: zbus's "HLP" (High Locality of
+    # Preemption) publisher priority-boost feature, not init/iteration
+    # order. tests/subsys/zbus/hlp_priority_boost/src/main.c's
+    # test_priority_elevation creates a low-priority publisher thread
+    # (K_PRIO_PREEMPT(8)) plus two observer threads — sub1 at
+    # K_PRIO_PREEMPT(3), msub1 at K_PRIO_PREEMPT(2) — and asserts that
+    # zbus_chan_pub() boosts the publisher's priority to
+    # (min priority among currently-enabled observers) - 1, checked across
+    # several enable/disable/mask combinations. Swapping sub1's and
+    # msub1's priorities (3<->2, both unique in the file, no @scope/#N
+    # needed) is a no-op for the "both observers enabled" checks (the
+    # *set* of values {2,3} and thus their minimum is unchanged by a pure
+    # swap) but breaks the "only sub1 enabled" checks, which depend on
+    # sub1's *own* priority specifically: expected boosted priority 2
+    # (from sub1's original K_PRIO_PREEMPT(3) - 1) becomes 1 (from sub1's
+    # new K_PRIO_PREEMPT(2) - 1) instead. Mutated build deterministically
+    # fails test_priority_elevation at the second checkpoint ("The
+    # priority must be 2, but it is 1", 2/2 runs) — the sole test in this
+    # suite. Reverted build passes cleanly.
+    {
+        "id_suffix": "thread_priority_swap_zbus_hlp",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/zbus/hlp_priority_boost/src/main.c",
+        "operator": "thread_priority_swap:K_PRIO_PREEMPT(3):K_PRIO_PREEMPT(2)",
+        "target_app": "tests/subsys/zbus/hlp_priority_boost",
+        "board": "native_sim",
+    },
 ]
 
 
