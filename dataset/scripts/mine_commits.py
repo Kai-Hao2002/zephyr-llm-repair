@@ -1116,6 +1116,33 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/pm/power_mgmt",
         "board": "native_sim",
     },
+    # First target in tests/subsys/shell — a fresh subsystem for the
+    # ordering-mechanism vein, found via a systematic scan (grep every file
+    # using DEVICE_DEFINE/DEVICE_DT_DEFINE for 3+ distinct POST_KERNEL
+    # priority literals, a reusable search technique now rather than ad hoc
+    # directory browsing). tests/subsys/shell/shell_device_filter/src/main.c
+    # defines device_0/1/2 at POST_KERNEL priorities 0/1/2, and
+    # test_unfiltered asserts shell_device_filter(i, NULL) /
+    # shell_device_lookup(i, NULL) returns device i — i.e. it indexes
+    # directly into the static device list, which is ordered by init
+    # priority. This is a different *consumption* of the ordering
+    # mechanism than every previous entry (position-indexed lookup, not an
+    # explicit recorded sequence array), but the same underlying fault:
+    # swapping device_0's and device_1's priorities (0<->1, anchored on the
+    # unique full call tails "POST_KERNEL, 0, NULL);" / "POST_KERNEL, 1,
+    # NULL);") makes shell_device_filter(0, NULL) return device_1 instead
+    # of device_0. Mutated build deterministically fails test_unfiltered
+    # (2/2 runs); test_filter and test_prefix (same file, unaffected
+    # indices) both pass. Reverted build passes the full 3-test suite
+    # cleanly.
+    {
+        "id_suffix": "thread_priority_swap_shell_device_filter",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/shell/shell_device_filter/src/main.c",
+        "operator": "thread_priority_swap:POST_KERNEL, 0, NULL);:POST_KERNEL, 1, NULL);",
+        "target_app": "tests/subsys/shell/shell_device_filter",
+        "board": "native_sim",
+    },
 ]
 
 
