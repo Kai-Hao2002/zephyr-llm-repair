@@ -293,6 +293,37 @@ def _runtime_remove_null_check(content: str, hint: Optional[str] = None) -> Opti
 # 執行緒排程類別 mutation operators
 # ============================================================
 
+def _parse_occurrence_suffix(value: str) -> tuple:
+    """解析 value 字尾可選的 "#N" 出現次數後綴，回傳 (去掉後綴的字面文字, N)；
+    沒有後綴時 N 預設為 1 (第一次出現)，保持向下相容。
+
+    Parses an optional trailing "#N" occurrence-index suffix off value,
+    returning (literal text with the suffix stripped, N); N defaults to 1
+    (first occurrence) when there's no suffix, for backward compatibility.
+    """
+    m = re.match(r'^(.*)#(\d+)$', value)
+    if m:
+        return m.group(1), int(m.group(2))
+    return value, 1
+
+
+def _find_nth_occurrence(content: str, text: str, n: int, start: int, end: int) -> int:
+    """在 content[start:end] 範圍內找出 text 的第 n 次出現位置 (1-indexed)，
+    找不到就回傳 -1。
+
+    Finds the position of the nth occurrence (1-indexed) of text within
+    content[start:end], or -1 if there aren't that many occurrences.
+    """
+    pos = start
+    idx = -1
+    for _ in range(n):
+        idx = content.find(text, pos, end)
+        if idx == -1:
+            return -1
+        pos = idx + 1
+    return idx
+
+
 def _thread_priority_swap(content: str, hint: Optional[str] = None) -> Optional[str]:
     """把兩個執行緒建立時指定的優先權數值對調 (例如 `K_PRIO_PREEMPT(0)`
     跟 `K_PRIO_PREEMPT(1)`，或是 `K_PRIO_COOP(n)` 跟 `K_PRIO_PREEMPT(n)`
@@ -316,11 +347,17 @@ def _thread_priority_swap(content: str, hint: Optional[str] = None) -> Optional[
     -t run 前，先讀 mutate 後的檔案內容確認) 在 msgq_thread_data_passing
     這個案例上踩到的坑，加上範圍限定才修正。
 
-    沒有 hint 就直接判定無法套用——這個 operator 需要明確知道要對調的兩個
-    字面值，沒有樸素的「檔案裡第一個/第二個優先權」這種通用退回邏輯 (優先
-    權常數在同一個檔案裡出現的順序，不一定對應到「哪兩個執行緒之間對調才
-    會影響排程結果」，樸素猜測很容易像先前 kconfig/reg off-by-one 的教訓
-    一樣抓到不影響建置結果的地方)。
+    每個值也可以附加可選的 "#N" 出現次數後綴 (例如
+    "PRE_KERNEL_1, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,#2")，指定要換掉
+    「第 N 次出現」而不是預設的第一次——用來解決「目標對調點落在檔案/
+    全域層級 (K_THREAD_DEFINE、DEVICE_DEFINE 這類巨集呼叫)，前面又已經有
+    同樣字面文字出現過，但 `@scope` 範圍限定機制 (只認得 ZTEST 巨集本體或
+    C 函式定義) 幫不上忙」的情境——這正是 `tests/subsys/pm/power_mgmt`
+    案例裡 device_a 的 `PRE_KERNEL_1, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,`
+    這段文字，在它之前已經有一個完全不相關的 device_e 用了同樣的字面文字，
+    導致不加 "#2" 的話一定會抓到 device_e 而不是 device_a。兩種限定方式
+    (`@scope` 跟 "#N") 可以同時使用：`@` 先切出範圍，"#N" 再從範圍內第一次
+    出現數起。
 
     Swaps the literal priority values given to two thread-creation sites
     (e.g. `K_PRIO_PREEMPT(0)` and `K_PRIO_PREEMPT(1)`, or between
@@ -348,6 +385,17 @@ def _thread_priority_swap(content: str, hint: Optional[str] = None) -> Optional[
     the mutated file's content before ever running west build) on the
     msgq_thread_data_passing case; scoping fixes it.
 
+    Each value also accepts an optional trailing "#N" occurrence-index
+    suffix (e.g. "PRE_KERNEL_1, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,#2") to
+    target the Nth occurrence instead of the default first — for when the
+    intended swap site sits at file/global scope (a `K_THREAD_DEFINE` or
+    `DEVICE_DEFINE`-style macro call, not inside any function or ZTEST
+    body) and an unrelated earlier occurrence of the same literal text
+    exists, so `@scope` (which only resolves ZTEST bodies or plain C
+    function definitions) can't help disambiguate it. `@scope` and "#N"
+    compose: `@` narrows the search window first, then "#N" counts
+    occurrences from the start of that window.
+
     Without a hint this operator always declines — it needs to be told
     exactly which two literal values to swap; there's no naive "first two
     priority constants in the file" fallback, since their textual order
@@ -373,8 +421,11 @@ def _thread_priority_swap(content: str, hint: Optional[str] = None) -> Optional[
     if not val_b or val_a == val_b:
         return None
 
-    pos_a = content.find(val_a, search_start, search_end)
-    pos_b = content.find(val_b, search_start, search_end)
+    val_a, occ_a = _parse_occurrence_suffix(val_a)
+    val_b, occ_b = _parse_occurrence_suffix(val_b)
+
+    pos_a = _find_nth_occurrence(content, val_a, occ_a, search_start, search_end)
+    pos_b = _find_nth_occurrence(content, val_b, occ_b, search_start, search_end)
     if pos_a == -1 or pos_b == -1:
         return None
 

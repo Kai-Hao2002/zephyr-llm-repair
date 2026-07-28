@@ -1143,6 +1143,38 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/shell/shell_device_filter",
         "board": "native_sim",
     },
+    # A new subsystem (tests/misc) and a genuinely different infrastructure
+    # than every prior ordering-mechanism entry: linker ITERABLE_SECTION
+    # sorting rather than kernel/device init priority.
+    # tests/misc/iterable_sections/src/main.c deliberately declares
+    # ram1..ram4 out of source order (ram3, ram2, ram4, ram1) specifically
+    # to prove STRUCT_SECTION_FOREACH iterates in linker-sorted (by name)
+    # order, not declaration order — test_ram computes a running checksum
+    # while iterating and asserts it equals RAM_EXPECT (0x01020304, i.e.
+    # ram1=0x01 read first, ram2=0x02 second, etc). Since declaration-order
+    # swaps are a proven no-op here (the file already declares them
+    # scrambled on purpose), swapped the *values* instead: ram1's and
+    # ram2's assigned {0x01}/{0x02} (bare-brace anchors, each unique as the
+    # *first* occurrence in the file — the same literal values recur later
+    # for ram6/ram9 and ramn_1/ramn_3, but those all sit further down, so
+    # no @scope or #N was needed). Iteration order is untouched (still
+    # ram1, ram2, ram3, ram4 by name), but ram1 now reads 0x02 and ram2
+    # reads 0x01, breaking the checksum. Mutated build deterministically
+    # fails test_ram ("Check value incorrect (got: 0x02010304)", 2/2 runs);
+    # test_rom (a separate, unrelated iterable section in the same binary)
+    # passes. Reverted build passes both tests cleanly. This entry is a
+    # slightly different flavor than the others — a value-corruption bug
+    # riding on the same 2-literal-swap mechanism, rather than an actual
+    # reordering — but still lands as a genuine, deterministic runtime
+    # assertion failure via the identical thread_priority_swap operator.
+    {
+        "id_suffix": "thread_priority_swap_iterable_sections",
+        "category": "runtime_crash",
+        "target_file": "tests/misc/iterable_sections/src/main.c",
+        "operator": "thread_priority_swap:{0x01}:{0x02}",
+        "target_app": "tests/misc/iterable_sections",
+        "board": "native_sim",
+    },
 ]
 
 
