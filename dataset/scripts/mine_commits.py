@@ -1175,6 +1175,52 @@ INJECTION_CATALOG = [
         "target_app": "tests/misc/iterable_sections",
         "board": "native_sim",
     },
+    # Same file/ZTEST as the entry above (test_ram covers several
+    # STRUCT_SECTION_FOREACH checks back to back in one function body), but
+    # targets a different sub-case: STRUCT_SECTION_ITERABLE_NAMED sorts by
+    # a *custom* name argument (A/B/C/D) rather than the C variable name,
+    # so ram6(A)/ram9(B)/ram7(C)/ram8(D) iterate in that order regardless
+    # of declaration order or variable name. Swapped ram7's/ram8's assigned
+    # values ({0x03}/{0x04}) — needed the "#2" occurrence-index syntax
+    # (added last session) on both sides, since {0x03}/{0x04} each already
+    # appear once earlier for ram3/ram4 (part of the *other*,
+    # already-registered mutation's untouched territory) before recurring
+    # here. Because ram1-4's own checksum check (line 69) runs first in
+    # the function and is untouched by this mutation, it passes; only the
+    # *later* test_ram_named checksum check (line 92) fails — a
+    # diagnostically distinct assertion line/value (0x1020403) from the
+    # ram1/ram2 entry's (0x02010304), confirmed deterministic (2/2 runs)
+    # and independent (mutating one doesn't affect the other's target
+    # values). Reverted build passes both tests cleanly.
+    {
+        "id_suffix": "thread_priority_swap_iterable_sections_named",
+        "category": "runtime_crash",
+        "target_file": "tests/misc/iterable_sections/src/main.c",
+        "operator": "thread_priority_swap:{0x03}#2:{0x04}#2",
+        "target_app": "tests/misc/iterable_sections",
+        "board": "native_sim",
+    },
+    # A third entry in the same file, but this time targeting the
+    # *sibling* ZTEST (`ZTEST(iterable_sections, test_rom)`, a separate
+    # function from `test_ram` — genuinely distinguishable at the
+    # test-name level, not just by assertion line/value like the two
+    # entries above). rom1/rom2 are the ROM-section analogue of ram1/ram2:
+    # STRUCT_SECTION_ITERABLE sorts by C variable name, so swapping just
+    # the assigned values ({0x10}/{0x20}, both unique as first occurrence
+    # — no #N needed, unlike the RAM-section named variant) breaks the
+    # running checksum while leaving iteration order (rom1, rom2, rom3,
+    # rom4) untouched. Mutated build fails test_rom specifically ("Check
+    # value incorrect (got: 0x20103040)", 2/2 runs) while test_ram (a
+    # separate ZTEST, unaffected) passes. Reverted build passes both
+    # cleanly.
+    {
+        "id_suffix": "thread_priority_swap_iterable_sections_rom",
+        "category": "runtime_crash",
+        "target_file": "tests/misc/iterable_sections/src/main.c",
+        "operator": "thread_priority_swap:{0x10}:{0x20}",
+        "target_app": "tests/misc/iterable_sections",
+        "board": "native_sim",
+    },
 ]
 
 
