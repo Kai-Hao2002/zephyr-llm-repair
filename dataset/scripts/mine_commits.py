@@ -1362,6 +1362,43 @@ INJECTION_CATALOG = [
         "target_app": "tests/lib/c_lib/thrd",
         "board": "native_sim",
     },
+    # --- Board diversity round: same proven mutation, a different board ---
+    # 35/40 catalog entries before this round were native_sim, only 2 were
+    # qemu_cortex_m3 (both dts_reg_offbyone, which structurally needs a real
+    # MMIO memory map). Rather than hunting a brand-new target, re-verified
+    # an *already-proven* thread_priority_swap case
+    # (thread_priority_swap_semaphore above — same target_file, same
+    # operator string) on qemu_riscv32 instead of native_sim, on the
+    # reasoning that Zephyr's scheduler is portable core kernel code, not a
+    # host-simulator shim, so a priority-inversion bug shouldn't be
+    # native_sim-specific (confirmed true; contrast with this same round's
+    # earlier finding that runtime_remove_null_check's NULL-deref crash
+    # mechanism is NOT board-portable — different operators, different
+    # portability properties, verify per-operator rather than assuming).
+    # First tried tests/kernel/common/src/constructor.c (session 15's GCC
+    # constructor-priority target) on qemu_riscv32 — built clean but the
+    # entire "constructor" ZTEST_SUITE was silently absent from the run:
+    # its CMakeLists.txt only compiles src/constructor.c when
+    # CONFIG_STATIC_INIT_GNU=y, which Kconfig defaults to y only for
+    # `CPP || NATIVE_LIBRARY || COVERAGE` — NATIVE_LIBRARY is native_sim's
+    # own Kconfig symbol, so this specific target is inherently
+    # native_sim/C++/coverage-only, not a qemu_riscv32 gap to work around.
+    # Pivoted to tests/kernel/semaphore/semaphore instead (no such config
+    # gating, pure portable scheduler code) and it worked identically to
+    # native_sim: qemu_riscv32 build fails exactly test_sem_take_multiple
+    # (the other 20 tests in the 21-test semaphore suite pass), reverted
+    # build (byte-identical file) passes all 21. Confirmed qemu_riscv32
+    # idles forever after "PROJECT EXECUTION SUCCESSFUL" just like
+    # qemu_cortex_m3 (not self-terminating) — same completion-detection
+    # logic in qemu_oracle.py already handles this correctly.
+    {
+        "id_suffix": "thread_priority_swap_semaphore_riscv32",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/semaphore/semaphore/src/main.c",
+        "operator": "thread_priority_swap:K_PRIO_PREEMPT(3):K_PRIO_PREEMPT(1)",
+        "target_app": "tests/kernel/semaphore/semaphore",
+        "board": "qemu_riscv32",
+    },
 ]
 
 
