@@ -1249,6 +1249,49 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/zbus/hlp_priority_boost",
         "board": "native_sim",
     },
+    # runtime_off_by_one's second target, and the operator's first with a
+    # literal-text anchor (extended this round, mirroring
+    # thread_priority_swap/c_api_substitute's existing anchor style) since
+    # the naive "first `<` in the file" scan would have hit an earlier,
+    # unrelated comparison instead. lib/mem_blocks/mem_blocks.c's
+    # free_blocks() rejects any pointer below the buffer's start:
+    # `if (blk < mem_block->buffer) { return -EFAULT; }` — a lower-bound
+    # guard, not an upper one, so this is a new *flavor* of off-by-one
+    # (false rejection of the first valid boundary element) rather than a
+    # repeat of fcb's "run one extra loop iteration" idiom.
+    # target_app is deliberately tests/lib/mem_blocks_stats, NOT the
+    # (also-affected) tests/lib/mem_blocks — that suite's
+    # test_*_invalid_params_panic_* cases deliberately trigger and
+    # ztest-catch a real Kernel panic/ASSERTION FAIL as their own testing
+    # technique, which happens on EVERY build (mutated or not) and made
+    # tools/qemu_oracle.py's wait_for_completion=True crash-detection
+    # (which finalizes status="crash" on the *first* crash-pattern match,
+    # regardless of whether ztest recovers and keeps running) misclassify
+    # the clean reverted build as a crash too — confirmed via the real
+    # verify_cases.py pipeline before switching targets: both mutate and
+    # revert sides reported ASSERTION FAIL there, an oracle limitation
+    # rather than a mutation problem. tests/lib/mem_blocks_stats/src/main.c
+    # has no such self-test pattern (grepped for "panic"/"fault_valid":
+    # zero hits) and its test_mem_blocks_runtime_stats allocates 3 blocks
+    # then frees the first two via
+    # `sys_mem_blocks_free(&mem_block_01, 2, &blocks[0])` — blocks[0] is
+    # necessarily mem_block_01.buffer itself (first-ever allocation from a
+    # fresh bitmap), so tightening `<` to `<=` makes that exact call
+    # spuriously return -EFAULT. Mutated build: test_mem_blocks_runtime_stats
+    # fails cleanly ("status not equal to 0", "Routine failed with status
+    # -14", 2/2 runs identical) via ztest's own zassert message (not a
+    # panic), while the unrelated test_mem_blocks_stats_invalid still
+    # passes. Reverted build: byte-identical file, both tests pass, no
+    # crash-pattern text anywhere in the output. Verified through the real
+    # verify_cases.py pipeline (not just manual testing).
+    {
+        "id_suffix": "runtime_mem_blocks_offbyone",
+        "category": "runtime_crash",
+        "target_file": "lib/mem_blocks/mem_blocks.c",
+        "operator": "runtime_off_by_one:blk < mem_block->buffer:blk <= mem_block->buffer",
+        "target_app": "tests/lib/mem_blocks_stats",
+        "board": "native_sim",
+    },
 ]
 
 

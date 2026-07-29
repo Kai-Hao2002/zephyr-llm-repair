@@ -242,6 +242,18 @@ def _runtime_off_by_one(content: str, hint: Optional[str] = None) -> Optional[st
     and actually crash, versus just tightening a "safety margin" comparison
     (which merely makes a function return -ENOSPC a bit earlier — harmless).
 
+    hint="<old_text>[#N]:<new_text>" (any other hint containing a colon)
+    anchors on an exact literal source-text span containing the `<` to
+    flip, the same literal-text-anchor style already used by
+    thread_priority_swap/c_api_substitute — needed because a file can have
+    several unrelated `x < y` comparisons and the naive "first one in the
+    file" scan below has no way to pick a specific later one (e.g.
+    lib/utils/base64.c's real loop bound `i < n; i += 3` isn't the first
+    `<` in the file — an earlier buffer-size guard `dlen < n + 1` is).
+    old_text must appear verbatim (exact whitespace) in the file; an
+    optional trailing "#N" on old_text selects the Nth occurrence (default
+    1st), reusing the same helpers thread_priority_swap already has.
+
     Without a hint, falls back to the original naive scan: the first
     non-preprocessor-line `x < y` that isn't actually a `ident++ < ...`
     idiom. Preprocessor lines are skipped because `#include <stddef.h>`'s
@@ -255,6 +267,14 @@ def _runtime_off_by_one(content: str, hint: Optional[str] = None) -> Optional[st
         if not m:
             return None
         return content[:m.start()] + f"{m.group(1)}{m.group(2)} <= {m.group(3)}" + content[m.end():]
+
+    if hint and ':' in hint:
+        old_part, new_text = hint.split(':', 1)
+        old_text, n = _parse_occurrence_suffix(old_part)
+        idx = _find_nth_occurrence(content, old_text, n, 0, len(content))
+        if idx == -1:
+            return None
+        return content[:idx] + new_text + content[idx + len(old_text):]
 
     pattern = re.compile(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*(\+\+)?\s*<\s*([a-zA-Z_][a-zA-Z0-9_]*)\b')
     for m in pattern.finditer(content):
