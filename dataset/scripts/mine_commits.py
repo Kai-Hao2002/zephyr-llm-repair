@@ -1292,6 +1292,38 @@ INJECTION_CATALOG = [
         "target_app": "tests/lib/mem_blocks_stats",
         "board": "native_sim",
     },
+    # runtime_remove_null_check's second target, and its first with a
+    # literal-text anchor (extended this round, same style as
+    # runtime_off_by_one gained last round) since "if (value != NULL) {"
+    # appears twice verbatim in lib/hash/hash_map_sc.c (sys_hashmap_sc_remove
+    # and sys_hashmap_sc_get) — the naive first-match scan would have hit
+    # _remove, not the intended _get; "#2" picks the second occurrence.
+    # This is the classic "optional output pointer" idiom: sys_hashmap_get's
+    # value parameter is documented as optional (pass NULL to just check
+    # existence), so sys_hashmap_sc_get() guards the write with
+    # `if (value != NULL) { *value = entry->value; }`. Forcing that guard
+    # to always-true makes it unconditionally write through value even
+    # when the caller legitimately passed NULL for it.
+    # tests/lib/hash_map/src/get.c's test_get_true calls
+    # `sys_hashmap_get(&map, 0, NULL)` as its very first assertion (right
+    # after a successful insert) — SYS_HASH_MAP_CHOICE_SC is this test's
+    # (and the whole project's) default backend per lib/hash/Kconfig.hash_map,
+    # so this call unconditionally reaches the mutated function on every
+    # run, matching the "prefer unconditionally-exercised checks" lesson
+    # from last round's min_heap dead end. Mutated build: a genuine NULL
+    # pointer write — `Segmentation fault`, exit code 139, 2/2 runs
+    # identical — at exactly test_get_true, the earlier test_get_false and
+    # every other of the suite's 15 tests unaffected. Reverted build:
+    # byte-identical file, all 15 tests pass, no crash-pattern text
+    # anywhere. Verified through the real verify_cases.py pipeline.
+    {
+        "id_suffix": "runtime_hash_map_nullcheck",
+        "category": "runtime_crash",
+        "target_file": "lib/hash/hash_map_sc.c",
+        "operator": "runtime_remove_null_check:if (value != NULL) {#2:if (1) {",
+        "target_app": "tests/lib/hash_map",
+        "board": "native_sim",
+    },
 ]
 
 

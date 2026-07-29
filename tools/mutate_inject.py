@@ -295,7 +295,28 @@ _LVALUE = r'[a-zA-Z_][a-zA-Z0-9_]*(?:\s*->\s*[a-zA-Z_][a-zA-Z0-9_]*)*'
 def _runtime_remove_null_check(content: str, hint: Optional[str] = None) -> Optional[str]:
     """拿掉第一個 NULL 檢查的實際保護效果：`if (x != NULL) {` 換成永遠成立
     的 `if (1) {`；找不到的話改找 `if (x == NULL) {` 換成永遠不成立的
-    `if (0) {`。支援 `a->b` 形式的成員存取，不只是單一識別字。"""
+    `if (0) {`。支援 `a->b` 形式的成員存取，不只是單一識別字。
+
+    hint="<old_text>[#N]:<new_text>" (any hint containing a colon) anchors
+    on an exact literal source-text span instead of grabbing the first
+    NULL check in the file — the same literal-text-anchor style already
+    used by thread_priority_swap/c_api_substitute/runtime_off_by_one,
+    needed because a file can have several unrelated NULL checks and the
+    naive "first one" scan below has no way to pick a specific later one.
+    old_text must appear verbatim in the file; an optional trailing "#N"
+    on old_text selects the Nth occurrence (default 1st).
+
+    Without a hint, falls back to the original naive scan (first `!=
+    NULL`, else first `== NULL`, anywhere in the file).
+    """
+    if hint and ':' in hint:
+        old_part, new_text = hint.split(':', 1)
+        old_text, n = _parse_occurrence_suffix(old_part)
+        idx = _find_nth_occurrence(content, old_text, n, 0, len(content))
+        if idx == -1:
+            return None
+        return content[:idx] + new_text + content[idx + len(old_text):]
+
     pattern_ne = re.compile(r'if\s*\(\s*(' + _LVALUE + r')\s*!=\s*NULL\s*\)\s*\{')
     m = pattern_ne.search(content)
     if m:
