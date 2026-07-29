@@ -1324,6 +1324,44 @@ INJECTION_CATALOG = [
         "target_app": "tests/lib/hash_map",
         "board": "native_sim",
     },
+    # runtime_remove_null_check's third target, same "optional output
+    # pointer" idiom as the hash_map entry above. lib/libc/common/source/
+    # thrd/thrd.c's thrd_join(thr, res) treats `res` as optional (C11
+    # <threads.h> semantics: pass NULL to join without retrieving the
+    # thread's return value): `if (res != NULL) { *res = ...; }`. Forcing
+    # the guard always-true makes it unconditionally write through `res`.
+    # tests/lib/c_lib/thrd/src/thrd.c's test_thrd_create_join calls
+    # `thrd_join(thr, NULL)` as literally its first join call — several
+    # other tests in the same file do too (lines 138/155/161/168), all
+    # unconditionally exercised. Screened the whole tests/lib/c_lib/thrd/
+    # suite for the deliberate-panic self-test pattern first (zero hits
+    # across all 5 files) and confirmed a bare `west build -b native_sim`
+    # works without needing any of tests.yaml's libc-variant extra_configs
+    # scenarios (the board's default libc is enough — this app has no
+    # SYS_HASH_MAP_CHOICE-style default-vs-scenario split to worry about).
+    # Note: this operator's "NULL pointer write crashes reliably" premise
+    # does NOT hold on every board — a same-shaped attempt on
+    # subsys/debug/symtab/symtab.c (its only test, tests/subsys/debug/
+    # symtab, is qemu_cortex_m3/riscv/xtensa-only, no native_sim in
+    # platform_allow) mutated and built cleanly but produced zero observable
+    # effect: writing through a NULL `offset` pointer at address 0 on
+    # qemu_cortex_m3/lm3s6965 apparently lands in a region QEMU doesn't
+    # fault on (unlike native_sim, a real POSIX process where page 0 is
+    # always unmapped and any NULL deref reliably SIGSEGVs) — reverted
+    # without registering. Mutated build here: genuine `Segmentation
+    # fault`, exit code 139, at exactly test_thrd_create_join (2/2 runs
+    # identical); the earlier libc_cnd/libc_mtx/libc_once suites (which
+    # don't call thrd_join with NULL) unaffected. Reverted build:
+    # byte-identical file, all 22 tests across the app's 5 suites pass.
+    # Verified through the real verify_cases.py pipeline.
+    {
+        "id_suffix": "runtime_thrd_join_nullcheck",
+        "category": "runtime_crash",
+        "target_file": "lib/libc/common/source/thrd/thrd.c",
+        "operator": "runtime_remove_null_check:if (res != NULL) {:if (1) {",
+        "target_app": "tests/lib/c_lib/thrd",
+        "board": "native_sim",
+    },
 ]
 
 
