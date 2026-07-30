@@ -1494,6 +1494,44 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/semaphore/semaphore",
         "board": "qemu_xtensa/dc233c",
     },
+    # c_api_substitute's first target outside tests/kernel entirely (a new
+    # subsystem — tests/subsys/modem — since all 9 prior entries lived in
+    # tests/kernel/{mutex,sched,events,early_sleep,context}). Found via a
+    # targeted search: grep for files combining k_sleep with an explicit
+    # priority constant across tests/subsys and tests/drivers (mirroring
+    # the search technique that found thread_priority_swap's tests/subsys
+    # hits), most candidates were hardware-only (nRF/TEE/UART boards with
+    # no QEMU/native_sim platform_allow) or non-ZTEST harness types (e.g.
+    # tests/subsys/debug/thread_analyzer uses `harness: console` with
+    # regex-matched printk output, not zassert — a new pipeline-mismatch
+    # flavor alongside session 19's "type: unit"/bare-main() ones, noted
+    # for future screening but not otherwise investigated).
+    # tests/subsys/modem/modem_ubx/src/main.c's test_thread_yield() helper
+    # is a gift: its own comment says outright *why* it uses k_sleep
+    # instead of k_yield — "Used instead of k_yield() since internals of
+    # modem pipe may rely on multiple thread interactions which may not be
+    # served by simply yielding." A documented semantic justification for
+    # the exact k_sleep/k_yield distinction this operator tests, not
+    # inferred from test structure. The helper is called from several of
+    # the file's 13 ZTEST cases wherever the test needs the modem pipe's
+    # internal processing (workqueue-driven) to actually advance.
+    # Substituting a single k_yield() for the 1ms sleep doesn't give the
+    # workqueue a chance to fire, so every test relying on it to make the
+    # pipe progress fails its own "Script should be done" style assertion.
+    # Broader blast radius than any prior c_api_substitute entry (7 of 13
+    # tests fail, 2/2 runs identical) but every failure is a clean zassert
+    # message, no crash/panic, no hang — a faithful, deterministic
+    # reproduction of exactly the failure mode the source comment already
+    # predicts, not cascading corruption. Reverted build: byte-identical
+    # file, all 13 pass.
+    {
+        "id_suffix": "api_substitute_modem_ubx_thread_yield",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/modem/modem_ubx/src/main.c",
+        "operator": "c_api_substitute:test_thread_yield:k_sleep(K_MSEC(1));:k_yield();",
+        "target_app": "tests/subsys/modem/modem_ubx",
+        "board": "native_sim",
+    },
 ]
 
 
