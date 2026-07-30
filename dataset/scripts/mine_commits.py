@@ -1532,6 +1532,39 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/modem/modem_ubx",
         "board": "native_sim",
     },
+    # runtime_remove_null_check's fourth target, same "optional output
+    # pointer" idiom as the hash_map/thrd_join entries — but a genuine
+    # POSIX standard API this time rather than a Zephyr-internal one.
+    # subsys/portability/posix/options/clock.c's clock_getres(clock_id,
+    # res) treats res as optional per POSIX (pass NULL to just validate
+    # clock_id): `if (res != NULL) { *res = ...; }`.
+    # tests/subsys/portability/posix/timers/src/clock.c's test_clock_getres
+    # is a data-driven table test that explicitly includes
+    # {CLOCK_REALTIME, NULL, 0} among its cases — i.e. it already tests the
+    # NULL-res path on purpose, unconditionally exercised, no #N/scope
+    # needed (only one `if (res != NULL) {` in the file). Two other
+    # `!= NULL` candidates from the same scan
+    # (lib/libc/minimal/source/stdlib/strtol.c/strtoul.c's `endptr`
+    # parameter, tests/lib/c_lib/common exercises many NULL-passing calls)
+    # were ruled out first: native_sim's default libc for this test app is
+    # picolibc (confirmed via the build's own .config —
+    # CONFIG_ZEPHYR_PICOLIBC_MODULE=y, CONFIG_MINIMAL_LIBC not set), so
+    # lib/libc/minimal/source/stdlib/*.c is never even compiled in under a
+    # bare `west build` — reaching the minimal-libc implementation needs
+    # the tests.yaml `.minimal` scenario's CONFIG_MINIMAL_LIBC=y
+    # extra_config, a non-default-scenario dead end matching session 9's
+    # standing limitation. Mutated build: genuine `Segmentation fault`,
+    # exit code 139, at exactly test_clock_getres (2/2 runs identical);
+    # every other of the suite's 17 tests unaffected. Reverted build:
+    # byte-identical file, all 17 pass, PROJECT EXECUTION SUCCESSFUL.
+    {
+        "id_suffix": "runtime_clock_getres_nullcheck",
+        "category": "runtime_crash",
+        "target_file": "subsys/portability/posix/options/clock.c",
+        "operator": "runtime_remove_null_check:if (res != NULL) {:if (1) {",
+        "target_app": "tests/subsys/portability/posix/timers",
+        "board": "native_sim",
+    },
 ]
 
 
