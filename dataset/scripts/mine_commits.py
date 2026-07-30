@@ -1455,6 +1455,45 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/semaphore/semaphore",
         "board": "qemu_cortex_a53",
     },
+    # thread_priority_swap's fifth board-diversity entry: qemu_xtensa
+    # (Tensilica dc233c, the last architecturally-distinct board from the
+    # original candidate list). Board note: this board needs the explicit
+    # qualifier "qemu_xtensa/dc233c" — a bare "qemu_xtensa" is rejected by
+    # west/CMake ("Board qualifiers `` for board `qemu_xtensa` not found").
+    # First attempted api_substitute_sleep_yield (the c_api_substitute
+    # target already proven on native_sim/qemu_x86) here instead, for
+    # operator symmetry — its baseline built and passed cleanly, and the
+    # mutation correctly reproduced the same test_sleep_cooperative/
+    # test_sleep_wakeup_preemptible assertion failures as every other
+    # board. But the *next* test in that suite, test_slice_scheduling
+    # (normally ~11s), never completed — still running at 8+ minutes,
+    # 99% CPU, no crash/fault/exit — a genuine hang, not a slow build,
+    # killed directly via docker exec pkill rather than waiting further
+    # (per the standing "don't fight a stuck container, kill it" rule).
+    # This matters for the *automated* pipeline specifically: a hang here
+    # would exceed FaultInjector's own timeout and finalize as
+    # status="timeout", which does NOT satisfy runtime_crash's required
+    # status="crash" — even though the actual bug evidence (the two
+    # assertion failures) was already captured before the hang, the
+    # two-sided gate would still reject it. Not registered; reverted and
+    # abandoned in favor of a target proven not to cascade this far.
+    # Pivoted to thread_priority_swap_semaphore (already proven on
+    # native_sim/qemu_riscv32/qemu_cortex_a53) instead — a single
+    # isolated-failure test with no lengthy timing-loop tests after it in
+    # suite order, so no similar hang surface. Baseline clean (21 run,
+    # semaphore_null_case suite entirely SKIPped on this board — 0 tests,
+    # not a failure, likely a userspace/config gap specific to this SoC
+    # target). Mutated build: clean, isolated failure — exactly
+    # test_sem_take_multiple fails, no hang, completes normally.
+    # Reverted build: byte-identical file, all 21 non-skipped tests pass.
+    {
+        "id_suffix": "thread_priority_swap_semaphore_xtensa",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/semaphore/semaphore/src/main.c",
+        "operator": "thread_priority_swap:K_PRIO_PREEMPT(3):K_PRIO_PREEMPT(1)",
+        "target_app": "tests/kernel/semaphore/semaphore",
+        "board": "qemu_xtensa/dc233c",
+    },
 ]
 
 
