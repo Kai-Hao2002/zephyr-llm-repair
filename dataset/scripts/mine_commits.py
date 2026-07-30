@@ -1433,6 +1433,28 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/sched/schedule_api",
         "board": "qemu_x86",
     },
+    # thread_priority_swap's fourth board-diversity entry: qemu_cortex_a53
+    # (aarch64) — the most architecturally distinct board tried so far
+    # (64-bit ARM, vs. riscv32's 32-bit RISC-V and qemu_x86's 32-bit x86).
+    # Same target/operator as thread_priority_swap_semaphore (the original
+    # native_sim case) and thread_priority_swap_semaphore_riscv32 above —
+    # tests/kernel/semaphore/semaphore has no config-gating risk (already
+    # proven portable to riscv32). Baseline confirmed clean on
+    # qemu_cortex_a53 first (21/21 pass). Mutated build: clean, isolated
+    # failure — exactly test_sem_take_multiple fails, all other 20 tests
+    # (including the semaphore_null_case suite's own deliberate
+    # "ZEPHYR FATAL ERROR 3: Kernel oops"-triggering tests, which — per
+    # session 27's lesson — don't match qemu_oracle.py's crash_patterns
+    # anyway) pass. Reverted build: byte-identical file, all 21 pass,
+    # PROJECT EXECUTION SUCCESSFUL.
+    {
+        "id_suffix": "thread_priority_swap_semaphore_cortex_a53",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/semaphore/semaphore/src/main.c",
+        "operator": "thread_priority_swap:K_PRIO_PREEMPT(3):K_PRIO_PREEMPT(1)",
+        "target_app": "tests/kernel/semaphore/semaphore",
+        "board": "qemu_cortex_a53",
+    },
 ]
 
 
