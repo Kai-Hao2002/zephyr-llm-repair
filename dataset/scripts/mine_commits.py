@@ -1399,6 +1399,40 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/semaphore/semaphore",
         "board": "qemu_riscv32",
     },
+    # c_api_substitute's first board-diversity entry (x86 architecture,
+    # not yet represented — riscv32/arm were already covered by
+    # thread_priority_swap). Same target/operator as the very first
+    # c_api_substitute case (api_substitute_sleep_yield, session 5's
+    # test_sleep_cooperative on native_sim), re-verified on qemu_x86
+    # instead. No config-gating risk here (unlike the constructor.c
+    # lesson from the riscv32 round) since this test_app already has
+    # multiple native_sim catalog entries against it, all pure portable
+    # kernel scheduler code. Confirmed a bare `west build -b qemu_x86`
+    # baseline passes 100% first. Mutated build reproduces the exact same
+    # assertion as native_sim (`tdata[i].executed == 1 is false` at
+    # test_sleep_cooperative) but with a *more* severe cascade than
+    # native_sim showed: the starvation corruption propagates further and
+    # a later test (test_slice_scheduling) hits a genuine unhandled CPU
+    # page-fault exception that aborts the whole binary outright (west's
+    # own build-time run step reports non-zero exit) rather than reaching
+    # a clean end-of-suite summary — still a fully valid, deterministic
+    # crash reproduction of the injected bug (this test app's own
+    # deliberate-fault-testing cases, e.g. test_k_wakeup_init_null,
+    # use a "ZEPHYR FATAL ERROR N: Kernel oops"/"Caught system error"
+    # message shape that does NOT match any of qemu_oracle.py's
+    # crash_patterns, unlike session 23's mem_blocks lesson — so this
+    # suite's pre-existing deliberate panics don't risk a revert-side
+    # false positive here). Reverted build: byte-identical file, full
+    # PROJECT EXECUTION SUCCESSFUL, all tests including
+    # test_sleep_cooperative pass cleanly.
+    {
+        "id_suffix": "api_substitute_sleep_yield_qemu_x86",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/sched/schedule_api/src/test_sched_timeslice_and_lock.c",
+        "operator": "c_api_substitute:test_sleep_cooperative:k_sleep(K_MSEC(100));:k_yield();",
+        "target_app": "tests/kernel/sched/schedule_api",
+        "board": "qemu_x86",
+    },
 ]
 
 
