@@ -1565,6 +1565,67 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/portability/posix/timers",
         "board": "native_sim",
     },
+    # runtime_off_by_one's third target, found by pivoting the search angle
+    # per session 31's lesson (large-buffer-pool-backed candidates like cobs/
+    # ring_buffer/min_heap absorb the mutation harmlessly): kernel/msg_q.c's
+    # put_msg_in_queue() full-queue guard `if (msgq->used_msgs <
+    # msgq->max_msgs) {` gates writes into a *tiny, exactly-sized* ring
+    # buffer (tests/kernel/msgq/msgq_api's put_fail() uses
+    # MSG_SIZE=4/MSGQ_LEN=2, an 8-byte tbuffer[] filled to capacity by the
+    # test itself) — no slack pool to absorb an off-by-one, unlike the
+    # earlier dead ends. Loosening `<` to `<=` lets a put succeed once the
+    # queue is already full: used_msgs is incremented past max_msgs and the
+    # write silently overwrites/corrupts the oldest unread message instead
+    # of returning -ENOMSG. Only one `used_msgs < max_msgs` comparison in
+    # the whole file, no #N needed. Unconditionally exercised: tests.yaml's
+    # default `kernel.message_queue` scenario runs put_fail() as both
+    # test_msgq_put_fail and test_msgq_user_put_fail. Mutated build: 4 of
+    # msgq_api_1cpu's 8 tests fail deterministically (test_msgq_put_fail,
+    # test_msgq_full, test_msgq_purge_when_put, test_msgq_thread_pending —
+    # all downstream consumers of the same corrupted full-queue state), no
+    # crash/hang, clean PROJECT EXECUTION FAILED. Reverted build:
+    # byte-identical file, all 17 tests pass, PROJECT EXECUTION SUCCESSFUL.
+    {
+        "id_suffix": "runtime_msgq_offbyone",
+        "category": "runtime_crash",
+        "target_file": "kernel/msg_q.c",
+        "operator": "runtime_off_by_one:msgq->used_msgs < msgq->max_msgs:msgq->used_msgs <= msgq->max_msgs",
+        "target_app": "tests/kernel/msgq/msgq_api",
+        "board": "native_sim",
+    },
+    # runtime_off_by_one's fourth target, same "small always-fully-filled
+    # fixed buffer" search angle as the msgq case above, applied to a
+    # different kernel object: kernel/stack.c's k_stack_push() full-stack
+    # guard `CHECKIF(stack->next == stack->top) { ret = -ENOMEM; ... }`.
+    # Unlike msgq (an `<` comparison), this guard is an equality check —
+    # loosening `==` to `>` (rather than the usual `<`-to-`<=` flip) is the
+    # correct direction here since `next` never overshoots `top` before this
+    # guard runs, so `>` is never true and the check becomes a no-op,
+    # letting push succeed once already full. tests/kernel/stack/stack's
+    # test_stack_push_full (STACK_LEN=2, a 2-slot ZTEST_BMEM data[] backing
+    # array) fills the stack to exactly capacity then asserts the next push
+    # returns -ENOMEM. With the guard disabled, that push instead executes
+    # `*(stack->next) = data; stack->next++;` with stack->next == stack->top
+    # — a genuine one-element out-of-bounds write past the backing array,
+    # not just internal state corruption like the msgq case. Checked first
+    # for the deliberate-panic self-test trap (this file's stack_fail suite
+    # has ztest_set_fault_valid()-guarded NULL-pointer tests under
+    # CONFIG_USERSPACE): confirmed empirically that a plain native_sim
+    # `west build` for this app does NOT enable CONFIG_USERSPACE by default,
+    # so stack_fail only compiles its 3 non-userspace tests — no
+    # "Fatal fault" crash-pattern string ever appears on the clean revert
+    # side. Mutated build: exactly test_stack_push_full fails (1 of 15
+    # total tests), no crash/hang, clean PROJECT EXECUTION FAILED. Reverted
+    # build: byte-identical file, all 15 tests pass, PROJECT EXECUTION
+    # SUCCESSFUL.
+    {
+        "id_suffix": "runtime_stack_offbyone",
+        "category": "runtime_crash",
+        "target_file": "kernel/stack.c",
+        "operator": "runtime_off_by_one:stack->next == stack->top:stack->next > stack->top",
+        "target_app": "tests/kernel/stack/stack",
+        "board": "native_sim",
+    },
 ]
 
 
