@@ -1803,6 +1803,59 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/firmware/qemu_fwcfg",
         "board": "qemu_x86",
     },
+    # --- runtime_off_by_one scaling: first tests/drivers entry (51->52) ---
+    # c_api_substitute turned up nothing usable in tests/drivers this round
+    # (searched thoroughly: every tests/drivers file combining
+    # k_thread_create/K_THREAD_DEFINE with k_sleep/k_msleep either only
+    # supports real nRF/STM32/etc. hardware boards, or (tests/drivers/crc)
+    # has no zephyr,crc chosen node on any native_sim/QEMU board at all, or
+    # (tests/drivers/tee/optee, the one native_sim-buildable candidate) uses
+    # a wait_thread priority — K_PRIO_COOP(4) — that's *higher* than the
+    # ztest main thread, so a k_sleep->k_yield substitution on the main
+    # thread's side wouldn't change anything observable: a strictly-higher-
+    # priority ready thread runs regardless of sleep vs yield. The 6 existing
+    # k_yield() call sites in tests/drivers are all `while (cond) {
+    # k_yield(); }` polling loops, where substituting k_sleep just makes the
+    # loop slower without flipping pass/fail — not this operator's shape.
+    # Pivoted to runtime_off_by_one instead, applying the same "fixed-
+    # capacity object with a single boundary comparison, backed by a buffer
+    # sized to exactly that capacity" angle that already won 3 kernel/*.c
+    # entries (msgq/stack/sem, sessions 32-33) — this time to a driver.
+    #
+    # drivers/flash/flash_simulator.c's flash_range_is_valid() rejects an
+    # access as out-of-range via `(cfg->flash_size - offset) < len` (plus an
+    # `offset >= cfg->flash_size` check that alone doesn't open a hole here:
+    # for any len>0 request sitting exactly at the boundary, this second
+    # check would still independently reject it, so the length check is the
+    # one that actually needs loosening) — cfg->flash_size is the real,
+    # fixed-size backing buffer's (`dev_data->mock_flash`) capacity, no DT-
+    # coupling slack the way native_sim's SRAM-backed drivers had in session
+    # 3's dts_reg_offbyone dead end. tests/drivers/flash_simulator/
+    # flash_sim_impl's own test_out_of_bounds already exercises the tightest
+    # possible overshoot the driver's 4-byte write_block_size alignment
+    # allows: `flash_write(flash_dev, TEST_SIM_FLASH_END - 4, data, 8)` —
+    # starts 4 bytes before the end but writes 8, landing exactly 4 bytes
+    # past it — and asserts `-EINVAL`. Anchored hint loosens the length
+    # check by exactly that same 4-byte unit: `(cfg->flash_size - offset) <
+    # len` -> `(cfg->flash_size - offset) + 4 < len`, letting this exact
+    # call through as though it fit. Verified via a direct
+    # ./zephyr/zephyr.exe run (native_sim self-exits, no `west build -t run`
+    # needed): golden passes 8/11 (3 skipped), including test_out_of_bounds;
+    # mutated build crashes with a genuine `Segmentation fault` (exit 139)
+    # right at test_out_of_bounds — the loosened check lets flash_write
+    # actually memcpy 4 bytes past mock_flash's real allocated buffer, a
+    # true heap-overflow memory-safety fault, not just a corrupted-but-
+    # readable value (stronger evidence than a mere zassert mismatch).
+    # Reverted file confirmed byte-identical to the original before wiring
+    # into the catalog.
+    {
+        "id_suffix": "runtime_flash_sim_offbyone",
+        "category": "runtime_crash",
+        "target_file": "drivers/flash/flash_simulator.c",
+        "operator": "runtime_off_by_one:(cfg->flash_size - offset) < len:(cfg->flash_size - offset) + 4 < len",
+        "target_app": "tests/drivers/flash_simulator/flash_sim_impl",
+        "board": "native_sim",
+    },
 ]
 
 
