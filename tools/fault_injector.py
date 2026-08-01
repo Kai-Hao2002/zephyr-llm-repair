@@ -3,7 +3,7 @@ import os
 import re
 import time
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from tools.qemu_oracle import QemuOracle
 
@@ -46,13 +46,33 @@ class FaultInjector:
         self.oracle = QemuOracle(timeout=timeout)
 
     def inject_and_verify(self, case_id: str, baseline_commit: str, target_file: str,
-                           operator: str, category: str, target_app: str, board: str) -> Dict[str, Any]:
+                           operator: str, category: str, target_app: str, board: str,
+                           extra_files: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """
         執行雙向驗證閘，回傳 {"accepted": bool, "reason": str (若拒絕),
         "mutated_result": dict, "reverted_result": dict (若有跑到這步)}。
+
+        extra_files (選用)：{"相對於 zephyr repo 根目錄的路徑": "host 上的
+        來源檔案絕對路徑"}——在套用 mutation 之前，先把這些檔案 bind-mount
+        進容器裡對應的位置 (蓋掉/新增該路徑)。用來支援「把既有測試移植到
+        新板子」這類需要新增/修改 mutation 目標檔以外的檔案的 injection
+        案例 (例如新增一個該測試原本沒有的 boards/<board>.overlay，或修改
+        tests.yaml 的 platform_allow)——單一 target_file mutation 機制沒辦法
+        表達這種「baseline checkout 之外還需要額外檔案」的情境。
+
         Runs the two-sided verification gate.
+
+        extra_files (optional): {"path relative to the zephyr repo root":
+        "absolute host path to the source file"} — bind-mounted into the
+        container at the corresponding path *before* the mutation is
+        applied (overwriting/adding that path). Supports injection cases
+        that need to "port an existing test to a new board" — files beyond
+        the single mutation target_file (e.g. adding a boards/<board>.overlay
+        the test didn't originally have, or editing tests.yaml's
+        platform_allow) — which the single-target_file mutation mechanism
+        alone can't express.
         """
-        mutated_result = self._run(case_id, baseline_commit, target_file, operator, category, target_app, board, revert=False)
+        mutated_result = self._run(case_id, baseline_commit, target_file, operator, category, target_app, board, revert=False, extra_files=extra_files)
 
         if mutated_result["status"] == "operator_no_match":
             return {
@@ -69,7 +89,7 @@ class FaultInjector:
                 "mutated_result": mutated_result,
             }
 
-        reverted_result = self._run(case_id, baseline_commit, target_file, operator, category, target_app, board, revert=True)
+        reverted_result = self._run(case_id, baseline_commit, target_file, operator, category, target_app, board, revert=True, extra_files=extra_files)
         if reverted_result["status"] != "success":
             return {
                 "accepted": False,
@@ -85,7 +105,8 @@ class FaultInjector:
         }
 
     def _run(self, case_id: str, baseline_commit: str, target_file: str, operator: str,
-              category: str, target_app: str, board: str, revert: bool) -> Dict[str, Any]:
+              category: str, target_app: str, board: str, revert: bool,
+              extra_files: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """
         跑一次容器：checkout baseline -> west update -> 套用 mutation
         (revert=True 時緊接著再還原) -> west build -t run。
@@ -140,7 +161,41 @@ class FaultInjector:
         # python3 receives the original, unescaped literal value.
         escaped_operator = re.sub(r'([^A-Za-z0-9_./:-])', r'\\\1', operator)
         mutate_cmd = f"python3 {MUTATE_SCRIPT_CONTAINER_PATH} /zephyrproject/zephyr/{target_file} {escaped_operator}"
-        steps = [mutate_cmd]
+
+        # extra_files 裡每一組 (container 相對路徑 -> host 絕對路徑) 用來支援
+        # 「把既有測試移植到新板子」這類需要動到 mutation 目標檔以外的檔案的
+        # 案例 (新增一個原本沒有的 boards/<board>.overlay，或修改
+        # tests.yaml 的 platform_allow)。**不能**直接把它們 bind-mount 到
+        # 最終路徑：如果那個路徑是既有的 git 追蹤檔案 (例如 tests.yaml)，
+        # 唯讀 bind mount 會讓 git checkout 想要覆寫該路徑時得到 Permission
+        # denied，整條 checkout 失敗。改成先掛到一個獨立的 staging 路徑
+        # (/tmp/extra_files/N)，等 git checkout + west update 都做完、
+        # 目標路徑已經是一般 (非 mount) 檔案之後，再用 cp 把內容複製過去
+        # ——這一步是普通檔案寫入，不會撞到 bind mount 的唯讀限制。
+        # Each (container-relative path -> host absolute path) pair in
+        # extra_files supports "porting an existing test to a new board" —
+        # cases that need files beyond the single mutation target_file (e.g.
+        # adding a boards/<board>.overlay the test didn't originally have, or
+        # editing tests.yaml's platform_allow). These can't be bind-mounted
+        # directly at their final path: if that path is an existing
+        # git-tracked file (e.g. tests.yaml), a read-only bind mount makes
+        # git checkout's attempt to overwrite it fail with Permission denied,
+        # aborting the whole checkout. Instead, mount each one at an
+        # independent staging path (/tmp/extra_files/N) and, once git
+        # checkout + west update have already finished (so the target path
+        # is back to being a normal, unmounted file), cp it into place — a
+        # plain file write that doesn't collide with the bind mount's
+        # read-only restriction.
+        extra_mounts = ""
+        copy_steps = []
+        if extra_files:
+            for idx, (container_rel_path, host_path) in enumerate(extra_files.items()):
+                staging_path = f"/tmp/extra_files/{idx}"
+                extra_mounts += f"-v {host_path}:{staging_path}:ro "
+                dest = f"/zephyrproject/zephyr/{container_rel_path}"
+                copy_steps.append(f"mkdir -p $(dirname {dest}) && cp {staging_path} {dest}")
+
+        steps = copy_steps + [mutate_cmd]
         if revert:
             steps.append(f"{mutate_cmd} --revert")
 
@@ -156,9 +211,11 @@ class FaultInjector:
         # reference is not a tree" and the && chain aborts early, which can
         # be misread as "build failed" (a false positive that happens to
         # match some categories' expected failure signature).
+
         docker_cmd = (
             f"docker run --rm -i --name {container_name} --cpus=2 --memory=2400m "
             f"-v {MUTATE_SCRIPT_HOST_PATH}:{MUTATE_SCRIPT_CONTAINER_PATH}:ro "
+            f"{extra_mounts}"
             f"zephyr-sandbox bash -c '"
             f"cd /zephyrproject/zephyr && "
             f"git fetch origin {baseline_commit} && "

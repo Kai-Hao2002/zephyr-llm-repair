@@ -97,6 +97,32 @@ class QemuOracle:
             r"Aborted",
             r"Illegal instruction",
             r"PROJECT EXECUTION FAILED",
+            # 20th systemic pipeline bug: 上面六個具名硬體錯誤字串
+            # (Usage/Bus/CPU Page Fault 等) 只涵蓋 Zephyr fault handler
+            # 在特定幾種例外型態下印出的訊息，但 aarch64 的 Data Abort
+            # (印 "EC: 0x25 ... Data Abort") 跟 RISC-V 的 Store/AMO/Load
+            # access fault (印 "mcause: 7, Store/AMO access fault") 都不
+            # 屬於這幾種，導致 dts_reg_offbyone 在 qemu_riscv32/
+            # qemu_cortex_a53 上真正打中邊界外位址、CPU 確實 trap 時，
+            # 這個 crash 被完全漏接。所有 arch 的 fault handler 在印完
+            # 各自的暫存器/例外原因後，最終都會收斂到同一行
+            # ">>> ZEPHYR FATAL ERROR" 摘要 (k_fatal_halt 的共用出口)，
+            # 所以直接抓這一行比窮舉每個 arch 專屬的例外名稱更通用、更不會
+            # 漏接未來新增的板子。
+            # The six named hardware-fault strings above only cover the
+            # specific exception spellings Zephyr's fault handler happens to
+            # print for some exception types, but aarch64's Data Abort
+            # (prints "EC: 0x25 ... Data Abort") and RISC-V's Store/AMO/Load
+            # access fault (prints "mcause: 7, Store/AMO access fault") are
+            # neither of those — so a genuine CPU trap from dts_reg_offbyone
+            # landing past a real physical boundary on qemu_riscv32/
+            # qemu_cortex_a53 was silently missed. Every arch's fault handler
+            # converges on the same ">>> ZEPHYR FATAL ERROR" summary line
+            # after printing its own registers/exception cause (the shared
+            # exit path through k_fatal_halt), so matching that line directly
+            # is more general than enumerating each arch's exception name and
+            # won't miss whatever a future board spells differently.
+            r"ZEPHYR FATAL ERROR",
         ]
 
         # ztest 套件真正跑完、且全部通過時印出的總結行——跟上面的

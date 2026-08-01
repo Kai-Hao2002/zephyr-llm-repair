@@ -1672,6 +1672,137 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/semaphore/semaphore",
         "board": "native_sim",
     },
+    # --- dts_reg_offbyone scaling: board-diversity round (49->51) ---
+    # 49 案例裡 dts_reg_offbyone 只有 2 筆、且都在 qemu_cortex_m3——這是
+    # 唯一一個「板子選擇跟 graph_rag 的 DTS 結構化檢索真的有關」的 operator
+    # (見專案記憶：graph_rag 是用 dtc 把單一板子的 Kconfig+DTS 轉成結構化
+    # graph，只有裝置樹結構相關的 bug 才吃得到這個檢索脈絡)，所以這一輪
+    # 專門把它擴散到其餘 4 個 QEMU 板子，同時補強最弱的 tests/drivers 子
+    # 系統。
+    # dts_reg_offbyone had only 2 entries out of 49, both on qemu_cortex_m3
+    # — the only operator where board choice is actually tied to graph_rag's
+    # DTS-structural retrieval (see project memory: graph_rag turns a single
+    # board's Kconfig+DTS into a structured graph via dtc, so only DTS-
+    # structural bugs benefit from that retrieval context). This round
+    # spreads it to the remaining 4 QEMU boards and strengthens the weakest
+    # (tests/drivers) subsystem at the same time.
+    #
+    # qemu_riscv32：把 gpio_mmio_latch 測試 (原本只有 qemu_cortex_m3.overlay)
+    # 移植到 riscv32 virt 板。跟 m3 案例同一招——縮小宣告的 RAM reg、把
+    # gpio-mmio-latch 放進騰出來的尾端——但這次先確認了 QEMU 端真的用
+    # -m 256 跟 DTS 宣告的 ram0 size (256MB) 精確吻合 (board.cmake 三個
+    # QEMU_FLAGS 分支都寫死 -m 256)，代表宣告邊界==實體邊界，跟 m3 那台
+    # MCU 真正只有 64KB SRAM 是同一種「宣告邊界就是真實邊界」情境 (不像
+    # xtensa dc233c 那樣宣告 16MB 但 QEMU 實際仍配置 128MB，宣告邊界外還
+    # 是真實記憶體，移一點點位址不會有任何效果)。riscv32 這裡沒有 MMU
+    # (build log 印 "No satp mode set. Defaulting to 'bare'")，實體位址
+    # 直接可存取，不像 aarch64 需要頁表映射，所以不需要額外的
+    # zephyr,memory-region 節點。經 west build -t run 實測驗證兩端：
+    # golden (未變異) port 5/5 全過；mutate 端 (位址從 0x8fffff00 位移
+    # 0x100 到真正邊界 0x90000000) 印出 RISC-V 硬體 trap
+    # ("mcause: 7, Store/AMO access fault, mtval: 90000000")，是真正的
+    # 執行期記憶體存取錯誤，不是建置期擋下來的。
+    # qemu_riscv32: ported the gpio_mmio_latch test (previously only had a
+    # qemu_cortex_m3.overlay) to the riscv32 virt board — same trick as the
+    # m3 case (shrink the declared RAM reg, place gpio-mmio-latch in the
+    # freed tail) but first confirmed QEMU's actual -m 256 exactly matches
+    # the DTS-declared ram0 size (256MB; all 3 QEMU_FLAGS branches in
+    # board.cmake hardcode -m 256) — i.e. declared boundary == true physical
+    # boundary, the same situation as the m3 MCU's real 64KB SRAM (unlike
+    # xtensa dc233c, whose declared 16MB sits inside a much larger true
+    # 128MB QEMU allocation, where nudging the address a little does
+    # nothing). riscv32 here has no MMU (build log prints "No satp mode set.
+    # Defaulting to 'bare'"), so physical addresses are directly accessible
+    # without page-table mapping, unlike aarch64 — no extra
+    # zephyr,memory-region node needed. Empirically verified both sides via
+    # west build -t run: the golden (unmutated) port passes 5/5; the mutated
+    # side (address nudged from 0x8fffff00 by 0x100 to the true boundary
+    # 0x90000000) prints a genuine RISC-V hardware trap ("mcause: 7,
+    # Store/AMO access fault, mtval: 90000000") — a real runtime memory-
+    # access fault, not something the build stage catches.
+    #
+    # 20th 系統性 pipeline bug 順帶發現並修好：qemu_oracle.py 的
+    # crash_patterns 只列了 Usage/Bus/CPU Page Fault 這幾個具名例外字串，
+    # 完全沒涵蓋 aarch64 的 Data Abort 或 RISC-V 的 Store/AMO/Load access
+    # fault，導致這兩種板子上真正的硬體 trap 完全偵測不到。已改成直接抓
+    # 所有 arch 的 fault handler 最終都會印的共用摘要行
+    # ">>> ZEPHYR FATAL ERROR"，一次涵蓋所有 arch，不用窮舉每個例外名稱。
+    # 20th systemic pipeline bug found and fixed along the way:
+    # qemu_oracle.py's crash_patterns only enumerated Usage/Bus/CPU Page
+    # Fault by name, missing aarch64's Data Abort and RISC-V's Store/AMO/
+    # Load access fault entirely — real hardware traps on those two boards
+    # were silently undetected. Fixed by matching the shared summary line
+    # every arch's fault handler converges on, ">>> ZEPHYR FATAL ERROR",
+    # instead of enumerating each arch's exception name.
+    #
+    # 這個案例需要移植目標測試到一個它原本沒有的板子 (新增
+    # boards/qemu_riscv32.overlay、修改 tests.yaml 的 platform_allow)——單一
+    # target_file mutation 機制表達不了這種「baseline checkout 之外還需要
+    # 額外檔案」的情境，因此順帶擴充了 FaultInjector 的 extra_files 機制
+    # (bind-mount 到 staging 路徑，checkout 完成後才 cp 進最終位置，避免跟
+    # git checkout 寫入既有追蹤檔案衝突)。
+    # This case needs porting the target test to a board it didn't
+    # originally support (adding boards/qemu_riscv32.overlay, editing
+    # tests.yaml's platform_allow) — the single-target_file mutation
+    # mechanism can't express needing files beyond the baseline checkout, so
+    # this also extends FaultInjector with an extra_files mechanism (bind-
+    # mounted to a staging path, then cp'd into place only after checkout
+    # completes, avoiding a collision with git checkout writing to an
+    # already-tracked file).
+    {
+        "id_suffix": "dts_gpio_latch_offbyone_riscv32",
+        "category": "runtime_crash",
+        "target_file": "tests/drivers/gpio/gpio_mmio_latch/boards/qemu_riscv32.overlay",
+        "operator": "dts_reg_offbyone:0x8fffff00:0x100",
+        "target_app": "tests/drivers/gpio/gpio_mmio_latch",
+        "board": "qemu_riscv32",
+        "extra_files": {
+            "tests/drivers/gpio/gpio_mmio_latch/boards/qemu_riscv32.overlay":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "gpio_mmio_latch_riscv32", "qemu_riscv32.overlay"),
+            "tests/drivers/gpio/gpio_mmio_latch/tests.yaml":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "gpio_mmio_latch_riscv32", "tests.yaml"),
+        },
+    },
+    # qemu_x86：既有的 tests/drivers/firmware/qemu_fwcfg 測試本來就有
+    # qemu_x86.overlay，不需要移植——直接對它既有的 IO port `reg = <0x510
+    # 0x18>;` 做 dts_reg_offbyone。這是 IO port 定址 (x86 in/out 指令)，不是
+    # 記憶體映射 MMIO，但概念完全對應：qemu_fwcfg_ioport.c 的
+    # sel_port/data_port 都是直接從這個 reg 的位址值算出來、原封不動拿去做
+    # sys_out16/sys_in8，沒有任何邊界檢查。QEMU 真正的 fw-cfg 硬體選擇埠/
+    # 資料埠是寫死在 0x510/0x511，位移 0x2 之後 (sel_port=0x512,
+    # data_port=0x513) 兩個埠都不再對應真正硬體，寫入沒有目標、讀取拿到
+    # 浮空匯流排值——這是「IO 位址算式漏了一項」的真實工程失誤，跟 reg
+    # 的記憶體邊界情境同一類語意，只是位址空間不同。已用 west build -t
+    # run 實測驗證兩端：mutate 端 4 個測試全部因為
+    # `device_is_ready(fwcfg)` 變 false 而失敗 (`fwcfg device not ready`)，
+    # 印出 PROJECT EXECUTION FAILED；revert 端 4/4 全過，印出 PROJECT
+    # EXECUTION SUCCESSFUL。
+    # qemu_x86: the existing tests/drivers/firmware/qemu_fwcfg test already
+    # has a qemu_x86.overlay — no porting needed, just apply
+    # dts_reg_offbyone directly to its existing IO port `reg = <0x510
+    # 0x18>;`. This is I/O-port addressing (x86 in/out instructions), not
+    # memory-mapped MMIO, but the concept maps over exactly:
+    # qemu_fwcfg_ioport.c's sel_port/data_port are computed straight from
+    # this reg's address value and used unguarded in sys_out16/sys_in8, no
+    # bounds check at all. QEMU's real fw-cfg hardware selector/data ports
+    # are hardwired at 0x510/0x511; nudging by 0x2 (sel_port=0x512,
+    # data_port=0x513) points both at ports that don't correspond to real
+    # hardware anymore — writes go nowhere, reads return floating-bus
+    # garbage — a genuine "I/O address arithmetic missed a term" engineering
+    # mistake, the same semantic class as a memory reg boundary miss, just
+    # in a different address space. Empirically verified both sides via west
+    # build -t run: the mutated side fails all 4 tests because
+    # device_is_ready(fwcfg) itself now returns false ("fwcfg device not
+    # ready"), printing PROJECT EXECUTION FAILED; the reverted side passes
+    # 4/4, printing PROJECT EXECUTION SUCCESSFUL.
+    {
+        "id_suffix": "dts_fwcfg_offbyone_x86",
+        "category": "runtime_crash",
+        "target_file": "tests/drivers/firmware/qemu_fwcfg/boards/qemu_x86.overlay",
+        "operator": "dts_reg_offbyone:0x510:0x2",
+        "target_app": "tests/drivers/firmware/qemu_fwcfg",
+        "board": "qemu_x86",
+    },
 ]
 
 
@@ -1924,6 +2055,12 @@ class ZephyrBugMiner:
         cases = []
         for entry in catalog:
             case_id = f"inject_{entry['id_suffix']}"
+            injection = {
+                "target_file": entry["target_file"],
+                "operator": entry["operator"],
+            }
+            if entry.get("extra_files"):
+                injection["extra_files"] = entry["extra_files"]
             cases.append({
                 "id": case_id,
                 "title": f"[Injected] {entry['category']}: {entry['operator']} on {entry['target_file']}",
@@ -1932,10 +2069,7 @@ class ZephyrBugMiner:
                 "fixed_commit": baseline_commit,
                 "target_app": entry["target_app"],
                 "board": entry["board"],
-                "injection": {
-                    "target_file": entry["target_file"],
-                    "operator": entry["operator"],
-                },
+                "injection": injection,
             })
 
         logger.info(f"🧬 產生了 {len(cases)} 筆合成注入候選案例 (尚未驗證)。")

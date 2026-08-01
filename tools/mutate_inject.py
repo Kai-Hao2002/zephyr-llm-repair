@@ -142,6 +142,12 @@ def _dts_reg_offbyone(content: str, hint: Optional[str] = None) -> Optional[str]
     位址值，把它加上 delta_hex 後寫回。沒有 hint 時退回「檔案裡第一個
     `reg = <addr size>;` 的位址值加 1」。
 
+    addr_hex 的比對是在整個 `< ... >` 範圍內找完整字詞 (word boundary)，
+    不要求緊接在 `<` 後面——這是為了同時支援 `#address-cells = <1>` 的
+    雙格 (`reg = <addr size>`) 跟 `#address-cells = <2>` 的四格
+    (`reg = <addr_hi addr_lo size_hi size_lo>`，例如 aarch64 板子) 位址
+    格式；後者的實際位址值通常不是 `<` 後第一個 token。
+
     Nudges the address cell of a `reg = <addr size>;` property by a small
     numeric delta, so it silently slips past a physical boundary it was
     supposed to stay within — unlike `dts_corrupt_reg` (which deletes a
@@ -166,7 +172,7 @@ def _dts_reg_offbyone(content: str, hint: Optional[str] = None) -> Optional[str]
             delta = int(delta_str, 16)
         except ValueError:
             return None
-        pattern = re.compile(r'(reg\s*=\s*<\s*)' + re.escape(addr_str) + r'(\s+[^>]+>\s*;)')
+        pattern = re.compile(r'(reg\s*=\s*<[^>]*?\b)' + re.escape(addr_str) + r'(\b[^>]*>\s*;)')
         m = pattern.search(content)
         if not m:
             return None

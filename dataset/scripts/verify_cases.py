@@ -147,6 +147,7 @@ class ZephyrCaseVerifier:
             category=category,
             target_app=target_app,
             board=board,
+            extra_files=injection.get("extra_files"),
         )
 
         if not gate_result["accepted"]:
