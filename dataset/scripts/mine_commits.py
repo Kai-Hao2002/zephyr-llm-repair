@@ -1886,6 +1886,61 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/eeprom/api",
         "board": "native_sim",
     },
+    # runtime_off_by_one's third tests/drivers win, same family as flash_sim/
+    # eeprom_sim but a different, more literal "off-by-one" this time (delta
+    # of exactly 1, not 3/4). Before landing here, `drivers/gnss/gnss_emul.c`
+    # was investigated and genuinely ruled out by reasoning alone (no Docker
+    # cycle spent): its one array-index pattern
+    # (`data->satellites[data->satellites_len]`, backed by a fixed
+    # `satellites[GNSS_EMUL_SUPPORTED_SYSTEMS_COUNT]` array) is populated by
+    # a loop whose bound (`i < GNSS_EMUL_SUPPORTED_SYSTEMS_COUNT`) exactly
+    # matches the array size by construction — loosening it to `<=` would
+    # only matter if `data->enabled_systems` ever had the COUNT-th bit set,
+    # but the *only* setter, `gnss_emul_set_enabled_systems()`, has its own,
+    # separate guard (`systems > GNSS_EMUL_SUPPORTED_SYSTEMS_MASK` where
+    # MASK is exactly COUNT bits wide) that makes that unreachable through
+    # any public API path — a single-token mutation of the loop bound alone
+    # would be a no-op, and mutating the *setter's* guard alone wouldn't
+    # matter either (the loop bound remains the real barrier) — genuinely
+    # needs two coordinated mutations to open, out of this operator's scope.
+    #
+    # Searched broadly across every `*_emul.c`/`*simulator*.c` driver file
+    # containing `memcpy` for the same "fixed-capacity buffer + single
+    # boundary comparison" shape rather than picking sensor FIFO drivers ad
+    # hoc — `drivers/bbram/bbram_emul.c` matched immediately.
+    # `bbram_emul_read()`'s `offset + size > config->size` guards
+    # `dev_data->data`, a real fixed-size static array
+    # (`bbram_emul_mem_##inst[DT_INST_PROP(inst, size)]`).
+    # `tests/drivers/bbram/emul`'s own `test_bbram_out_of_bounds` already
+    # exercises `bbram_read(dev, 0, BBRAM_SIZE + 1, buffer)` where `buffer`
+    # is a stack array of exactly `BBRAM_SIZE` bytes — the closest possible
+    # overshoot, exactly 1 byte, no larger unit needed unlike flash/eeprom's
+    # write-alignment-driven +4/+3. Anchored hint (unqualified, so it lands
+    # on the *first* occurrence — this exact guard text appears twice
+    # verbatim, once in `bbram_emul_read` and once in `bbram_emul_write`;
+    # only the read side needed mutating to flip this one assertion)
+    # loosens by exactly that 1-byte unit: `... > config->size` -> `... >
+    # config->size + 1`. Verified via a direct ./zephyr/zephyr.exe run:
+    # golden passes 8/8; mutated build does *not* crash (BBRAM_SIZE=0xff, so
+    # the 1-byte overread into stack padding past `buffer[BBRAM_SIZE]`
+    # apparently lands in slack the compiler left rather than faulting) but
+    # cleanly fails the test's own assertion instead — `Assertion failed
+    # ... bbram_read(dev, 0, BBRAM_SIZE + 1, buffer) not equal to -EFAULT`,
+    # `PROJECT EXECUTION FAILED` — still a genuine memory-safety violation
+    # (the call actually returned success and copied past the buffer) and a
+    # clean single-test failure (7 other tests still pass), same acceptable
+    # "state corruption without a hard crash, caught by the test's own
+    # assertion" category as the msgq/sem kernel entries. Reverted file
+    # confirmed byte-identical to the original before wiring into the
+    # catalog.
+    {
+        "id_suffix": "runtime_bbram_emul_offbyone",
+        "category": "runtime_crash",
+        "target_file": "drivers/bbram/bbram_emul.c",
+        "operator": "runtime_off_by_one:offset + size > config->size:offset + size > config->size + 1",
+        "target_app": "tests/drivers/bbram/emul",
+        "board": "native_sim",
+    },
 ]
 
 
