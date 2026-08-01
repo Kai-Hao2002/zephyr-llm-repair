@@ -1856,6 +1856,36 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/flash_simulator/flash_sim_impl",
         "board": "native_sim",
     },
+    # runtime_off_by_one's second tests/drivers win, same round: continued
+    # the "fixed-capacity buffer + single boundary comparison" angle from
+    # flash_simulator.c to eeprom_simulator.c, a sibling native_sim/QEMU-
+    # buildable memory-backed emulator driver. eeprom_range_is_valid()'s
+    # `(offset + len) <= config->size` guards `mock_eeprom`, a real fixed-
+    # size static array (`uint8_t mock_eeprom[DT_INST_PROP(0, size)]`), no
+    # DT-coupling slack. tests/drivers/eeprom/api's own test_out_of_bounds
+    # already exercises `eeprom_write(eeprom, size - 1, data, sizeof(data))`
+    # with a 4-byte data buffer — offset = size-1, len = 4, landing exactly
+    # 3 bytes past the true end — and asserts `-EINVAL`. Anchored hint
+    # loosens the boundary by that same 3-byte unit (`<= config->size` ->
+    # `<= config->size + 3`), letting this exact call through as though it
+    # fit — the same "match the exact overshoot the existing test already
+    # exercises" technique as the flash_simulator entry immediately above,
+    # just a different constant since this driver's test doesn't have a
+    # write-alignment requirement forcing a specific overshoot size.
+    # Verified via a direct ./zephyr/zephyr.exe run: golden passes 7/7;
+    # mutated build crashes with a genuine `Segmentation fault` (exit 139)
+    # right at test_out_of_bounds — eeprom_write's `memcpy(EEPROM(offset),
+    # data, len)` writes 3 bytes past mock_eeprom's real allocated array, a
+    # true heap-overflow memory-safety fault. Reverted file confirmed byte-
+    # identical to the original before wiring into the catalog.
+    {
+        "id_suffix": "runtime_eeprom_sim_offbyone",
+        "category": "runtime_crash",
+        "target_file": "drivers/eeprom/eeprom_simulator.c",
+        "operator": "runtime_off_by_one:(offset + len) <= config->size:(offset + len) <= config->size + 3",
+        "target_app": "tests/drivers/eeprom/api",
+        "board": "native_sim",
+    },
 ]
 
 
