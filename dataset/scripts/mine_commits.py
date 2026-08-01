@@ -1626,6 +1626,52 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/stack/stack",
         "board": "native_sim",
     },
+    # runtime_off_by_one's fifth target, continuing the same "fixed-capacity
+    # kernel object, single-comparison full guard" search angle to k_pipe/
+    # k_mbox/k_sem per the user's own follow-up. k_pipe was ruled out by
+    # reasoning: its own boundary logic all delegates to lib/utils/
+    # ring_buffer.c's claim/finish machinery (safe-by-construction via min()
+    # clamps, hard to introduce a clean off-by-one), and the one standalone
+    # comparison in kernel/pipe.c itself (copy_to_pending_readers()'s
+    # `reader_buf->used < reader_buf->len`, deciding whether to unpend a
+    # waiting reader) is a genuine hang risk if loosened — a reader that's
+    # actually done waiting would never get unpended, and k_pipe_read()'s
+    # test callers typically block with K_FOREVER, matching the standing
+    # "k_thread_join(..., K_FOREVER)-shaped hang trap" rule. k_mbox was
+    # ruled out too: it has no fixed-capacity buffer at all (rendezvous via
+    # a waitq, not an array), and its one size-related guard
+    # (mbox_message_match()'s size-clamp) only shrinks a *reported* size
+    # field, never itself the source of a real OOB access — no clean single-
+    # token off-by-one edit changes its outcome for any existing test's
+    # actual size gap.
+    # kernel/sem.c's k_sem_give() DOES fit the pattern precisely, once
+    # broadened from "array index" to "bounded counter increment" (same
+    # boundary-guard shape as msgq/stack, just no backing memory array to
+    # overflow — count is used standalone, so this entry is a state/logic
+    # off-by-one like the msgq case rather than stack's memory OOB):
+    # `sem->count += (sem->count != sem->limit) ? 1U : 0U;` caps count at
+    # limit. Anchored hint shifts the cap boundary by exactly one
+    # (`sem->count != sem->limit` -> `sem->count != sem->limit + 1`, the most
+    # literal "off-by-one" of the 4 runtime_off_by_one entries so far — the
+    # ternary now adds 1U even when count already equals limit, only capping
+    # once count reaches limit+1), letting exactly one give-above-limit
+    # through before the cap resumes. tests/kernel/semaphore/semaphore's
+    # SEM_MAX_VAL=10 K_SEM_DEFINE-based suite already has two ready-made
+    # tests exercising precisely a single give-above-limit:
+    # test_sem_count_get (one extra give past 10, asserts count stays 10)
+    # and test_k_sem_correct_count_limit (five extra gives, same assertion
+    # style, named for exactly this invariant). Mutated build: both fail
+    # cleanly (2 of 21 tests in the `semaphore` suite), 19 others pass, no
+    # crash/hang. Reverted build: byte-identical file, all tests pass,
+    # PROJECT EXECUTION SUCCESSFUL.
+    {
+        "id_suffix": "runtime_sem_offbyone",
+        "category": "runtime_crash",
+        "target_file": "kernel/sem.c",
+        "operator": "runtime_off_by_one:sem->count != sem->limit:sem->count != sem->limit + 1",
+        "target_app": "tests/kernel/semaphore/semaphore",
+        "board": "native_sim",
+    },
 ]
 
 
