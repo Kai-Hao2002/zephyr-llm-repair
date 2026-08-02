@@ -2626,6 +2626,56 @@ INJECTION_CATALOG = [
                 os.path.join(os.path.dirname(__file__), "injection_assets", "rtio_workq_null_req_test", "main.c"),
         },
     },
+    # c_api_substitute's second tests/subsys entry (session 46
+    # continued), following user's explicit request to find a
+    # tests/subsys target for this operator specifically — the most
+    # lagging operator (11/35), to advance both it and tests/subsys at
+    # once. Searched the same "k_sleep + explicit priority constant" and
+    # "give/allow/chance ... run" comment patterns from session 30, this
+    # time turning up `tests/subsys/modem/modem_ppp` (a sibling test app
+    # in the same subsys/modem family as session 30's `modem_ubx` win) —
+    # not found by session 30's own search since it needed the broader
+    # comment-based variant.
+    #
+    # `tests/subsys/modem/modem_ppp/src/main.c`'s shared helper
+    # `put_and_validate_wrapped_frame()` (called by 2 tests) has `/* Give
+    # modem ppp time to process received frame */ k_msleep(1000);` before
+    # asserting a frame was received. Checked the actual processing
+    # mechanism before assuming: `modem_ppp.c` submits work via
+    # `modem_work_submit()`, which (this test's `prj.conf` doesn't set
+    # `CONFIG_MODEM_DEDICATED_WORKQUEUE`) falls back to the *system*
+    # workqueue — both `CONFIG_SYSTEM_WORKQUEUE_PRIORITY` and
+    # `CONFIG_ZTEST_THREAD_PRIORITY` default to the same value (-1,
+    # cooperative), so per session 8's "yield still schedules same-priority
+    # peers" lesson, a single `k_yield()` looked like it *should* be
+    # enough to let the workqueue thread run — reasoning alone couldn't
+    # settle whether the frame-processing itself needs actual elapsed
+    # time beyond one scheduling opportunity (the same ambiguity
+    # `modem_ubx`'s own source comment flagged, "may rely on multiple
+    # thread interactions which may not be served by simply yielding"),
+    # so tested empirically per session 10's standing rule rather than
+    # reasoning it away.
+    #
+    # Substituting `k_msleep(1000);` -> `k_yield();` (scoped to
+    # `put_and_validate_wrapped_frame`, since the literal `k_msleep(1000);`
+    # text repeats 8 times across the file) confirmed the real-time
+    # requirement empirically: both callers of the shared helper fail
+    # cleanly (`test_ppp_frame_receive`/`test_ppp_no_connect_received`,
+    # `zassert_true(received_packets_len == 1)` false — the workqueue
+    # thread never got scheduled/completed processing in time), 10 of 12
+    # tests in the suite unaffected, no crash/hang. Reverted file
+    # confirmed byte-identical via `git status --porcelain`. No
+    # `extra_files` needed — a pure mutation of an already-existing,
+    # already-correct test, same as the very first `c_api_substitute`
+    # entries.
+    {
+        "id_suffix": "c_api_substitute_modem_ppp",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/modem/modem_ppp/src/main.c",
+        "operator": "c_api_substitute:put_and_validate_wrapped_frame:k_msleep(1000);:k_yield();",
+        "target_app": "tests/subsys/modem/modem_ppp",
+        "board": "native_sim",
+    },
 ]
 
 
