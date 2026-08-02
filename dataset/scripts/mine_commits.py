@@ -2292,6 +2292,62 @@ INJECTION_CATALOG = [
                 os.path.join(os.path.dirname(__file__), "injection_assets", "bmi160_emul_reg_oob_test", "main.c"),
         },
     },
+    # runtime_off_by_one's third tests/subsys entry (session 46 continued):
+    # a genuine full-blown false-start happened first this round —
+    # tests/subsys/zbus/hlp_priority_boost looked like a fresh
+    # thread_priority_swap win, was independently re-derived and verified
+    # through the real pipeline, then discovered (only after reading the
+    # rest of this memory file's middle sessions, which a truncated
+    # head+tail read had skipped) to be an exact duplicate of session 22's
+    # already-registered thread_priority_swap_zbus_hlp entry — same file,
+    # same operator string. Removed before committing; the lesson carried
+    # forward is to always read the full catalog (or grep it for the
+    # target file) before investing a recon round in a subsystem, not just
+    # the memory file's most recent sessions.
+    #
+    # The actual new win: subsys/storage/stream/stream_flash.c's
+    # `stream_flash_buffered_write()` has
+    # `if (ctx->bytes_written + ctx->buf_bytes + len > ctx->available) {
+    # return -ENOMEM; }` — a real, correct guard against writing past the
+    # caller-declared `available` region (set via `stream_flash_init`),
+    # checked *before* any memcpy into the internal `ctx->buf`/flash write
+    # happens. tests/subsys/storage/stream/stream_flash (native_sim,
+    # no scenario gating) has 14 tests total but none probe this exact
+    # boundary — only `stream_flash_init`'s own separate, different size
+    # check (`FLASH_AVAILABLE + 4`) is tested.
+    #
+    # Added `test_stream_flash_buffered_write_available_offbyone`: reinits
+    # `ctx` with a small `available` (100 bytes, well inside native_sim's
+    # real ~1.9MB flash region so no genuine OOB write risk either
+    # direction) and calls `stream_flash_buffered_write` with exactly 101
+    # bytes using the file's own existing large `write_buf` (16KB, no
+    # under-sized source-buffer risk), asserting `-ENOMEM`. Loosened the
+    # guard by that same 1-byte unit (`> ctx->available` ->
+    # `> ctx->available + 1`), so the loosened check no longer rejects
+    # bytes_written+buf_bytes+len == available+1 — the write silently
+    # succeeds and lands 1 byte past the caller's declared logical
+    # boundary (still real, valid physical flash, so no crash — a clean
+    # state/logic violation caught purely by the test's own assertion,
+    # same category as msgq/sem/bbram/rtc_emul/i2c_emul).
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run before wiring into the
+    # pipeline: golden (new test in place) passes 14/15 (1 unrelated,
+    # pre-existing skip); mutated build fails cleanly and only at the new
+    # test (13/15 pass, `PROJECT EXECUTION FAILED`), no cascade to any of
+    # the other 13 tests. Reverted file confirmed byte-identical via
+    # `git status --porcelain`.
+    {
+        "id_suffix": "runtime_stream_flash_available_offbyone",
+        "category": "runtime_crash",
+        "target_file": "subsys/storage/stream/stream_flash.c",
+        "operator": "runtime_off_by_one:if (ctx->bytes_written + ctx->buf_bytes + len > ctx->available) {:if (ctx->bytes_written + ctx->buf_bytes + len > ctx->available + 1) {",
+        "target_app": "tests/subsys/storage/stream/stream_flash",
+        "board": "native_sim",
+        "extra_files": {
+            "tests/subsys/storage/stream/stream_flash/src/main.c":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "stream_flash_available_offbyone_test", "main.c"),
+        },
+    },
 ]
 
 
