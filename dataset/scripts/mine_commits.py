@@ -2021,6 +2021,61 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/gpio/gpio_get_direction",
         "board": "native_sim",
     },
+    # runtime_off_by_one's fourth tests/drivers entry, drivers/adc/adc_emul.c
+    # — the first catalog entry that needed *adding* a new test case rather
+    # than finding one that already exists, following the same "port an
+    # existing thing to a new context" precedent as session 34's
+    # gpio_mmio_latch riscv32 port (which is what motivated FaultInjector's
+    # extra_files mechanism in the first place).
+    #
+    # `adc_emul_const_value_set(dev, chan, value)` (and 3 siblings —
+    # `_const_raw_value_set`, `_value_func_set`, `_raw_value_func_set`) are
+    # public emulator-control functions test code calls directly, each
+    # guarded by `if (chan >= config->num_channels) { return -EINVAL; }`
+    # before writing into `data->chan_cfg[chan]` (a fixed-size array sized to
+    # exactly `nchannels` from DT). This is a much better-shaped candidate
+    # than the fuel-gauge/`i2c_emul.c` dead ends (sessions 39-40): `chan` is
+    # directly test-controlled, not funneled through one internally-
+    # consistent real-driver caller. But — unlike flash_simulator/
+    # eeprom_simulator/bbram_emul — no *existing* test in
+    # `tests/drivers/adc/adc_emul` ever calls with an out-of-range channel;
+    # every call uses `ADC_1ST_CHANNEL_ID`/`ADC_2ND_CHANNEL_ID` (native_sim's
+    # `adc0` node declares `nchannels = <2>`, so valid channels are exactly
+    # {0, 1}). Rather than settle for a low-confidence huge-delta mutation
+    # (declined for `i2c_emul.c`'s `UINT32_MAX` case in session 39) or skip
+    # the driver entirely, added one new `ZTEST_USER` case,
+    # `test_adc_emul_const_value_set_invalid_channel`, calling
+    # `adc_emul_const_value_set(adc_dev, ADC_INVALID_CHANNEL_ID, 1500)` where
+    # `ADC_INVALID_CHANNEL_ID` is `DT_PROP(DT_INST(0, zephyr_adc_emul),
+    # nchannels)` (= 2, one past the valid range, derived from the same DT
+    # prop the driver's own guard checks against — not a hardcoded magic
+    # number), asserting `-EINVAL`. The full modified `main.c` (13 existing
+    # tests, byte-identical, plus this one new test appended before
+    # `adc_emul_setup`) is delivered via `extra_files`, the same staging-then-
+    # cp mechanism used for the riscv32 gpio_mmio_latch port.
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden (unmutated
+    # driver, with the new test in place) passes 13/13, including the new
+    # test logging "unsupported channel 2" and returning -EINVAL correctly;
+    # mutated build (anchored on the *first* occurrence of `if (chan >=
+    # config->num_channels) {`, inside `adc_emul_const_value_set` — the
+    # function the new test targets — loosened to `if (chan > ...) {`) fails
+    # cleanly and exactly at the new test (12/13 pass, 1 fail,
+    # `PROJECT EXECUTION FAILED`) with no cascading effect on the other 12
+    # tests. Reverted driver file confirmed byte-identical to the original
+    # before wiring into the catalog.
+    {
+        "id_suffix": "runtime_adc_emul_offbyone",
+        "category": "runtime_crash",
+        "target_file": "drivers/adc/adc_emul.c",
+        "operator": "runtime_off_by_one:if (chan >= config->num_channels) {:if (chan > config->num_channels) {",
+        "target_app": "tests/drivers/adc/adc_emul",
+        "board": "native_sim",
+        "extra_files": {
+            "tests/drivers/adc/adc_emul/src/main.c":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "adc_emul_invalid_channel_test", "main.c"),
+        },
+    },
 ]
 
 
