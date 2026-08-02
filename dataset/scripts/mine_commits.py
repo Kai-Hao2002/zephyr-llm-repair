@@ -2583,6 +2583,49 @@ INJECTION_CATALOG = [
                 os.path.join(os.path.dirname(__file__), "injection_assets", "i2c_rtio_copy_pool_exhausted_test", "main.cpp"),
         },
     },
+    # runtime_remove_null_check's third tests/subsys entry (session 46
+    # continued), the last of tests/subsys/rtio's 3 apps — 3 wins in a
+    # row for this directory now. `subsys/rtio/rtio_workq.c`'s
+    # `rtio_work_req_submit()` guards its `req` parameter: `if (!req) {
+    # return; }`, before a second guard for `iodev_sqe`/`handler` and
+    # then `req->iodev_sqe = iodev_sqe; req->handler = handler;`.
+    # `tests/subsys/rtio/workq`'s own `test_used_count_keeps_track_of_alloc_items`
+    # already exercises `rtio_work_req_alloc()` returning NULL once the
+    # 4-item slab (`CONFIG_RTIO_WORKQ_POOL_ITEMS`, defaults to 4) is
+    # exhausted — but never then calls `rtio_work_req_submit()` with that
+    # NULL result, so the `!req` guard itself was never actually probed.
+    #
+    # Added `test_work_req_submit_rejects_null_req`: calls
+    # `rtio_work_req_submit(NULL, &dummy_iodev_sqe, work_handler)` with a
+    # real, non-NULL `iodev_sqe`/`handler` pair (a local
+    # `struct rtio_iodev_sqe` — a complete, non-opaque type, confirmed via
+    # `sqe.h`) so the *second* guard can't also catch it — isolating the
+    # `!req` check specifically. Golden path: rejected immediately,
+    # `rtio_work_req_used_count_get()` stays 0. Disabled the guard
+    # entirely (`if (!req) {` -> `if (0) {`).
+    #
+    # With the guard disabled, the second guard's condition
+    # (`!iodev_sqe || !handler`) is false (both are real, non-NULL), so
+    # execution falls through to `req->iodev_sqe = iodev_sqe;` — a direct
+    # NULL-pointer write, since `req` is still NULL.
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden passes 6/6;
+    # mutated build crashes with a genuine `Segmentation fault` (exit
+    # 139) exactly at the new test, the 2 preceding tests unaffected.
+    # Reverted file confirmed byte-identical via `git status
+    # --porcelain`.
+    {
+        "id_suffix": "runtime_rtio_workq_submit_null_req",
+        "category": "runtime_crash",
+        "target_file": "subsys/rtio/rtio_workq.c",
+        "operator": "runtime_remove_null_check:if (!req) {:if (0) {",
+        "target_app": "tests/subsys/rtio/workq",
+        "board": "native_sim",
+        "extra_files": {
+            "tests/subsys/rtio/workq/src/main.c":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "rtio_workq_null_req_test", "main.c"),
+        },
+    },
 ]
 
 
