@@ -1982,6 +1982,45 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/can/api",
         "board": "native_sim",
     },
+    # runtime_remove_null_check's second tests/drivers entry, this time on
+    # GPIO. Session 39's broad drivers/-wide "!= NULL) { *x = ..." grep
+    # found 9 GPIO drivers, but every single one is a vendor-specific real-
+    # hardware controller (andestech/realtek/sifive/designware/litex/nxp/
+    # microchip/nordic/silabs) — cross-checked each DT_DRV_COMPAT against
+    # native_sim's and all 5 QEMU boards' devicetree sources and found zero
+    # matches; native_sim's actual GPIO backend is `zephyr,gpio-emul`
+    # (drivers/gpio/gpio_emul.c), which the broad grep hadn't matched
+    # because its own null checks use a different (still valid but
+    # differently-spelled) shape the pattern didn't happen to catch, so it
+    # needed a direct, targeted look rather than trusting the earlier list.
+    #
+    # `gpio_emul_port_get_direction()` (gated behind CONFIG_GPIO_GET_DIRECTION)
+    # implements the public `gpio_port_get_direction()` API, whose `inputs`
+    # and `outputs` parameters are independently optional by documented
+    # contract — confirmed by the header's own inline helpers:
+    # `gpio_pin_is_input()` calls `gpio_port_get_direction(port, BIT(pin),
+    # &pins, NULL)` (outputs=NULL) and the symmetric `gpio_pin_is_output()`
+    # passes inputs=NULL. `z_impl_gpio_port_get_direction()` passes straight
+    # through to the driver with no NULL check of its own.
+    # `tests/drivers/gpio/gpio_get_direction` (CONFIG_GPIO_GET_DIRECTION=y,
+    # native_sim-buildable via the board's `led0`/`gpio-leds` alias) calls
+    # `gpio_pin_is_input()` as the very first check in all 4 of its test
+    # functions — so mutating just the `outputs != NULL` guard is hit
+    # immediately and unconditionally, every time. Verified via a direct
+    # ./zephyr/zephyr.exe run: golden passes 4/4; mutated build (`if
+    # (outputs != NULL) {` -> `if (1) {`) crashes with a genuine
+    # `Segmentation fault` (exit 139) right at the first test
+    # (test_disconnect) — an unconditional `*outputs = op;` write through
+    # gpio_pin_is_input()'s NULL argument. Reverted file confirmed byte-
+    # identical to the original before wiring into the catalog.
+    {
+        "id_suffix": "runtime_gpio_emul_nullcheck",
+        "category": "runtime_crash",
+        "target_file": "drivers/gpio/gpio_emul.c",
+        "operator": "runtime_remove_null_check:if (outputs != NULL) {:if (1) {",
+        "target_app": "tests/drivers/gpio/gpio_get_direction",
+        "board": "native_sim",
+    },
 ]
 
 
