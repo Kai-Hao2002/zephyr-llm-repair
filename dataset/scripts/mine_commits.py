@@ -2194,6 +2194,62 @@ INJECTION_CATALOG = [
                 os.path.join(os.path.dirname(__file__), "injection_assets", "i2c_emul_overflow_by_one_test", "native_sim.overlay"),
         },
     },
+    # runtime_off_by_one's first tests/subsys entry via drivers/video/
+    # video_emul_rx.c — user's "video_emul" suggestion (session 44) led here
+    # after two dead ends: `drivers/spi/spi_emul.c` (a thin bus dispatcher
+    # like i2c_emul.c but with no arrays/boundaries at all — no candidate,
+    # and no tests/drivers/spi app even builds on native_sim anyway, so
+    # doubly unreachable) and `drivers/video/video_emul_imager.c`'s
+    # `emul_imager_fake_regs[20]` array indexed by an *unchecked* `reg_addr`
+    # (uint8_t, 0-255) — flagged to the user as a genuinely different shape
+    # (an already-unguarded array access in upstream code, not an existing
+    # correct guard this operator's mutation model can loosen) and set
+    # aside per explicit direction rather than forced into the catalog.
+    #
+    # `emul_rx_enqueue()`'s `if (vbuf->size < fmt->pitch * fmt->height) {
+    # return -ENOMEM; }` is the right shape: guards a caller-supplied
+    # `struct video_buffer`'s `.size` field (test-controlled via
+    # `video_buffer_alloc()`) before `emul_rx_worker()` later
+    # unconditionally `memcpy`s `fmt->pitch * fmt->height` bytes into
+    # `vbuf->buffer`. Confirmed `video_enqueue()`'s public wrapper
+    # (`subsys/video/buffer.c`) does no size validation of its own — only
+    # checks `dev`/`buf` non-NULL and a valid pool index — so nothing
+    # upstream blocks a caller from enqueueing a too-small buffer.
+    # `tests/subsys/video/api` (native_sim-buildable) already has
+    # `test_video_vbuf`, which allocates a buffer of the exact required
+    # size via `video_buffer_alloc(fmt.pitch * fmt.height, ...)` — never
+    # one byte short. Added `test_video_vbuf_too_small` (same suite,
+    # `video_common`): identical setup, but allocates `fmt.pitch *
+    # fmt.height - 1` and expects `video_enqueue()` to return `-ENOMEM`.
+    # Anchored hint loosens the guard by that same 1-byte unit: `vbuf->size
+    # < fmt->pitch * fmt->height` -> `vbuf->size < fmt->pitch * fmt->height
+    # - 1`.
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden (new test in
+    # place) passes 10/10 across all 3 suites in the app; mutated build
+    # produces a genuine `Segmentation fault` (exit 139) — stronger
+    # evidence than a clean assertion mismatch: the loosened guard lets
+    # `video_enqueue()` return success for the undersized buffer, the test
+    # (using `zexpect_equal`, non-fatal) logs the mismatch and continues to
+    # `video_buffer_release(vbuf)`, but the work item queued by the
+    # already-submitted enqueue still fires asynchronously afterward and
+    # the worker's log line prints the buffer pointer as `(nil)` right
+    # before the crash — a genuine use-after-free/corruption in the
+    # async worker path, not merely a same-thread OOB write. Reverted
+    # driver file confirmed byte-identical to the original before wiring
+    # into the catalog.
+    {
+        "id_suffix": "runtime_video_emul_rx_offbyone",
+        "category": "runtime_crash",
+        "target_file": "drivers/video/video_emul_rx.c",
+        "operator": "runtime_off_by_one:if (vbuf->size < fmt->pitch * fmt->height) {:if (vbuf->size < fmt->pitch * fmt->height - 1) {",
+        "target_app": "tests/subsys/video/api",
+        "board": "native_sim",
+        "extra_files": {
+            "tests/subsys/video/api/src/video_emul.c":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "video_emul_rx_too_small_test", "video_emul.c"),
+        },
+    },
 ]
 
 
