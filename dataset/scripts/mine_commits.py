@@ -2482,6 +2482,60 @@ INJECTION_CATALOG = [
                 os.path.join(os.path.dirname(__file__), "injection_assets", "mcuboot_header_size_offbyone_test", "main.c"),
         },
     },
+    # runtime_off_by_one's first tests/subsys/rtio entry (session 46
+    # continued), a deliberate pivot to fresh tests/subsys territory after
+    # `tests/subsys/dfu/mcuboot_multi` turned out to be a genuine dead
+    # end (its two tests only call thin wrappers around external bootutil
+    # functions with no local logic, and everything else it exercises
+    # reuses the flash_map_priv.h path already covered).
+    #
+    # `include/zephyr/rtio/rtio.h`'s `z_impl_rtio_sqe_copy_in_get_handles()`
+    # has the same "fixed-capacity pool + upfront count check" shape that
+    # already won 3 `kernel/*.c` entries (sessions 32-33): `if (acquirable
+    # < sqe_count) { return -ENOMEM; }`, checked before a loop that
+    # unconditionally acquires `sqe_count` SQEs from the pool and asserts
+    # each one non-NULL (`__ASSERT_NO_MSG(sqe != NULL)`). A sibling
+    # function, `rtio_sqe_acquire_array()`, has an *already* well-shaped,
+    # tightly-tested guard of its own (self-correcting rollback loop, not
+    # a naive single comparison — not a good "loosen it" candidate, and
+    # `tests/subsys/rtio/rtio_api`'s own `test_rtio_acquire_array` already
+    # tightly probes it) — but no existing test calls
+    # `rtio_sqe_copy_in_get_handles`/`rtio_sqe_copy_in` with a count that
+    # exceeds the pool's actual remaining capacity by exactly one.
+    #
+    # Added `test_rtio_sqe_copy_in_offbyone` to
+    # `tests/subsys/rtio/rtio_api/src/test_rtio_api.c` (a fresh, isolated
+    # `RTIO_DEFINE` context, same pattern `test_rtio_acquire_array` already
+    # uses): fills the pool to `SQE_POOL_SIZE - 1` (leaving exactly one
+    # free), then requests 2 more, asserting `-ENOMEM`. Loosened the guard
+    # by that same 1-unit delta (`acquirable < sqe_count` ->
+    # `acquirable < sqe_count - 1`).
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden passes 20/20
+    # (across both the `rtio_api` and `rtio_pool` suites in this binary);
+    # mutated build produces a genuine kernel panic — `ASSERTION FAIL [sqe
+    # != ((void *)0)] @ .../rtio.h:907` followed by `>>> ZEPHYR FATAL
+    # ERROR 4: Kernel panic on CPU 0`, halting the whole binary right at
+    # the new test (the loosened check lets the acquire-loop run one
+    # iteration past the pool's actual capacity, hitting the function's
+    # own internal `__ASSERT_NO_MSG(sqe != NULL)`) — a stronger crash
+    # signature than a clean assertion failure, same acceptance reasoning
+    # as session 18's PM-device-order kernel-panic case (a halt-everything
+    # panic is still valid evidence, not a hang — the process exits
+    # immediately with a non-zero code, no timeout risk). Reverted file
+    # confirmed byte-identical via `git status --porcelain`.
+    {
+        "id_suffix": "runtime_rtio_sqe_copy_in_offbyone",
+        "category": "runtime_crash",
+        "target_file": "include/zephyr/rtio/rtio.h",
+        "operator": "runtime_off_by_one:if (acquirable < sqe_count) {:if (acquirable < sqe_count - 1) {",
+        "target_app": "tests/subsys/rtio/rtio_api",
+        "board": "native_sim",
+        "extra_files": {
+            "tests/subsys/rtio/rtio_api/src/test_rtio_api.c":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "rtio_sqe_copy_in_offbyone_test", "test_rtio_api.c"),
+        },
+    },
 ]
 
 
