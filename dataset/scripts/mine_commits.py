@@ -2250,6 +2250,48 @@ INJECTION_CATALOG = [
                 os.path.join(os.path.dirname(__file__), "injection_assets", "video_emul_rx_too_small_test", "video_emul.c"),
         },
     },
+    # runtime_off_by_one's second tests/subsys entry, via a sensor emulator
+    # exercised through tests/subsys/sensing (session 46, following up on
+    # session 45's "check other tests/subsys-housed emulator-backed
+    # subsystems" suggestion). tests/subsys/sensing's native_sim.conf sets
+    # CONFIG_EMUL_BMI160=y, so this test app already compiles in
+    # drivers/sensor/bosch/bmi160/emul_bmi160.c even though its own test
+    # (test_sensing_get_sensors) never exercises the emulator's public API.
+    #
+    # emul_bmi160_get_reg_value()'s `if (reg_number < 0 || reg_number +
+    # count > BMI160_REG_COUNT) { return -EINVAL; }` is the same shape as
+    # the video_emul_rx.c win: a real, correct guard on a public, exported
+    # function (declared in the driver's own emul_bmi160.h, exposed to any
+    # app via `zephyr_include_directories_ifdef(CONFIG_EMUL_BMI160 .)`)
+    # protecting a real fixed-size backing buffer
+    # (`bmi160_emul_reg_##n[BMI160_REG_COUNT]`, a 128-byte static array)
+    # from a caller-controlled `memcpy` a few lines later. No existing test
+    # calls this function at all. Added `test_bmi160_emul_get_reg_value_oob`
+    # (same file, same `sensing_tests` suite): reads 1 byte starting at
+    # `BMI160_REG_COUNT` (one past the last valid register) and expects
+    # `-EINVAL`. Loosened the guard's bound by exactly that 1-byte unit.
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run before wiring into the
+    # pipeline: golden (new test in place) passes 2/2; mutated build lets
+    # the OOB read return 0 instead of -EINVAL, failing the new test's
+    # zassert cleanly (`PROJECT EXECUTION FAILED`) while
+    # test_sensing_get_sensors still passes — an isolated failure, not a
+    # segfault, since a 1-byte over-read of a static array doesn't cross a
+    # page boundary on native_sim. Reverted driver file confirmed
+    # byte-identical. Passed the full two-sided gate via `verify_cases.py`
+    # on the first attempt.
+    {
+        "id_suffix": "runtime_bmi160_emul_reg_oob",
+        "category": "runtime_crash",
+        "target_file": "drivers/sensor/bosch/bmi160/emul_bmi160.c",
+        "operator": "runtime_off_by_one:if (reg_number < 0 || reg_number + count > BMI160_REG_COUNT) {:if (reg_number < 0 || reg_number + count > BMI160_REG_COUNT + 1) {",
+        "target_app": "tests/subsys/sensing",
+        "board": "native_sim",
+        "extra_files": {
+            "tests/subsys/sensing/src/main.c":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "bmi160_emul_reg_oob_test", "main.c"),
+        },
+    },
 ]
 
 
