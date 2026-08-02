@@ -2432,6 +2432,56 @@ INJECTION_CATALOG = [
                 os.path.join(os.path.dirname(__file__), "injection_assets", "flash_map_bounds_offbyone_test", "main.c"),
         },
     },
+    # runtime_off_by_one's fifth tests/subsys entry (session 46
+    # continued), the fourth win in a row from the subsys/storage +
+    # subsys/dfu neighborhood. subsys/dfu/boot/mcuboot.c's
+    # `boot_read_bank_header()` guards the caller-declared size of its
+    # output `header` parameter: `if (header_size < v1_min_size) { return
+    # -ENOMEM; }`, where `v1_min_size = sizeof(uint32_t) +
+    # sizeof(struct mcuboot_img_header_v1)`. This is a genuine
+    # ABI-compatibility guard against writing into an undersized caller
+    # buffer via `header->h.v1.*` fields further down — same
+    # "caller-declared output-buffer-size guard" shape as the
+    # `stream_flash.c`/`flash_map_priv.h` wins, one level up in the
+    # MCUboot-interface abstraction. No existing test in
+    # `tests/subsys/dfu/mcuboot` calls `boot_read_bank_header` at all.
+    #
+    # Added `test_read_bank_header_size_offbyone`: calls
+    # `boot_read_bank_header(SLOT0_PARTITION_ID, &header, v1_min_size - 1)`
+    # (the test's own real, correctly-sized `struct mcuboot_img_header`
+    # local — the mutation cannot cause an actual OOB write here, only a
+    # logically-wrong "this undersized-by-1 header_size was accepted"
+    # state, same non-crash category as `flash_map_priv.h`'s win),
+    # asserting `-ENOMEM`. Loosened the guard by that same 1-byte unit
+    # (`header_size < v1_min_size` -> `header_size < v1_min_size - 1`).
+    #
+    # The size check runs *before* any flash access, so the golden path
+    # never even needs a real, valid MCUboot v1 header present in flash —
+    # it's rejected purely on the size argument. When the guard is
+    # loosened, execution proceeds to `boot_read_v1_header()`, which reads
+    # this plain ztest binary's actual flash content (no real MCUboot
+    # image header present) and fails its own magic-number check,
+    # returning `-EIO` instead — still not `-ENOMEM`, so the mutation is
+    # caught either way, without needing to fabricate a valid on-flash
+    # header.
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden passes 4/4;
+    # mutated build fails cleanly and only at the new test (`ret not equal
+    # to -ENOMEM, expected -ENOMEM ... got -5`, 3/4 pass, `PROJECT
+    # EXECUTION FAILED`), zero cascade to the other 3 tests. Reverted file
+    # confirmed byte-identical via `git status --porcelain`.
+    {
+        "id_suffix": "runtime_mcuboot_header_size_offbyone",
+        "category": "runtime_crash",
+        "target_file": "subsys/dfu/boot/mcuboot.c",
+        "operator": "runtime_off_by_one:if (header_size < v1_min_size) {:if (header_size < v1_min_size - 1) {",
+        "target_app": "tests/subsys/dfu/mcuboot",
+        "board": "native_sim",
+        "extra_files": {
+            "tests/subsys/dfu/mcuboot/src/main.c":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "mcuboot_header_size_offbyone_test", "main.c"),
+        },
+    },
 ]
 
 
