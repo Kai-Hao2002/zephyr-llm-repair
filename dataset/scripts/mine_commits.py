@@ -2348,6 +2348,45 @@ INJECTION_CATALOG = [
                 os.path.join(os.path.dirname(__file__), "injection_assets", "stream_flash_available_offbyone_test", "main.c"),
         },
     },
+    # runtime_remove_null_check's first tests/subsys entry (session 46
+    # continued, user asked to keep going into tests/subsys/dfu/img_util).
+    # subsys/dfu/img_util/flash_img.c's flash_img_buffered_write() itself
+    # delegates all boundary math to stream_flash_buffered_write() (no
+    # independent guard of its own — the same file already carries a
+    # runtime_off_by_one entry above, so a second mutation there would
+    # just be the identical bug reused, not attempted). flash_img_check()
+    # is the more promising function: `if (!ctx || !fic) { return
+    # -EINVAL; }` guards against NULL inputs before dereferencing either.
+    # Written as `!ptr` shorthand rather than the operator's usual `!=
+    # NULL` literal form, but the anchored-hint mechanism is pure literal
+    # text replacement, so it works identically — same underlying
+    # NULL-check-removal mutation, just a different (equally common) C
+    # idiom for expressing it.
+    #
+    # Unlike every prior `runtime_remove_null_check` entry (all "optional
+    # output pointer" idioms needing a fresh test to reach the NULL path),
+    # `tests/subsys/dfu/img_util`'s own `test_check_flash` *already*
+    # exercises this exact guard: `flash_img_check(NULL, NULL, 0)` is the
+    # very first call in its NULL-validation block, asserting `ret ==
+    # -EINVAL`. No `extra_files`/new test needed at all — a existing,
+    # already-correct test directly probes the guard this operator
+    # disables.
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden passes 3/3;
+    # mutated build (`if (!ctx || !fic) {` -> `if (0) {`) crashes with a
+    # genuine `Segmentation fault` (exit 139) immediately at
+    # `test_check_flash` — the disabled guard lets `flash_img_check` reach
+    # `fac.match = fic->match` with `fic` still NULL, a direct NULL-pointer
+    # read. Reverted file confirmed byte-identical via `git status
+    # --porcelain`.
+    {
+        "id_suffix": "runtime_flash_img_check_nullcheck",
+        "category": "runtime_crash",
+        "target_file": "subsys/dfu/img_util/flash_img.c",
+        "operator": "runtime_remove_null_check:if (!ctx || !fic) {:if (0) {",
+        "target_app": "tests/subsys/dfu/img_util",
+        "board": "native_sim",
+    },
 ]
 
 
