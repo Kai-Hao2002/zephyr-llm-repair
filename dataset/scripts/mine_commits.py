@@ -2387,6 +2387,51 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/dfu/img_util",
         "board": "native_sim",
     },
+    # runtime_off_by_one's fourth tests/subsys entry (session 46
+    # continued, following up on the "storage/flash_map is a sibling of
+    # the just-won storage/stream, untried" lead). subsys/storage/flash_map's
+    # own flash_map.c delegates every boundary check
+    # (flash_area_read/write/erase/copy/flatten) to a single shared inline
+    # helper in flash_map_priv.h, `is_in_flash_area_bounds()`: `(off >= 0)
+    # && (off < fa->fa_size) && (len <= (fa->fa_size - off))` — the
+    # fundamental gate for the whole flash_map abstraction layer, one
+    # level above the raw flash driver (a different layer than session
+    # 35's `flash_simulator.c` win, which mutated the driver itself).
+    #
+    # `tests/subsys/storage/flash_map`'s own `test_parameter_overflows`
+    # already probes this guard, but only with `(size_t)(-1)`-style
+    # integer-overflow lengths — a huge overshoot, not a tight one (same
+    # "not a genuine off-by-one, closer to the check being deleted
+    # entirely" shape session 39 declined for `i2c_emul.c`'s
+    # `UINT32_MAX`-only test, except this time worth fixing with a new
+    # test rather than skipping, per the toolkit proven since session 42).
+    # Added `test_flash_area_bounds_offbyone` to
+    # `tests/subsys/storage/flash_map/src/main.c`: reads 2 bytes starting
+    # 1 byte before the end of `slot1_partition` (a real sub-partition,
+    # smaller than native_sim's whole physical flash device, so the extra
+    # byte lands on real adjacent flash rather than past the device's own
+    # true end — matching the "state/logic violation on a still-valid
+    # address, not a hard crash" category), asserting `-EINVAL`. Loosened
+    # the guard's length check by that same 1-byte unit (`len <=
+    # (fa->fa_size - off)` -> `len <= (fa->fa_size - off) + 1`).
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden passes 11/11;
+    # mutated build fails cleanly and only at the new test (10/11 pass,
+    # `PROJECT EXECUTION FAILED`), zero cascade to the other 10 tests
+    # (including the pre-existing, unaffected `test_parameter_overflows`).
+    # Reverted file confirmed byte-identical via `git status --porcelain`.
+    {
+        "id_suffix": "runtime_flash_map_bounds_offbyone",
+        "category": "runtime_crash",
+        "target_file": "subsys/storage/flash_map/flash_map_priv.h",
+        "operator": "runtime_off_by_one:len <= (fa->fa_size - off));:len <= (fa->fa_size - off) + 1);",
+        "target_app": "tests/subsys/storage/flash_map",
+        "board": "native_sim",
+        "extra_files": {
+            "tests/subsys/storage/flash_map/src/main.c":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "flash_map_bounds_offbyone_test", "main.c"),
+        },
+    },
 ]
 
 
