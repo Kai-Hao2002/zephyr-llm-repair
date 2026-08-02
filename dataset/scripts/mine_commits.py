@@ -2676,6 +2676,75 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/modem/modem_ppp",
         "board": "native_sim",
     },
+    # runtime_off_by_one's fifth tests/subsys entry (session 46
+    # continued), the first target in `tests/subsys/nvmem` — a brand-new
+    # subsystem (`@since 4.3`) that turned out to need the fullest
+    # `extra_files` staging combination yet: this test app has **no**
+    # default/bare `west build`-reachable scenario at all — all 4 of its
+    # `tests.yaml` scenarios (`bbram`/`eeprom`/`flash`/`otp`) require both
+    # `extra_configs` *and* `extra_dtc_overlay_files` to select a backend,
+    # since `common.dtsi`'s `&test_nvmem0` label is only ever defined by
+    # one of the 4 backend-specific `.overlay` files, selected only via a
+    # twister-scenario CMake arg this pipeline's bare `west build` never
+    # passes.
+    #
+    # Worked around by staging a `boards/native_sim.overlay` (the
+    # `flash.overlay`+`common.dtsi` combination inlined into one file,
+    # placed at the conventional board-overlay path Zephyr's build system
+    # auto-applies for *any* scenario, no CMake flag needed — same
+    # `boards/<board>.overlay` mechanism as the `gpio_mmio_latch`
+    # riscv32 port and the i2c_emul/rtc_emul entries) alongside a
+    # replacement `prj.conf` adding `CONFIG_FLASH=y`/
+    # `CONFIG_NVMEM_FLASH_WRITE=y` (mirroring the `nvmem.api.flash`
+    # scenario's own `extra_configs`). Confirmed empirically this makes
+    # the previously entirely-unreachable subsystem buildable at all.
+    #
+    # `subsys/nvmem/nvmem.c`'s `nvmem_cell_read()`/`nvmem_cell_write()`
+    # both guard `if (off < 0 || cell->size < off + len) { return
+    # -EINVAL; }` before dispatching to whichever backend device API is
+    # enabled — the fundamental boundary check for the whole abstraction
+    # layer. `tests/subsys/nvmem/api`'s own `test_nvmem_api` only ever
+    # reads/writes exactly `cell0.size` bytes (an exact fit, no tight
+    # off-by-one probe).
+    #
+    # Added `test_nvmem_cell_bounds_offbyone`: calls both
+    # `nvmem_cell_write`/`nvmem_cell_read` with `len = cell0.size + 1`
+    # (using a real 32-byte buffer, well larger than the 17 bytes
+    # actually needed, so the test's own code has no incidental OOB —
+    # only the guard's own correctness is under test), asserting
+    # `-EINVAL` both times. Loosened the guard by that same 1-byte unit
+    # (`cell->size < off + len` -> `cell->size < off + len - 1`) —
+    # anchored mode matches only the first occurrence in the file
+    # (inside `nvmem_cell_read`), leaving `nvmem_cell_write`'s identical
+    # guard untouched, so only the *read* half of the new test's two
+    # assertions is actually affected — confirmed this produces a clean,
+    # single-assertion failure rather than assuming both would trip.
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden passes 3/3;
+    # mutated build fails cleanly and only at the new test's read
+    # assertion (`ret not equal to -EINVAL ... got 0`, 2/3 pass,
+    # `PROJECT EXECUTION FAILED`), the other 2 tests unaffected.
+    # Reverted file confirmed byte-identical via `git status
+    # --porcelain`, and — per the extra caution learned from this same
+    # session's `modem_chat` pipeline-only flake — also rebuilt and
+    # re-ran the reverted state directly (not just diffed) before
+    # trusting it: clean 3/3 pass.
+    {
+        "id_suffix": "runtime_nvmem_cell_bounds_offbyone",
+        "category": "runtime_crash",
+        "target_file": "subsys/nvmem/nvmem.c",
+        "operator": "runtime_off_by_one:if (off < 0 || cell->size < off + len) {:if (off < 0 || cell->size < off + len - 1) {",
+        "target_app": "tests/subsys/nvmem/api",
+        "board": "native_sim",
+        "extra_files": {
+            "tests/subsys/nvmem/api/src/main.c":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "nvmem_cell_bounds_offbyone_test", "main.c"),
+            "tests/subsys/nvmem/api/boards/native_sim.overlay":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "nvmem_cell_bounds_offbyone_test", "native_sim.overlay"),
+            "tests/subsys/nvmem/api/prj.conf":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "nvmem_cell_bounds_offbyone_test", "prj.conf"),
+        },
+    },
 ]
 
 
