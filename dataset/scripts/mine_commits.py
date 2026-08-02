@@ -2076,6 +2076,62 @@ INJECTION_CATALOG = [
                 os.path.join(os.path.dirname(__file__), "injection_assets", "adc_emul_invalid_channel_test", "main.c"),
         },
     },
+    # runtime_off_by_one's fifth tests/drivers entry, drivers/rtc/rtc_emul.c
+    # — second entry needing an added test case (after adc_emul.c), and the
+    # first needing an *extra Kconfig* on top of the extra test file: this
+    # target file's alarm-handling functions
+    # (`rtc_emul_alarm_get_supported_fields`/`_set_time`/`_get_time`/
+    # `_is_pending`) are only *compiled into the test app at all* when
+    # CONFIG_RTC_ALARM is defined (tests/drivers/adc/adc_emul/CMakeLists.txt
+    # guards `src/test_alarm.c`/`src/test_alarm_callback.c` behind
+    # `if(DEFINED CONFIG_RTC_ALARM)`), and native_sim's default
+    # tests/drivers/rtc/rtc_api build does *not* set it — confirmed
+    # empirically (not assumed) by building with only the new test staged
+    # first: golden run showed only 3 tests total (test_set_get_time/
+    # test_time_counting/test_y2k), the whole alarm-related file silently
+    # absent. Fixed by also staging a modified `prj.conf` (adds
+    # `CONFIG_RTC_ALARM=y`) via the same `extra_files` mechanism — this is
+    # exactly the standing "non-default twister scenario is unreachable by
+    # this pipeline's bare west build" limitation documented since session
+    # 9, worked around here (rather than skipped) since `extra_files` can
+    # already stage arbitrary file overwrites, `prj.conf` included.
+    #
+    # `rtc_emul_alarm_is_pending(dev, id)` — the simplest of the 4 alarm
+    # functions (no output pointer, just `if (data->alarms_count <= id) {
+    # return -EINVAL; } ... return (data->alarms[id].pending == true) ? 1 :
+    # 0;`) — was chosen as the mutation target. native_sim's `rtc` alias
+    # (`alarms-count = <2>`) means alarm id 2 is the exact one-past-the-end
+    # boundary. Same identical guard text appears 5 times in the file (the
+    # 4 alarm functions plus a 5th not otherwise investigated); the
+    # anchored hint's `#4` suffix selects the 4th occurrence specifically
+    # (inside `_is_pending`). Added `test_alarm_is_pending_invalid_id` to
+    # `test_alarm.c`, calling `rtc_alarm_is_pending(rtc, alarms_count)` and
+    # asserting `-EINVAL`.
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden (unmutated
+    # driver, new test + CONFIG_RTC_ALARM=y in place) passes 6/6; mutated
+    # build (anchored 4th-occurrence `<=` -> `<` loosening) fails cleanly
+    # and exactly at the new test ("Expected -EINVAL for alarm id 2, got
+    # 0" — the OOB read of `alarms[2].pending` happened to read back false/
+    # 0 rather than segfaulting, same "state corruption without a hard
+    # crash" category as the bbram_emul/msgq/sem entries), 5/6 pass,
+    # `PROJECT EXECUTION FAILED`, no cascading effect on the other 5 tests.
+    # Reverted driver file confirmed byte-identical to the original before
+    # wiring into the catalog.
+    {
+        "id_suffix": "runtime_rtc_emul_offbyone",
+        "category": "runtime_crash",
+        "target_file": "drivers/rtc/rtc_emul.c",
+        "operator": "runtime_off_by_one:data->alarms_count <= id#4:data->alarms_count < id",
+        "target_app": "tests/drivers/rtc/rtc_api",
+        "board": "native_sim",
+        "extra_files": {
+            "tests/drivers/rtc/rtc_api/src/test_alarm.c":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "rtc_emul_alarm_invalid_id_test", "test_alarm.c"),
+            "tests/drivers/rtc/rtc_api/prj.conf":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "rtc_emul_alarm_invalid_id_test", "prj.conf"),
+        },
+    },
 ]
 
 
