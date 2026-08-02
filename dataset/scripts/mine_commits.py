@@ -2132,6 +2132,68 @@ INJECTION_CATALOG = [
                 os.path.join(os.path.dirname(__file__), "injection_assets", "rtc_emul_alarm_invalid_id_test", "prj.conf"),
         },
     },
+    # runtime_off_by_one's sixth tests/drivers entry, drivers/i2c/i2c_emul.c
+    # — revisits the exact guard session 39 found and skipped
+    # (`i2c_emul_send_to_target()`'s buffered-mode
+    # `if (len > msgs[i].len) { return -ENOMEM; } memcpy(msgs[i].buf, ptr,
+    # len);`), this time closing it out with the now-proven "add a tight
+    # test via extra_files" technique instead of leaving it aside. Session
+    # 39's only existing test, `test_read_request_overflow`, reports
+    # `UINT32_MAX` bytes — a delta far too large for a genuine off-by-one
+    # mutation to flip.
+    #
+    # This target needed the most `extra_files` staging of any entry so
+    # far, because `drivers.i2c.emul.target_buf` (the twister scenario that
+    # actually compiles `test_forwarding_buf.cpp`, where the overflow tests
+    # live) is itself non-default: `tests.yaml` reaches it only via
+    # `extra_configs: CONFIG_I2C_TARGET_BUFFER_MODE=y` *and*
+    # `extra_dtc_overlay_files: boards/native_sim.buf.overlay` layered on
+    # top of the base `boards/native_sim.overlay` — twister-only mechanisms
+    # this pipeline's bare `west build -b native_sim` can't apply. Worked
+    # around by staging 3 files: the modified `test_forwarding_buf.cpp`
+    # (new test appended), a `prj.conf` with `CONFIG_I2C_TARGET_BUFFER_MODE=y`
+    # added, and a `native_sim.overlay` that's the base overlay with the
+    # buf-overlay's `&i2c1 { target-buffered-mode; };` fragment folded in
+    # directly (since only one `boards/<board>.overlay` gets auto-applied,
+    # not the twister-scenario-specific extra one) — confirmed
+    # `CMakeLists.txt` gates `test_forwarding_buf.cpp` vs
+    # `test_forwarding_pio.cpp` purely on `CONFIG_I2C_TARGET_BUFFER_MODE`,
+    # so no other file needed touching.
+    #
+    # Added `test_read_request_overflow_by_one`: a 4-byte `expected[]`
+    # source but only a 3-byte `data[]` destination buffer
+    # (`ARRAY_SIZE(expected) - 1`), with the fake `buf_read_requested`
+    # callback reporting the full 4 bytes available — msgs[i].len (3, from
+    # the destination buffer) is exactly 1 less than the reported len (4),
+    # asserting `-ENOMEM`. Anchored hint loosens the guard by that same
+    # 1-byte unit: `len > msgs[i].len` -> `len > msgs[i].len + 1`.
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden (new test +
+    # CONFIG_I2C_TARGET_BUFFER_MODE=y + merged overlay in place) passes
+    # 9/9; mutated build fails cleanly and exactly at the new test
+    # ("-ENOMEM not equal to i2c_read(...)" — the loosened guard let
+    # `memcpy(msgs[i].buf, ptr, 4)` write 4 bytes into the 3-byte `data`
+    # stack array), 8/9 pass, `PROJECT EXECUTION FAILED`, no cascading
+    # effect on the other 8 (including the original `UINT32_MAX` overflow
+    # test, still correctly rejected since the mutation only loosens by 1).
+    # Reverted driver file confirmed byte-identical to the original before
+    # wiring into the catalog.
+    {
+        "id_suffix": "runtime_i2c_emul_offbyone",
+        "category": "runtime_crash",
+        "target_file": "drivers/i2c/i2c_emul.c",
+        "operator": "runtime_off_by_one:if (len > msgs[i].len) {:if (len > msgs[i].len + 1) {",
+        "target_app": "tests/drivers/i2c/i2c_emul",
+        "board": "native_sim",
+        "extra_files": {
+            "tests/drivers/i2c/i2c_emul/src/test_forwarding_buf.cpp":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "i2c_emul_overflow_by_one_test", "test_forwarding_buf.cpp"),
+            "tests/drivers/i2c/i2c_emul/prj.conf":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "i2c_emul_overflow_by_one_test", "prj.conf"),
+            "tests/drivers/i2c/i2c_emul/boards/native_sim.overlay":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "i2c_emul_overflow_by_one_test", "native_sim.overlay"),
+        },
+    },
 ]
 
 
