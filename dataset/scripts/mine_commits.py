@@ -2536,6 +2536,53 @@ INJECTION_CATALOG = [
                 os.path.join(os.path.dirname(__file__), "injection_assets", "rtio_sqe_copy_in_offbyone_test", "test_rtio_api.c"),
         },
     },
+    # runtime_remove_null_check's second tests/subsys entry (session 46
+    # continued), following up in the same tests/subsys/rtio directory
+    # after the previous entry's runtime_off_by_one win in rtio.h.
+    # `drivers/i2c/i2c_rtio.c`'s `i2c_rtio_copy()` builds one SQE per I2C
+    # message in a loop: `sqe = rtio_sqe_acquire(r); if (sqe == NULL) {
+    # rtio_sqe_drop_all(r); return NULL; }` — a real guard against a pool
+    # exhausted mid-copy, rolling back every SQE already acquired in this
+    # call and returning NULL cleanly so the caller can react
+    # (`i2c_rtio_transfer()` treats a NULL return as `-ENOMEM`). No
+    # existing test in `tests/subsys/rtio/rtio_i2c` ever calls
+    # `i2c_rtio_copy()` (the 4-slot `test_rtio_ctx` pool, `RTIO_DEFINE(...,
+    # 4, 4)`) with more messages than the pool can hold — every existing
+    # call passes exactly 1 message.
+    #
+    # Added `test_i2c_rtio_copy_pool_exhausted` to
+    # `tests/subsys/rtio/rtio_i2c/src/main.cpp`: calls `i2c_rtio_copy()`
+    # with a 5-message array against the fresh (post-`rtio_i2c_before`)
+    # 4-slot pool, asserting the call returns NULL. Disabled the guard
+    # entirely (`if (sqe == NULL) {` -> `if (0) {`, landing on the first
+    # occurrence in the file, inside `i2c_rtio_copy()` — the guard text
+    # repeats verbatim in this driver's other five `i2c_rtio_copy_*`/
+    # `i2c_rtio_*` functions, but this one is the file's first occurrence
+    # so no `#N` anchor was needed).
+    #
+    # With the guard disabled, the 5th loop iteration's `sqe` stays NULL
+    # after the pool is exhausted, but execution proceeds into
+    # `rtio_sqe_prep_write()`, whose very first line is `memset(sqe, 0,
+    # sizeof(struct rtio_sqe));` — a direct NULL-pointer write, a
+    # genuinely more severe fault than a same-thread OOB write.
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden passes 9/9;
+    # mutated build crashes with a genuine `Segmentation fault` (exit
+    # 139) exactly at the new test, all 7 preceding tests unaffected.
+    # Reverted file confirmed byte-identical via `git status
+    # --porcelain`.
+    {
+        "id_suffix": "runtime_i2c_rtio_copy_pool_exhausted_nullcheck",
+        "category": "runtime_crash",
+        "target_file": "drivers/i2c/i2c_rtio.c",
+        "operator": "runtime_remove_null_check:if (sqe == NULL) {:if (0) {",
+        "target_app": "tests/subsys/rtio/rtio_i2c",
+        "board": "native_sim",
+        "extra_files": {
+            "tests/subsys/rtio/rtio_i2c/src/main.cpp":
+                os.path.join(os.path.dirname(__file__), "injection_assets", "i2c_rtio_copy_pool_exhausted_test", "main.cpp"),
+        },
+    },
 ]
 
 
