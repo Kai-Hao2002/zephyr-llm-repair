@@ -1941,6 +1941,47 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/bbram/emul",
         "board": "native_sim",
     },
+    # runtime_remove_null_check's first tests/drivers entry, after sessions
+    # 38-39 established (uart_emul, i2c_emul, sbs_gauge/bq27z746/bq40z50 fuel
+    # gauges) that runtime_off_by_one's vein in tests/drivers was drying up.
+    # Applied the "optional output pointer" idiom search (proven 3x already
+    # in tests/kernel and tests/subsys/portability — hash_map, thrd_join,
+    # clock_getres) to drivers/ for the first time: grepped every driver for
+    # `if (x != NULL) { *x = ...` and cross-referenced against
+    # native_sim-buildable tests/drivers apps.
+    #
+    # `drivers/can/can_loopback.c`'s `can_loopback_get_state()` — the driver
+    # actually backing native_sim's default `zephyr,canbus` chosen node
+    # (confirmed via boards/native/native_sim/native_sim.dts; the more
+    # obviously-named `drivers/can/can_fake.c`, checked first, turned out to
+    # NOT be what native_sim wires up by default, so it was verified which
+    # driver is actually reachable before committing to a target — the same
+    # "don't trust a plausible-sounding name" discipline as session 3's DTS
+    # dead ends) — has `if (state != NULL) { *state = ...; }` guarding its
+    # optional `state` output parameter, exactly matching `can_get_state()`'s
+    # documented public API contract (both `state` and `err_cnt` are
+    # independently optional). `can_get_state()`'s own inline wrapper
+    # (`z_impl_can_get_state` in include/zephyr/drivers/can.h) passes
+    # straight through to the driver with no NULL validation of its own, so
+    # nothing upstream protects a caller passing `state=NULL`.
+    # `tests/drivers/can/api`'s own `test_get_state` already exercises
+    # exactly this: `can_get_state(can_dev, NULL, NULL)`, asserting
+    # `zassert_ok` (i.e. this must succeed cleanly, not crash — NULL is
+    # documented-valid here, not an error case). Verified via a direct
+    # ./zephyr/zephyr.exe run: golden run passes (incl. test_get_state,
+    # confirmed individually in the log); mutated build (`if (state !=
+    # NULL) {` -> `if (1) {`) crashes with a genuine `Segmentation fault`
+    # (exit 139) right at test_get_state — an unconditional `*state = ...`
+    # write through the caller's NULL pointer. Reverted file confirmed
+    # byte-identical to the original before wiring into the catalog.
+    {
+        "id_suffix": "runtime_can_loopback_nullcheck",
+        "category": "runtime_crash",
+        "target_file": "drivers/can/can_loopback.c",
+        "operator": "runtime_remove_null_check:if (state != NULL) {:if (1) {",
+        "target_app": "tests/drivers/can/api",
+        "board": "native_sim",
+    },
 ]
 
 
