@@ -2811,6 +2811,51 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/modem/modem_pipe",
         "board": "native_sim",
     },
+    # c_api_substitute's fourth tests/subsys entry (session 46 continued),
+    # in tests/subsys/modem/backends/tty — the candidate flagged at the
+    # end of the previous round but not yet mutated/verified.
+    #
+    # `tests/subsys/modem/backends/tty/src/main.c`'s `test_receive_ready_event_raised`
+    # writes a real message to the primary side of a host PTY
+    # (`write(primary_fd, ...)`), then does `k_sleep(TEST_MODEM_BACKEND_TTY_OP_DELAY)`
+    # (1000ms) before asserting the RRDY event bit was set. The tty backend
+    # runs a dedicated thread that blocks in a real POSIX `read()` on the
+    # secondary side of the same PTY and calls
+    # `modem_pipe_notify_receive_ready()` once data arrives — genuine host
+    # I/O latency, not a scheduling-priority question, so a bare
+    # `k_yield()` (returns almost immediately) can't reliably wait for the
+    # real read() to unblock and the notification to propagate.
+    #
+    # Cross-test isolation checked before mutating, directly applying the
+    # `modem_cmux` cascading-corruption lesson from earlier this session:
+    # this suite's `before` hook only resets the atomic event bits (no
+    # pipe re-open/drain), and its `teardown` runs once at suite end, not
+    # per test — closer to `modem_cmux`'s shape than `modem_pipe`'s. But
+    # unlike `modem_cmux`, the very next test (`test_transmit`) never
+    # reads from the tty pipe or checks the RRDY bit at all (only the
+    # TIDLE bit, driven by a separate transmit path) — so even if the
+    # backend thread's real read() eventually completes late, mid-way
+    # through the next test, there's no observable to corrupt. Confirmed
+    # empirically rather than assumed: 2/2 mutated runs failed cleanly at
+    # exactly the targeted test, all 4 others (including the immediately
+    # following `test_transmit`) unaffected both times.
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden passes 5/5;
+    # mutated build fails cleanly and only at the new assertion
+    # (`result == true is false`, "Receive ready evennt not set"), 4/5
+    # pass, `PROJECT EXECUTION FAILED`. Reverted file confirmed
+    # byte-identical via `git status --porcelain` *and* re-verified via a
+    # fresh rebuild+run (5/5 clean) before trusting it. Passed the full
+    # `verify_cases.py` two-sided gate on the first attempt via a pilot
+    # JSON. No `extra_files` needed.
+    {
+        "id_suffix": "c_api_substitute_backends_tty",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/modem/backends/tty/src/main.c",
+        "operator": "c_api_substitute:test_receive_ready_event_raised:k_sleep(TEST_MODEM_BACKEND_TTY_OP_DELAY);:k_yield();",
+        "target_app": "tests/subsys/modem/backends/tty",
+        "board": "native_sim",
+    },
 ]
 
 
