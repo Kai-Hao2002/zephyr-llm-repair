@@ -2856,6 +2856,53 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/modem/backends/tty",
         "board": "native_sim",
     },
+    # c_api_substitute's fifth tests/subsys entry (session 46 continued),
+    # the first hit outside the subsys/modem family — a deliberate pivot
+    # after subsys/modem was fully exhausted (part 14) — found by scanning
+    # a batch of never-touched tests/subsys subdirectories
+    # (bindesc/canbus/cpu_freq/crc/dsp/edac/input/ipc/jwt/kvss/llext/
+    # lorawan/mgmt/modbus/openthread/pmci/random/sd/secure_storage/
+    # settings_commit_prio/sip_svc/testsuite/tracing/usb) for the same
+    # k_sleep/k_msleep idiom, filtered down first to native_sim-buildable,
+    # ztest-harness apps before reading any source.
+    #
+    # `tests/subsys/mgmt/mcumgr/smp_client/src/main.c`'s
+    # `test_msg_send_timeout` sends an SMP command with a client-side
+    # timeout of `2` (units), then does `k_sleep(K_SECONDS(3))` before
+    # asserting `response_ptr` was set to `&testing_user_data` by the
+    # timeout callback — the timeout notification is delivered by the SMP
+    # client's own internal timer, not scheduling priority, so it
+    # genuinely needs several seconds of real elapsed time to fire, not
+    # just a scheduling opportunity.
+    #
+    # Cross-test isolation checked before mutating, directly applying the
+    # `modem_cmux`/`modem_cmux_pair` lessons from parts 12/14: this suite
+    # has no per-test `after` hook to drain a leftover pending timer, so
+    # in principle a late-firing internal timeout could corrupt a
+    # subsequent test's `res_buf`/`response_ptr` state. Checked ztest's
+    # actual run order empirically (not file declaration order — this
+    # suite has no `CONFIG_ZTEST_SHUFFLE`, so order is deterministic but
+    # not source-order): confirmed via the golden run that
+    # `test_msg_send_timeout` executes *last* of the suite's 3 tests, so
+    # there is no later test for a leftover timer to bleed into — zero
+    # cascade risk despite the shared lack of a draining `after` hook.
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden passes 3/3;
+    # mutated build fails cleanly and only at the new assertion
+    # (`response_ptr not equal to &testing_user_data`), the other 2 tests
+    # (which run *before* it) unaffected, reproduced identically on a
+    # second run. Reverted file confirmed byte-identical via `git status
+    # --porcelain` *and* re-verified via a fresh rebuild+run (3/3 clean).
+    # Passed the full `verify_cases.py` two-sided gate on the first
+    # attempt via a pilot JSON. No `extra_files` needed.
+    {
+        "id_suffix": "c_api_substitute_smp_client",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/mgmt/mcumgr/smp_client/src/main.c",
+        "operator": "c_api_substitute:test_msg_send_timeout:k_sleep(K_SECONDS(3));:k_yield();",
+        "target_app": "tests/subsys/mgmt/mcumgr/smp_client",
+        "board": "native_sim",
+    },
 ]
 
 
