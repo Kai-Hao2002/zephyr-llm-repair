@@ -12,7 +12,7 @@ import sys
 # 確保能讀取到專案根目錄的 tools 模組
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from tools.log_filter import LogFilter
-from tools.qemu_oracle import QemuOracle
+from tools.qemu_oracle import QemuOracle, extract_failing_test_name
 from tools.fault_injector import FaultInjector
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -160,6 +160,26 @@ class ZephyrCaseVerifier:
         compressed_log = self.log_filter.compress_log(mutated_result["log"])
         case["initial_error_log"] = compressed_log
         case["error_type"] = mutated_result["status"]
+
+        # 記下這個注入的 bug 具體打壞了哪一個 ztest 測試案例 (target_test)，
+        # 供之後評分「修復後的 patch」時使用：只有整個套件印出成功總結還
+        # 不夠，必須確認這個特定測試真的存在且真的通過，才能排除「把該
+        # 測試刪掉/跳過」這種投機修復。只對 runtime_crash 類別有意義——
+        # kconfig/dts/c_syntax 是建置失敗，log 裡根本沒有 ztest 測試名稱。
+        # 用未壓縮的原始 log 抽取，命中率比壓縮後的日誌更高。
+        # Records which specific ztest test case the injected bug broke
+        # (target_test), for later use when grading a repaired patch: a
+        # suite-wide success summary isn't enough on its own, the specific
+        # test must genuinely exist and pass, ruling out a shortcut "fix"
+        # that deletes/skips that one test. Only meaningful for the
+        # runtime_crash category — kconfig/dts/c_syntax are build failures
+        # with no ztest test name in the log at all. Extracted from the
+        # raw (uncompressed) log for a higher hit rate than the compressed
+        # version.
+        case["target_test"] = (
+            extract_failing_test_name(mutated_result["log"])
+            if category == "runtime_crash" else None
+        )
         return case
 
     def _verify_mined_case(self, case: dict, tag: str):

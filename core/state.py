@@ -46,7 +46,38 @@ class ZephyrAgentState(TypedDict):
     # 目標 Zephyr 專案的路徑
     # Path to the target Zephyr project
     workspace_path: str
-    
+
+    # 要建置的開發板 (例如 "qemu_x86"、"native_sim")。之前寫死在
+    # devops_node 裡，現在改成從狀態讀取，這樣同一份 workflow 才能套用在
+    # 資料集裡任何一個案例的目標板子上，而不是永遠只能建置 qemu_x86。
+    # Target board to build for (e.g. "qemu_x86", "native_sim"). Previously
+    # hardcoded inside devops_node; now read from state so the same
+    # workflow can target whichever board a given dataset case actually
+    # needs, instead of always building qemu_x86.
+    board: str
+
+    # 相對於 workspace_path 的目標 app 路徑 (例如
+    # "tests/subsys/input/longpress")。demo 用途維持預設 "."
+    # (workspace_path 本身就是 app 根目錄)。
+    # Target app path relative to workspace_path (e.g.
+    # "tests/subsys/input/longpress"). Defaults to "." for the demo case,
+    # where workspace_path itself is the app root.
+    target_app: str
+
+    # 若這是在修復一個合成注入的 bug，這裡放該案例的 target_test (被注入
+    # bug 打壞的那個 ztest 測試名稱)。DevOps Expert 會拿它去確認修復後的
+    # patch 讓「這個特定測試」真的通過，而不只是看套件整體有沒有印出成功
+    # 總結——避免投機的 patch (刪掉/跳過該測試) 被誤判為修復成功。
+    # kconfig/dts/c_syntax 這類建置失敗的案例沒有對應的測試名稱，留 None。
+    # If this is repairing a synthetic injected bug, this holds that case's
+    # target_test (the ztest test name the injection broke). The DevOps
+    # Expert uses it to confirm the repaired patch makes *that specific
+    # test* actually pass, not just that the suite printed some success
+    # summary — guarding against a shortcut patch (deleting/skipping that
+    # test) being misclassified as a successful repair. None for build-
+    # failure cases (kconfig/dts/c_syntax) that have no test name at all.
+    required_pass_test: Optional[str]
+
     # 目前已經嘗試修復的迴圈次數
     # Current number of repair attempts
     iterations: int
@@ -62,9 +93,27 @@ class ZephyrAgentState(TypedDict):
 # ==========================================
 # 輔助函數 (Helper Functions)
 # ==========================================
-def create_initial_state(workspace_path: str, initial_log: str, max_iters: int = 5) -> ZephyrAgentState:
+def create_initial_state(workspace_path: str, initial_log: str, max_iters: int = 5,
+                          board: str = "qemu_x86", target_app: str = ".",
+                          required_pass_test: Optional[str] = None) -> ZephyrAgentState:
     """
     建立狀態機的初始狀態 (Initializes the state machine's state).
+
+    :param board: 目標開發板，預設 "qemu_x86" 維持既有 demo 行為不變。
+        Target board; defaults to "qemu_x86" to keep the existing demo's
+        behavior unchanged.
+    :param target_app: 相對於 workspace_path 的目標 app 路徑，預設 "."
+        維持既有 demo 行為不變 (workspace_path 本身就是 app 根目錄)。
+        Target app path relative to workspace_path; defaults to "." to
+        keep the existing demo's behavior unchanged (workspace_path itself
+        is the app root).
+    :param required_pass_test: 若在修復資料集裡的一筆合成注入案例，帶入
+        該案例的 target_test，讓 DevOps Expert 確認修復後那個特定測試真的
+        通過，而不只是套件整體回報成功。
+        If repairing a dataset's synthetic injected case, pass that case's
+        target_test so the DevOps Expert confirms that specific test
+        genuinely passes after the repair, not just that the suite as a
+        whole reports success.
     """
     return {
         "messages": [],
@@ -74,6 +123,9 @@ def create_initial_state(workspace_path: str, initial_log: str, max_iters: int =
         "retrieved_context": "",
         "patch_content": "",
         "workspace_path": workspace_path,
+        "board": board,
+        "target_app": target_app,
+        "required_pass_test": required_pass_test,
         "iterations": 0,
         "max_iterations": max_iters,
         "final_status": "in_progress"

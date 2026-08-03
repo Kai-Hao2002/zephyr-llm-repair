@@ -5,6 +5,78 @@ import re
 import subprocess
 from typing import Dict, Any, Optional
 
+# 從一段失敗的 ztest 日誌裡，推斷「是哪一個測試案例失敗了」。用在資料集
+# 驗證階段：把注入的 bug 對應到一個具體的測試名稱 (target_test)，這樣之後
+# 評分修復結果時，才能確認「當初被注入 bug 打壞的那個測試」有真的被執行
+# 且通過，而不是只看「整個套件有沒有印出成功總結」——後者可以被一個把
+# 該測試刪掉/跳過的投機 patch 輕易騙過。
+#
+# 三種來源依序嘗試 (愈前面愈可靠)：
+# 1. ztest 每個案例執行完會印的 "FAIL - <test> in X seconds" 行。
+# 2. TESTSUITE SUMMARY 區塊裡的 "- FAIL - [<suite>.<test>]" 行 (壓縮後的
+#    日誌有時只保留這個摘要區塊)。
+# 3. 上述兩者都沒有時 (例如程序被訊號直接殺死，ztest 自己的收尾邏輯根本
+#    來不及印出 FAIL 行)，退而求其次抓最後一個 "START - <test>" 行——
+#    崩潰前正在執行的那個測試，幾乎必然就是被注入的 bug 打中的那個。
+#
+# Infers which specific ztest test case failed from a failure log. Used at
+# dataset-verification time to pin the injected bug to a concrete test name
+# (target_test), so that later, when grading a repair attempt, we can
+# confirm the test the injection specifically broke was actually exercised
+# and passed — not just that the suite printed some success summary, which
+# a shortcut patch that deletes/skips that one test could trivially fake.
+#
+# Tries three sources in order of reliability:
+# 1. ztest's own per-test "FAIL - <test> in X seconds" line.
+# 2. The TESTSUITE SUMMARY block's "- FAIL - [<suite>.<test>]" line (the
+#    only thing left in some compressed/truncated logs).
+# 3. If neither is present (e.g. the process was killed by a signal before
+#    ztest's own teardown could print a FAIL line), fall back to the last
+#    "START - <test>" line — the test that was running when it crashed is
+#    almost certainly the one the injection hit.
+_FAIL_LINE_RE = re.compile(r"FAIL - (\S+) in [\d.]+ seconds")
+_FAIL_SUMMARY_RE = re.compile(r"FAIL - \[[\w.]+\.(\w+)\]")
+_START_LINE_RE = re.compile(r"START - (\S+)")
+
+
+def extract_failing_test_name(log: str) -> Optional[str]:
+    """從一段失敗日誌推斷失敗的 ztest 測試名稱；找不到就回傳 None。
+    Infers the failing ztest test name from a failure log; None if not found."""
+    m = _FAIL_LINE_RE.search(log)
+    if m:
+        return m.group(1)
+    m = _FAIL_SUMMARY_RE.search(log)
+    if m:
+        return m.group(1)
+    start_matches = _START_LINE_RE.findall(log)
+    if start_matches:
+        return start_matches[-1]
+    return None
+
+
+def check_required_test_passed(log: str, test_name: str) -> bool:
+    """檢查某個特定測試名稱是否在日誌裡明確地以 PASS 結尾——用來把關修復
+    結果評分：只有「套件整體成功」還不夠，被注入 bug 打壞的那個測試必須
+    真的存在且真的通過，這樣才能排除「把該測試刪掉/註解掉/跳過」這類投機
+    patch。同時比對兩種格式 (逐案例的 "PASS - <test> in X seconds" 行，以及
+    TESTSUITE SUMMARY 摘要區塊的 "- PASS - [<suite>.<test>]" 行)。
+
+    Checks whether a specific test name shows an explicit PASS in the log —
+    used to gate repair grading: "the whole suite reported success" isn't
+    enough on its own, the specific test the injection broke must still
+    exist and genuinely pass, ruling out a shortcut patch that deletes/
+    comments out/skips that test. Matches both per-test ("PASS - <test> in
+    X seconds") and TESTSUITE SUMMARY ("- PASS - [<suite>.<test>]") line
+    formats.
+    """
+    if not test_name:
+        return True
+    pattern = re.compile(
+        rf"PASS - (?:\[[\w.]+\.)?{re.escape(test_name)}\b"
+    )
+    return bool(pattern.search(log))
+
+
 class QemuOracle:
     """
     監聽 QEMU 執行期輸出，判斷系統是否成功啟動或發生崩潰。
@@ -202,10 +274,19 @@ class QemuOracle:
         self.completion_success_regex = [re.compile(p) for p in self.completion_success_patterns]
 
     def evaluate(self, command: str, container_name: Optional[str] = None,
-                 wait_for_completion: bool = False) -> Dict[str, Any]:
+                 wait_for_completion: bool = False,
+                 required_pass_test: Optional[str] = None) -> Dict[str, Any]:
         """
         執行指令並監聽 QEMU 輸出。
 
+        :param required_pass_test: 若提供，即使日誌整體判定為 "success"
+            (套件印出成功總結、或看到成功啟動特徵)，也還要額外確認這個
+            特定測試名稱在日誌裡有明確的 PASS 紀錄，否則把狀態降級為
+            "missing_required_test"。用在評分「修復後的 patch」時：防堵
+            投機的修復方式 (刪掉/註解掉/跳過原本被注入 bug 打壞的那個
+            測試) 也被誤判為修復成功。設定這個參數時會強制以
+            wait_for_completion=True 的方式監控，否則在看到開機橫幅就
+            提早停止監控，根本沒機會觀察到目標測試的 PASS/FAIL 行。
         :param container_name: 若指令有帶 `--name <container_name>` 啟動 Docker 容器，
             傳入這個名稱可以確保 timeout/例外發生時真的把容器殺掉，而不是只依賴
             `child.close(force=True)` 終止本地 pexpect 子進程 (docker run 這個 CLI
@@ -242,9 +323,23 @@ class QemuOracle:
             never be detected. When True, a success signature is only
             tentatively recorded; monitoring continues until EOF/timeout or
             an actual crash signature appears.
+        :param required_pass_test: If given, even a log that would
+            otherwise be classified "success" (a success summary line, or
+            a success boot signature) must additionally show an explicit
+            PASS record for this specific test name, or the status is
+            downgraded to "missing_required_test". Used when grading a
+            repaired patch: guards against a shortcut "fix" that deletes/
+            comments out/skips the exact test the injected bug broke from
+            also being misclassified as a successful repair. Setting this
+            forces wait_for_completion=True internally — otherwise
+            monitoring could stop at the boot banner before the target
+            test's PASS/FAIL line is ever seen.
         """
+        if required_pass_test:
+            wait_for_completion = True
+
         self.logger.info("啟動 Test Oracle 並監控 QEMU 輸出... (Starting Test Oracle to monitor QEMU...)")
-        
+
         # 由於我們需要監測 Docker 的輸出，使用 pexpect.spawn
         # Using pexpect.spawn to monitor Docker output interactively
         # encoding='utf-8' 確保我們處理的是字串而不是 Bytes
@@ -382,6 +477,26 @@ class QemuOracle:
                     pass
 
             result["log"] = captured_log
+
+            # 就算前面判定為 "success"，只要指定了 required_pass_test，
+            # 就再確認那個特定測試真的以 PASS 收尾——防止「刪掉/跳過該
+            # 測試」這種投機 patch 也被誤判為修復成功。
+            # Even if the status above is "success", if required_pass_test
+            # was given, verify that specific test genuinely ended in PASS
+            # — guards against a shortcut patch (deleting/skipping that
+            # test) also being misclassified as a successful repair.
+            if required_pass_test and result["status"] == "success":
+                if not check_required_test_passed(captured_log, required_pass_test):
+                    self.logger.warning(
+                        f"套件回報成功，但目標測試 '{required_pass_test}' 沒有明確的 PASS 紀錄——"
+                        f"可能被刪除、跳過或改名，不算修復成功。"
+                        f" (Suite reported success, but no explicit PASS for target test "
+                        f"'{required_pass_test}' — possibly deleted, skipped, or renamed; "
+                        f"not counted as a successful repair.)"
+                    )
+                    result["status"] = "missing_required_test"
+                    result["error_signature"] = f"required test '{required_pass_test}' did not pass"
+
             return result
 
 # ==========================================

@@ -146,16 +146,44 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
     print(f"   ✅ 修補成功應用至: {patch_result.get('applied_files', [])}")
 
     # 2. 建置與執行期驗證
+    # board/target_app 之前寫死成 qemu_x86 + workspace 根目錄，只能對付
+    # main.py 的單一 demo 場景；現在改成從 state 讀取，才能正確對應資料集
+    # 裡任何一筆案例真正的目標板子與 app 子目錄 (例如
+    # "tests/subsys/input/longpress" + "native_sim")。target_app 用來組
+    # 出容器內要 cd 進去的工作目錄，跟 FaultInjector 建立注入案例時
+    # "cd 進 target_app 再 west build ." 的方式一致。
+    # board/target_app used to be hardcoded to qemu_x86 + the workspace
+    # root, which only worked for main.py's single demo scenario; now read
+    # from state so this correctly targets whatever board/app subdirectory
+    # a given dataset case actually needs (e.g.
+    # "tests/subsys/input/longpress" + "native_sim"). target_app is used
+    # to build the in-container working directory, matching how
+    # FaultInjector builds injected cases ("cd into target_app, then
+    # west build .").
+    board = state.get("board", "qemu_x86")
+    target_app = state.get("target_app", ".")
+    required_pass_test = state.get("required_pass_test")
+
     docker_cmd = (
         f"docker run --rm -i -v {os.path.abspath(workspace_path)}:/workspace:ro "
-        "-w /workspace zephyr-sandbox "
-        "bash -c 'west build -b qemu_x86 -d /tmp/build -p always -t run .'"
+        f"-w /workspace/{target_app} zephyr-sandbox "
+        f"bash -c 'west build -b {board} -d /tmp/build -p always -t run .'"
     )
-    
+
     print("   🔨 開始在隔離容器中編譯並執行 QEMU...")
     oracle = QemuOracle(timeout=15)
-    eval_result = oracle.evaluate(docker_cmd)
-    
+    eval_result = oracle.evaluate(docker_cmd, required_pass_test=required_pass_test)
+
+    if eval_result["status"] == "missing_required_test":
+        print(f"   ⚠️ 套件回報成功，但目標測試 '{required_pass_test}' 沒有真的通過——patch 疑似投機取巧 (刪除/跳過該測試)，不算修復成功。")
+        log_filter = LogFilter()
+        return {
+            "current_error_log": log_filter.compress_log(eval_result["log"])
+                + f"\n\n[判定失敗：套件整體成功，但目標測試 '{required_pass_test}' 未見 PASS，patch 疑似繞過而非真正修復。]",
+            "error_type": "missing_required_test",
+            "iterations": current_iter
+        }
+
     if eval_result["status"] == "success":
         print("   🎉 執行期驗證通過！")
         return {
