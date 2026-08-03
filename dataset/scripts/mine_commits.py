@@ -2745,6 +2745,72 @@ INJECTION_CATALOG = [
                 os.path.join(os.path.dirname(__file__), "injection_assets", "nvmem_cell_bounds_offbyone_test", "prj.conf"),
         },
     },
+    # c_api_substitute's third tests/subsys entry (session 46 continued),
+    # this time in tests/subsys/modem/modem_pipe rather than the
+    # subsys/modem/{modem_ubx,modem_ppp,modem_chat} family already mined —
+    # modem_cmux was tried first but rejected: two separate mutation
+    # attempts there (test_modem_cmux_receive_dlci2_at and
+    # test_modem_cmux_receive_dlci1_at) both produced a clean failure at
+    # the targeted test *plus* a second, unrelated test failing 1-2 tests
+    # later — the shared cmux/dlci mock pipes have no synchronization to
+    # drain a mutation's now-late-arriving async receive_work before the
+    # next test's `before` hook runs, so leftover data bleeds across test
+    # boundaries. That's cascading corruption, not a direct, attributable
+    # fault — a new dead-end shape distinct from the ones already
+    # documented, so no case was taken from modem_cmux; moved on rather
+    # than forcing it.
+    #
+    # `tests/subsys/modem/modem_pipe/src/main.c`'s shared helper
+    # `test_pipe_async_transmit()` (called by 2 ZTEST cases,
+    # `test_async_transmit`/`test_receive_closed`) does
+    # `modem_pipe_transmit(...)` then `k_sleep(TEST_MODEM_PIPE_WAIT_TIMEOUT)`
+    # (20ms) before asserting the TRANSMIT_IDLE event bit is set. Checked
+    # the actual completion mechanism before assuming: the fake backend's
+    # `modem_backend_fake_transmit()` doesn't notify synchronously — it
+    # calls `k_work_schedule(&backend->transmit_idle_dwork,
+    # TEST_MODEM_PIPE_NOTIFY_TIMEOUT)` (a real 10ms *timed* delay, not
+    # `K_NO_WAIT`), so the notification genuinely cannot fire before 10ms
+    # of simulated time elapse regardless of thread priority — an even
+    # more clear-cut "real elapsed time required" case than the
+    # scheduling-priority idiom this operator usually targets, so a bare
+    # `k_yield()` (returns almost immediately) is certain to run the
+    # assertion before the timer-backed work item is even eligible to run.
+    #
+    # Cross-test isolation checked before trusting the result: this suite's
+    # `after` hook (`modem_backend_fake_after`) does a *blocking*
+    # `modem_pipe_close(test_pipe, K_SECONDS(10))` every test, which drains
+    # any pending delayed work before the next test's `before` hook runs —
+    # the synchronization modem_cmux's suite lacked. Confirmed empirically:
+    # mutated run fails cleanly at exactly the 2 direct callers, the other
+    # 4 tests (including ones adjacent in file order) unaffected, 2/2 runs
+    # identical — no cascade repeat of the modem_cmux pattern.
+    #
+    # Substituting `k_sleep(TEST_MODEM_PIPE_WAIT_TIMEOUT);` -> `k_yield();`
+    # (scoped to the `test_pipe_async_transmit` helper function itself, via
+    # `_find_ztest_block`'s plain-C-function support, same mechanism
+    # `modem_ppp`'s entry used) confirmed both callers fail cleanly at the
+    # same assertion (`atomic_get(&test_state) not equal to
+    # BIT(TEST_MODEM_PIPE_EVENT_TRANSMIT_IDLE_BIT)`), the other 4 tests
+    # (`test_async_open_close`/`test_attach`/`test_sync_open_close`/
+    # `test_sync_transmit`) unaffected.
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden passes 6/6;
+    # mutated build fails cleanly at exactly the 2 expected tests (4/6
+    # pass), reproduced identically on a second run. Reverted file
+    # confirmed byte-identical via `git status --porcelain` *and*
+    # re-verified via a fresh rebuild+run (6/6 clean) before trusting it,
+    # per this same session's `modem_chat`/`nvmem` extra-caution practice.
+    # Passed the full `verify_cases.py` two-sided gate on the first
+    # attempt via a pilot JSON. No `extra_files` needed — a pure mutation
+    # of an already-existing, already-correct test.
+    {
+        "id_suffix": "c_api_substitute_modem_pipe",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/modem/modem_pipe/src/main.c",
+        "operator": "c_api_substitute:test_pipe_async_transmit:k_sleep(TEST_MODEM_PIPE_WAIT_TIMEOUT);:k_yield();",
+        "target_app": "tests/subsys/modem/modem_pipe",
+        "board": "native_sim",
+    },
 ]
 
 
