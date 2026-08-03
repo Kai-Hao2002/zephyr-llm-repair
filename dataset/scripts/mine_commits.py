@@ -2903,6 +2903,48 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/mgmt/mcumgr/smp_client",
         "board": "native_sim",
     },
+    # c_api_substitute's sixth tests/subsys entry (session 46 continued),
+    # found in the same fresh-subdirectory batch as the smp_client entry
+    # above, from `tests/subsys/input/longpress`.
+    #
+    # `tests/subsys/input/longpress/src/main.c` has exactly one ZTEST
+    # (`test_longpress_test`, the suite's only test, no before/after
+    # hooks) that simulates holding a key down by calling
+    # `k_sleep(K_MSEC(150))` between `input_report_key(..., 1, ...)` and
+    # `input_report_key(..., 0, ...)`. Checked the underlying driver
+    # before assuming this was a scheduling-priority idiom:
+    # `subsys/input/input_longpress.c` arms a real `k_work_delayable`
+    # timer (`k_work_schedule(&entry->work, K_MSEC(cfg->long_delays_ms))`)
+    # when the key goes down, and only fires the "long press" input event
+    # from that delayed work callback — so the 150ms sleep is standing in
+    # for actual physical hold-time the driver's own timer measures, not
+    # just a scheduling opportunity for another thread. Zero cross-test
+    # cascade risk since this is the suite's *only* test — nothing else
+    # to corrupt even in principle.
+    #
+    # Substituting the first of the two identical
+    # `k_sleep(K_MSEC(150));` occurrences (scoped to `test_longpress_test`,
+    # landing on the first "long press" case) confirmed the real-time
+    # requirement empirically: with the timer never given a chance to
+    # actually elapse, the driver never emits the long-press event, so
+    # the very next assertion checking for it fails cleanly.
+    #
+    # Verified via a direct ./zephyr/zephyr.exe run: golden passes 1/1;
+    # mutated build fails cleanly at the expected assertion
+    # (`last_events[1].code not equal to INPUT_KEY_X`), reproduced
+    # identically on a second run. Reverted file confirmed byte-identical
+    # via `git status --porcelain` *and* re-verified via a fresh
+    # rebuild+run (1/1 clean). Passed the full `verify_cases.py`
+    # two-sided gate on the first attempt via a pilot JSON. No
+    # `extra_files` needed.
+    {
+        "id_suffix": "c_api_substitute_longpress",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/input/longpress/src/main.c",
+        "operator": "c_api_substitute:test_longpress_test:k_sleep(K_MSEC(150));:k_yield();",
+        "target_app": "tests/subsys/input/longpress",
+        "board": "native_sim",
+    },
 ]
 
 
