@@ -114,6 +114,50 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/fs/fcb",
         "board": "native_sim",
     },
+    # Session 46 part 18: kconfig/dts/c_syntax 類別過去只用過 2 個目標檔案
+    # (subsys/fs/fcb/Kconfig、boards/native/native_sim/native_sim.dts、
+    # samples/hello_world/src/main.c)，同一套「反轉唯一 depends on」手法
+    # 這次換到全新的子系統 subsys/dfu/img_util 上驗證是否可重複套用。
+    # `config MCUBOOT_IMG_MANAGER` 是 `choice` 底下唯一的選項，
+    # `depends on FLASH_MAP` 反轉成 `depends on !FLASH_MAP` 後，
+    # tests/subsys/dfu/img_util 的 prj.conf 雖然明確要求
+    # CONFIG_MCUBOOT_IMG_MANAGER=y/CONFIG_FLASH_MAP=y，Kconfig 仍會因依賴
+    # 條件無法滿足而讓該符號維持 n——連帶讓同一個 `if MCUBOOT_IMG_MANAGER`
+    # 區塊內的 `config IMG_BLOCK_BUF_SIZE` 也一併停用，讓
+    # include/zephyr/dfu/flash_img.h 裡對 CONFIG_IMG_BLOCK_BUF_SIZE 的引用
+    # 變成未定義巨集——測試目標 tests/subsys/dfu/img_util/src/main.c
+    # 一 include 這個標頭檔就編譯失敗 (`undeclared here`)，比 FCB 案例的
+    # 連結期錯誤更早在編譯期就現形，但同樣是這個 Kconfig 依賴斷裂的直接
+    # 後果。實測驗證：mutate 端在 west build 階段編譯失敗
+    # (`ninja: build stopped`)；revert 端重新編譯後 img_util 套件 3/3
+    # 測試全過 (`PROJECT EXECUTION SUCCESSFUL`)。
+    # kconfig/dts/c_syntax previously only ever touched 2 target files
+    # (subsys/fs/fcb/Kconfig, boards/native/native_sim/native_sim.dts,
+    # samples/hello_world/src/main.c) — this re-applies the same "invert
+    # the sole depends on" technique to a brand-new subsystem,
+    # subsys/dfu/img_util. `config MCUBOOT_IMG_MANAGER` is the only option
+    # under its `choice` block; flipping `depends on FLASH_MAP` to
+    # `depends on !FLASH_MAP` makes Kconfig keep the symbol at n even
+    # though tests/subsys/dfu/img_util's prj.conf explicitly requests
+    # CONFIG_MCUBOOT_IMG_MANAGER=y/CONFIG_FLASH_MAP=y — which also disables
+    # `config IMG_BLOCK_BUF_SIZE` (defined inside the same
+    # `if MCUBOOT_IMG_MANAGER` block), leaving
+    # include/zephyr/dfu/flash_img.h's reference to
+    # CONFIG_IMG_BLOCK_BUF_SIZE undefined. The test target
+    # tests/subsys/dfu/img_util/src/main.c fails to compile the instant it
+    # includes that header (`undeclared here`) — an earlier, compile-time
+    # manifestation of the same broken-dependency root cause FCB's
+    # link-time error demonstrated. Empirically verified: mutate side fails
+    # during `west build` (`ninja: build stopped`); revert side rebuilds
+    # clean, img_util suite 3/3 (`PROJECT EXECUTION SUCCESSFUL`).
+    {
+        "id_suffix": "kconfig_img_manager_depends",
+        "category": "kconfig",
+        "target_file": "subsys/dfu/Kconfig",
+        "operator": "kconfig_invert_depends:MCUBOOT_IMG_MANAGER",
+        "target_app": "tests/subsys/dfu/img_util",
+        "board": "native_sim",
+    },
     # --- Device Tree (DTS) Node Errors ---
     # 同樣道理：native_sim.dts 根節點的 `compatible = "zephyr,posix"` 沒有
     #任何 binding 真的去檢查它，刪掉不影響建置。flashcontroller0 節點的
