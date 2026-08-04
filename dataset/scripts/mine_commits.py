@@ -158,6 +158,31 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/dfu/img_util",
         "board": "native_sim",
     },
+    # Session 46 part 19: fourth kconfig entry, same "invert the sole
+    # depends on" shape as FCB/img_manager but on `subsys/modem/Kconfig`'s
+    # `config MODEM_PPP` — verified the target's own prj.conf doesn't
+    # independently force any of MODEM_PPP's `select`ed symbols (a trap
+    # already caught once this round: `config MODEM_PIPE`'s `select EVENTS`
+    # is a dead end because tests/subsys/modem/modem_pipe's prj.conf sets
+    # CONFIG_EVENTS=y directly anyway, so removing the select changes
+    # nothing). `depends on NET_L2_PPP` -> `depends on !NET_L2_PPP` keeps
+    # MODEM_PPP at n regardless of tests/subsys/modem/modem_ppp's prj.conf
+    # requesting CONFIG_MODEM_PPP=y, so subsys/modem/CMakeLists.txt's
+    # `zephyr_library_sources_ifdef(CONFIG_MODEM_PPP modem_ppp.c)` drops
+    # the file — and since MODEM_PPP's own `select MODEM_PIPE` never fires
+    # either, the cascading link failure spans both modem_ppp.c's and the
+    # shared mock backend's undefined references (modem_ppp_*,
+    # modem_pipe_notify_*, crc16_ccitt). Empirically verified: mutate side
+    # fails at link time; revert side rebuilds clean, modem_ppp suite
+    # 12/12 (native_sim, no QEMU needed).
+    {
+        "id_suffix": "kconfig_modem_ppp_depends",
+        "category": "kconfig",
+        "target_file": "subsys/modem/Kconfig",
+        "operator": "kconfig_invert_depends:MODEM_PPP",
+        "target_app": "tests/subsys/modem/modem_ppp",
+        "board": "native_sim",
+    },
     # --- Device Tree (DTS) Node Errors ---
     # 同樣道理：native_sim.dts 根節點的 `compatible = "zephyr,posix"` 沒有
     #任何 binding 真的去檢查它，刪掉不影響建置。flashcontroller0 節點的
@@ -222,6 +247,27 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/gpio/gpio_mmio_latch",
         "board": "qemu_cortex_m3",
     },
+    # Session 46 part 19: fourth dts entry, `dts_break_phandle` (already
+    # used once on native_sim.dts) reused on a brand-new file — and, unlike
+    # every prior dts case, entirely on native_sim (no QEMU cold-build
+    # cost). tests/subsys/input/longpress/boards/native_sim.overlay's
+    # `longpress` node has `input = <&fake_input_device>;`, referencing a
+    # sibling node defined earlier in the same file; breaking it to
+    # `&fake_input_device_broken_ref` is an undefined-node-label reference
+    # the devicetree compiler itself rejects at CMake-configure time
+    # (`devicetree error: /longpress: undefined node label
+    # 'fake_input_device_broken_ref'`) — before any C compilation starts,
+    # same failure stage as native_sim.dts's own dts_break_phandle case.
+    # Empirically verified: mutate side fails at CMake configure; revert
+    # side rebuilds clean, longpress suite 1/1.
+    {
+        "id_suffix": "dts_longpress_phandle",
+        "category": "dts",
+        "target_file": "tests/subsys/input/longpress/boards/native_sim.overlay",
+        "operator": "dts_break_phandle",
+        "target_app": "tests/subsys/input/longpress",
+        "board": "native_sim",
+    },
     # --- C Syntax and Macro Errors ---
     {
         "id_suffix": "c_hello_world_semicolon",
@@ -278,6 +324,26 @@ INJECTION_CATALOG = [
         "target_file": "tests/subsys/dfu/img_util/src/main.c",
         "operator": "c_typo_macro",
         "target_app": "tests/subsys/dfu/img_util",
+        "board": "native_sim",
+    },
+    # Session 46 part 19: fourth c_syntax entry, `c_remove_semicolon`
+    # (already used once on samples/hello_world/src/main.c) reused on
+    # tests/subsys/mgmt/mcumgr/smp_client/src/main.c — a proven,
+    # already-c_api_substitute-mined native_sim target, new to the
+    # c_syntax category. Removes the semicolon off the first `);`-ending
+    # call in the file (inside smp_client_test_buf_alloc's
+    # smp_client_buf_allocation(...) call), producing a plain
+    # "expected ';' before 'if'" compile error at the very next line — the
+    # same missing-punctuation shape as the existing hello_world case, but
+    # on a different file/subsystem entirely. Empirically verified: mutate
+    # side fails during compile; revert side rebuilds clean, smp_client
+    # suite 3/3.
+    {
+        "id_suffix": "c_smp_client_semicolon",
+        "category": "c_syntax",
+        "target_file": "tests/subsys/mgmt/mcumgr/smp_client/src/main.c",
+        "operator": "c_remove_semicolon",
+        "target_app": "tests/subsys/mgmt/mcumgr/smp_client",
         "board": "native_sim",
     },
     # --- Runtime Crashes ---
