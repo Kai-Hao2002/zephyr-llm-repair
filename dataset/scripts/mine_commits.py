@@ -202,6 +202,47 @@ INJECTION_CATALOG = [
         "target_app": "samples/hello_world",
         "board": "native_sim",
     },
+    # c_typo_macro 這個 operator 原本從沒被用過——前兩個 c_syntax 案例都是
+    # samples/hello_world/src/main.c 上的 remove_semicolon/remove_closing_brace，
+    # 這次換一個完全沒被 c_syntax 類別碰過的檔案跟 operator。
+    # tests/subsys/dfu/img_util/src/main.c (剛好也是本輪新加的
+    # kconfig_img_manager_depends 案例所在的測試套件，但目標檔案不同——這裡
+    # 動的是套件自己的測試原始碼，不是它依賴的 Kconfig) 有一個巨集定義
+    # `PARTITION_IS_RUNNING_APP_PARTITION` 直接呼叫了 `DT_NODELABEL(label)`。
+    # 把它拼錯成 `DT_NODELABE` 後，前處理器不再認得這個巨集名稱，讓
+    # `DT_CAT(DT_DEP_ORD(DT_NODELABE(label)), ...)` 這類巢狀巨集串接把
+    # `)` 跟 `_ORD` 直接黏在一起，變成一個不合法的前處理 token
+    # (`pasting ")" and "_ORD" does not give a valid preprocessing token`)。
+    # 這是跟既有兩個 c_syntax 案例 (漏分號、漏右括號) 完全不同形狀的語法
+    # 破壞——巨集拼接失敗而非單純標點遺漏。實測驗證：mutate 端在
+    # `west build` 編譯期失敗；revert 端重建後 img_util 套件 3/3 全過。
+    # c_typo_macro was never used before — the first two c_syntax cases
+    # were both remove_semicolon/remove_closing_brace on
+    # samples/hello_world/src/main.c; this uses a file and operator the
+    # category has never touched. tests/subsys/dfu/img_util/src/main.c
+    # (coincidentally the same test suite as this round's new
+    # kconfig_img_manager_depends case, but a different target file — this
+    # one mutates the suite's own test source, not the Kconfig it depends
+    # on) has a macro definition, `PARTITION_IS_RUNNING_APP_PARTITION`,
+    # that directly calls `DT_NODELABEL(label)`. Misspelling it to
+    # `DT_NODELABE` makes the preprocessor no longer recognize the macro
+    # name, so the nested macro-pasting inside
+    # `DT_CAT(DT_DEP_ORD(DT_NODELABE(label)), ...)` glues `)` directly to
+    # `_ORD`, producing an invalid preprocessing token (`pasting ")" and
+    # "_ORD" does not give a valid preprocessing token`) — a genuinely
+    # different syntax-break shape than the existing 2 c_syntax cases
+    # (missing semicolon, missing closing brace): a macro-pasting failure,
+    # not a simple missing-punctuation error. Empirically verified: mutate
+    # side fails during `west build` compile; revert side rebuilds clean,
+    # img_util suite 3/3.
+    {
+        "id_suffix": "c_img_util_dt_nodelabel_typo",
+        "category": "c_syntax",
+        "target_file": "tests/subsys/dfu/img_util/src/main.c",
+        "operator": "c_typo_macro",
+        "target_app": "tests/subsys/dfu/img_util",
+        "board": "native_sim",
+    },
     # --- Runtime Crashes ---
     # tests/subsys/fs/fcb 已在既有的挖礦驗證中確認過能在 native_sim 上
     # 完整建置並跑完整組 ztest (見 bug_111891 的驗證紀錄)，因此是執行期
