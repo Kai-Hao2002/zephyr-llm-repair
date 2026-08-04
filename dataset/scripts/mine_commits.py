@@ -185,6 +185,43 @@ INJECTION_CATALOG = [
         "target_app": "samples/hello_world",
         "board": "native_sim",
     },
+    # dts_corrupt_reg 這個 operator 原本從沒被用過——既有的兩個 dts 案例都
+    # 動 boards/native/native_sim/native_sim.dts。這次換到
+    # tests/drivers/gpio/gpio_mmio_latch 的 qemu_cortex_m3.overlay (同一個
+    # 檔案先前在 runtime_crash 類別裡被 dts_reg_offbyone 動過 sram0 節點的
+    # reg *數值*，這裡改動的是完全不同的節點 test_latch 的 reg *結構*，破壞
+    # 形狀不同：數值位移 vs. cell 數量錯誤)。test_latch 節點的
+    # `reg = <0x2000ff00 0x4>;` 是 2 個 cell (#address-cells=1、
+    # #size-cells=1 各一)；dts_corrupt_reg 刪掉最後一個 cell 後變成
+    # `reg = <0x2000ff00>;`，只剩 1 個 cell，觸發 devicetree 綁定驗證的
+    # cell-count 檢查 (`length 4, which is not evenly divisible by 8`)，在
+    # `west build` 的 CMake 設定階段 (dts.cmake) 就直接失敗，甚至比
+    # ninja 編譯期還早。實測驗證：mutate 端在 CMake Configure 階段失敗；
+    # revert 端重建後 gpio_mmio_latch 套件 5/5 全過
+    # (`PROJECT EXECUTION SUCCESSFUL`)。
+    # dts_corrupt_reg was never used before — the existing 2 dts cases both
+    # touch boards/native/native_sim/native_sim.dts. This one moves to
+    # tests/drivers/gpio/gpio_mmio_latch's qemu_cortex_m3.overlay (the same
+    # file a runtime_crash-category dts_reg_offbyone case already touched
+    # sram0's reg *value* on — this one corrupts a completely different
+    # node, test_latch's reg *structure* instead: a value nudge vs. a
+    # cell-count break, different failure shapes). test_latch's
+    # `reg = <0x2000ff00 0x4>;` is 2 cells (#address-cells=1,
+    # #size-cells=1); dts_corrupt_reg deletes the last cell, leaving
+    # `reg = <0x2000ff00>;` — only 1 cell, which trips the devicetree
+    # binding's cell-count check (`length 4, which is not evenly divisible
+    # by 8`) right at `west build`'s CMake configure stage (dts.cmake),
+    # even earlier than ninja compilation. Empirically verified: mutate
+    # side fails during CMake configure; revert side rebuilds clean,
+    # gpio_mmio_latch suite 5/5 (`PROJECT EXECUTION SUCCESSFUL`).
+    {
+        "id_suffix": "dts_gpio_latch_reg_cellcount",
+        "category": "dts",
+        "target_file": "tests/drivers/gpio/gpio_mmio_latch/boards/qemu_cortex_m3.overlay",
+        "operator": "dts_corrupt_reg",
+        "target_app": "tests/drivers/gpio/gpio_mmio_latch",
+        "board": "qemu_cortex_m3",
+    },
     # --- C Syntax and Macro Errors ---
     {
         "id_suffix": "c_hello_world_semicolon",
