@@ -116,6 +116,48 @@ def _dts_break_phandle(content: str, hint: Optional[str] = None) -> Optional[str
     return content[:m.start()] + f"&{m.group(1)}_broken_ref" + content[m.end():]
 
 
+def _dts_redirect_phandle(content: str, hint: Optional[str] = None) -> Optional[str]:
+    """把 `&old_label` phandle 參照改指向另一個已經存在、合法的節點
+    `&new_label`——跟 dts_break_phandle 改指向不存在的假標籤 (編譯期就會
+    找不到節點而炸) 不同，這裡改指向的是真實存在、結構有效的節點，建置
+    跟開機都會成功，只有依賴「這個 phandle 該精準指向哪一個特定 instance」
+    的邏輯或測試斷言才會抓到——用來模擬 compound 類別裡「compatible/裝置
+    身分被悄悄重新導向到另一個合法但錯誤的 instance」這種靜默邏輯錯誤。
+
+    hint 必填，格式是 "old_label:new_label" (兩者都是不含 & 的節點標籤)；
+    沒有 hint 或格式不對時回傳 None (跟其他需要精準定位的 operator 一樣，
+    這裡不提供「抓檔案裡第一個 phandle」的樸素退回行為，因為隨便挑一個
+    phandle 重新導向到隨便一個標籤，产生的幾乎必然是垃圾結果，而非有意義
+    的 compound 案例)。
+
+    Redirects a `&old_label` phandle reference to point at a different,
+    already-existing, valid node `&new_label` — unlike dts_break_phandle
+    (which points to a nonexistent fake label, failing at build time), this
+    points to a real, structurally valid node, so the build and boot both
+    succeed; only logic or a test assertion that depends on this phandle
+    pointing at one *specific* instance will catch it. Simulates the
+    compound category's "device identity silently redirected to another
+    valid-but-wrong instance" class of silent logic error.
+
+    hint is required, format "old_label:new_label" (both bare node labels,
+    no &). Returns None with no hint or a malformed one — unlike other
+    operators, there's no naive "grab the first phandle in the file"
+    fallback here, since redirecting an arbitrary phandle to an arbitrary
+    label would almost certainly produce garbage rather than a meaningful
+    compound case.
+    """
+    if not hint or ':' not in hint:
+        return None
+    old_label, new_label = hint.split(':', 1)
+    if not old_label or not new_label:
+        return None
+    pattern = re.compile(r'&' + re.escape(old_label) + r'\b')
+    m = pattern.search(content)
+    if not m:
+        return None
+    return content[:m.start()] + f"&{new_label}" + content[m.end():]
+
+
 def _dts_corrupt_reg(content: str, hint: Optional[str] = None) -> Optional[str]:
     """把第一個找到的 `reg = <...>;` 屬性刪掉最後一個 cell，讓暫存器長度不合法。"""
     pattern = re.compile(r'(reg\s*=\s*<)([^>]+)(>\s*;)')
@@ -641,6 +683,7 @@ MUTATION_OPERATORS: Dict[str, Callable[..., Optional[str]]] = {
     "kconfig_invert_depends": _kconfig_invert_depends,
     "dts_remove_compatible": _dts_remove_compatible,
     "dts_break_phandle": _dts_break_phandle,
+    "dts_redirect_phandle": _dts_redirect_phandle,
     "dts_corrupt_reg": _dts_corrupt_reg,
     "dts_reg_offbyone": _dts_reg_offbyone,
     "c_remove_semicolon": _c_remove_semicolon,

@@ -3213,6 +3213,81 @@ INJECTION_CATALOG = [
             },
         ],
     },
+    # --- Compound subtype 2: silent wrong-instance binding (session 46 part 21) ---
+    # subtype 1 (above) is a build-time failure — low risk, reuses the
+    # existing kconfig/dts verification shape. This is the harder, higher-
+    # value half: a mutation that builds *and* boots *and* runs the full
+    # ztest suite completely cleanly, where only one specific test assertion
+    # catches that the wrong underlying instance/config got bound. Unlike
+    # subtype 1, this one is genuinely, strictly bilaterally necessary by
+    # construction — there's no way to observe the bug except through the
+    # one assertion that happens to depend on the exact value that changed.
+    #
+    # Needed a new operator to express this: `dts_redirect_phandle`
+    # (tools/mutate_inject.py) — unlike the existing `dts_break_phandle`
+    # (which points a phandle at a *nonexistent* label, always a build-time
+    # failure), this points it at a *different, already-existing, valid*
+    # node — the phandle equivalent of "compatible string swapped to another
+    # legal string, so DEVICE_DT_GET quietly resolves the wrong instance"
+    # from the original proposal. Chose phandle-redirection over literally
+    # mutating a `compatible` string after research showed the latter
+    # doesn't actually work for this bug shape in practice: every
+    # multi-instance test found either resolves devices by node *label*
+    # (DT_NODELABEL — immune to a compatible-string change entirely, since
+    # labels aren't tied to compatible) or, in the one found DT_INST-ordinal
+    # case (`tests/subsys/pm/power_mgmt`, 5 identically-compatible
+    # `test-device-pm` nodes each bound to a distinct C-side pm_action
+    # callback by ordinal), removing any one node's compatible shrinks the
+    # instance count and breaks the *explicitly* ordinal-indexed
+    # `DT_INST(4, test_device_pm)` reference at compile time — collapsing
+    # back into subtype 1's build-failure shape, not a silent one.
+    # Phandle-redirection sidesteps this cleanly: the node count and every
+    # ordinal stay untouched, only *which* already-valid node a specific
+    # reference resolves to changes.
+    #
+    # Target: `tests/drivers/pinctrl/api/app.overlay`'s `zephyr,user` node
+    # has `test_device0_alt_default = <&test_device0_alt_default>;`, a
+    # phandle the driver-agnostic test infra (`PINCTRL_DT_STATE_PINS_DEFINE(
+    # DT_PATH(zephyr_user), test_device0_alt_default)` in
+    # tests/drivers/pinctrl/api/src/main.c) reads to build an alternate
+    # pinctrl state for `test_device0`. The target node
+    # (`test_device0_alt_default`) has pin 2 with `bias-pull-down` and pin 3
+    # with `bias-pull-up`; a sibling node in the same file
+    # (`test_device0_alt_sleep`) is structurally just as valid (also a
+    # single `group1` with a `pins` property) but has no bias properties at
+    # all — same shape the DT binding expects, different actual
+    # configuration. Redirecting the `zephyr,user` phandle from
+    # `&test_device0_alt_default` to `&test_device0_alt_sleep` compiles and
+    # links fine (both are legitimate pinctrl-state nodes) and boots fine —
+    # only `ZTEST(pinctrl_api, test_update_states)`, which asserts the
+    # resolved state's specific pull-bias values, catches it.
+    #
+    # Verified via the real two-sided gate (`verify_cases.py`, category
+    # `compound` correctly required `wait_for_completion=True` so the
+    # post-boot-banner assertion failure wasn't missed): mutate side booted
+    # clean, ran the full `pinctrl_api` suite, and every test up through
+    # `test_lookup_state` passed — only `test_update_states` failed, with
+    # the raw log showing the *exact* predicted mismatch: `Assertion failed
+    # ... TEST_GET_PULL(scfg->pins[0]) not equal to TEST_PULL_DOWN`. Status
+    # `crash` (ztest's `PROJECT EXECUTION FAILED`/assertion-fail path, per
+    # qemu_oracle.py's crash_patterns), `target_test` correctly
+    # auto-extracted as `test_update_states`. Revert side rebuilt and
+    # passed all 5 tests cleanly. The new operator was spot-checked locally
+    # (non-Docker, on the real file copied out of the sandbox image) for a
+    # clean apply/revert round-trip before the real gate ran. Passed
+    # `verify_cases.py`'s full gate on the first attempt via a pilot JSON.
+    {
+        "id_suffix": "compound_pinctrl_alt_default_redirect",
+        "category": "compound",
+        "target_app": "tests/drivers/pinctrl/api",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "tests/drivers/pinctrl/api/app.overlay",
+                "operator": "dts_redirect_phandle:test_device0_alt_default:test_device0_alt_sleep",
+            },
+        ],
+    },
 ]
 
 
