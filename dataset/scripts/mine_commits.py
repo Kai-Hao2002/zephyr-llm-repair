@@ -3487,6 +3487,42 @@ INJECTION_CATALOG = [
             },
         ],
     },
+    # --- Compound round 5 (session 46 part 24, resumed): subtype 1's 3rd
+    # target, applying the "verify unmutated baseline first" lesson from
+    # this same part's 2 earlier losses (biometrics_emul, uart_emul). ---
+    # Same proven "Kconfig auto-select via depends on DT_HAS_ZEPHYR_*_ENABLED"
+    # shape as ADC/DAC, this time on `drivers/espi/Kconfig.espi_emul`'s
+    # `config ESPI_EMUL` (2020 copyright — deliberately picked an older,
+    # established driver rather than a recent one, per the age-risk
+    # heuristic this part's earlier losses motivated) +
+    # `boards/native/native_sim/native_sim.dts`'s `espi0` node
+    # (`compatible = "zephyr,espi-emul-controller"` — this file's 4th
+    # compound/dts touch, alongside `dts_native_sim_phandle`,
+    # `dts_native_sim_compatible`, and the part-20 `adc_emul` case, on a
+    # different node each time). Confirmed the *unmutated* baseline builds
+    # and passes cleanly (1/1) at the pinned `baseline_commit` before
+    # investing further — this is now standing practice for any brand-new
+    # target file, not just this one. Verified: mutate side never reaches a
+    # boot signature (`ninja: build stopped: subcommand failed`, status
+    # `eof_no_boot`); revert side rebuilt and passed cleanly. Both
+    # mutations spot-checked locally (non-Docker) before the real gate ran;
+    # passed on the first attempt.
+    {
+        "id_suffix": "compound_espi_emul_kconfig_dts",
+        "category": "compound",
+        "target_app": "tests/drivers/espi",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "drivers/espi/Kconfig.espi_emul",
+                "operator": "kconfig_invert_depends:ESPI_EMUL",
+            },
+            {
+                "target_file": "boards/native/native_sim/native_sim.dts",
+                "operator": "dts_remove_compatible:zephyr,espi-emul-controller",
+            },
+        ],
+    },
 ]
 
 
