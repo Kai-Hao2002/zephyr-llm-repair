@@ -3,7 +3,7 @@ import os
 import re
 import time
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 from tools.qemu_oracle import QemuOracle
 
@@ -24,6 +24,16 @@ EXPECTED_FAILURE_STATUSES = {
     "dts": {"eof_no_boot", "crash"},
     "c_syntax": {"eof_no_boot"},
     "runtime_crash": {"crash"},
+    # compound 類別橫跨兩種難度：編譯期組合失敗 (跟 kconfig/dts 一樣是
+    # eof_no_boot) 以及執行期靜默邏輯錯誤 (跟 runtime_crash 一樣，ztest
+    # 斷言失敗會落在 crash 這個狀態，見 qemu_oracle.py 的
+    # PROJECT EXECUTION FAILED pattern)，所以取兩者聯集。
+    # compound spans two difficulty tiers: build-time combination failures
+    # (eof_no_boot, like kconfig/dts) and runtime silent logic errors (crash,
+    # like runtime_crash — a failed ztest assertion lands in this status via
+    # qemu_oracle.py's PROJECT EXECUTION FAILED pattern), so this is the
+    # union of both.
+    "compound": {"eof_no_boot", "crash"},
 }
 
 MUTATE_SCRIPT_HOST_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "mutate_inject.py"))
@@ -45,39 +55,58 @@ class FaultInjector:
     def __init__(self, timeout: int = 600):
         self.oracle = QemuOracle(timeout=timeout)
 
-    def inject_and_verify(self, case_id: str, baseline_commit: str, target_file: str,
-                           operator: str, category: str, target_app: str, board: str,
+    def inject_and_verify(self, case_id: str, baseline_commit: str, injections: List[Dict[str, str]],
+                           category: str, target_app: str, board: str,
                            extra_files: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """
         執行雙向驗證閘，回傳 {"accepted": bool, "reason": str (若拒絕),
         "mutated_result": dict, "reverted_result": dict (若有跑到這步)}。
+
+        injections：[{"target_file": ..., "operator": ...}, ...] 至少一組。
+        單檔案案例傳一個元素的 list 即可；compound / cross-artifact 案例
+        (單一根因橫跨多個 artifact，例如某個 Kconfig 符號開了但對應的 DTS
+        節點被拔掉) 傳多組，會依序套用、依相反順序還原，整組一起判定
+        通過與否——不會個別驗證「只套用其中一組是否也會失敗」，那是
+        registration 前人工 recon 階段該做的交叉檢查，用來確認這真的是
+        compound bug 而不是兩個各自獨立就會炸的巧合。
 
         extra_files (選用)：{"相對於 zephyr repo 根目錄的路徑": "host 上的
         來源檔案絕對路徑"}——在套用 mutation 之前，先把這些檔案 bind-mount
         進容器裡對應的位置 (蓋掉/新增該路徑)。用來支援「把既有測試移植到
         新板子」這類需要新增/修改 mutation 目標檔以外的檔案的 injection
         案例 (例如新增一個該測試原本沒有的 boards/<board>.overlay，或修改
-        tests.yaml 的 platform_allow)——單一 target_file mutation 機制沒辦法
-        表達這種「baseline checkout 之外還需要額外檔案」的情境。
+        tests.yaml 的 platform_allow)——單純的 mutation 機制沒辦法表達這種
+        「baseline checkout 之外還需要額外檔案」的情境。
 
         Runs the two-sided verification gate.
 
+        injections: [{"target_file": ..., "operator": ...}, ...], at least
+        one. Single-file cases pass a one-element list; compound /
+        cross-artifact cases (a single root cause spanning multiple
+        artifacts, e.g. a Kconfig symbol enabled but the DTS node it depends
+        on removed) pass multiple, applied in order and reverted in reverse
+        order, judged as a single unit — this does not separately verify
+        "does applying only one of them also fail", which is a cross-check
+        that belongs in manual recon before registration, to confirm this is
+        a genuine compound bug rather than two independently-breaking
+        mutations that happen to be bundled together.
+
         extra_files (optional): {"path relative to the zephyr repo root":
         "absolute host path to the source file"} — bind-mounted into the
-        container at the corresponding path *before* the mutation is
+        container at the corresponding path *before* the mutations are
         applied (overwriting/adding that path). Supports injection cases
         that need to "port an existing test to a new board" — files beyond
-        the single mutation target_file (e.g. adding a boards/<board>.overlay
-        the test didn't originally have, or editing tests.yaml's
-        platform_allow) — which the single-target_file mutation mechanism
-        alone can't express.
+        the mutation target_files (e.g. adding a boards/<board>.overlay the
+        test didn't originally have, or editing tests.yaml's
+        platform_allow) — which the mutation mechanism alone can't express.
         """
-        mutated_result = self._run(case_id, baseline_commit, target_file, operator, category, target_app, board, revert=False, extra_files=extra_files)
+        mutated_result = self._run(case_id, baseline_commit, injections, category, target_app, board, revert=False, extra_files=extra_files)
 
         if mutated_result["status"] == "operator_no_match":
+            targets = ", ".join(f"{inj['operator']} on {inj['target_file']}" for inj in injections)
             return {
                 "accepted": False,
-                "reason": f"mutation operator '{operator}' found no match in {target_file}",
+                "reason": f"mutation operator found no match for: {targets}",
                 "mutated_result": mutated_result,
             }
 
@@ -89,7 +118,7 @@ class FaultInjector:
                 "mutated_result": mutated_result,
             }
 
-        reverted_result = self._run(case_id, baseline_commit, target_file, operator, category, target_app, board, revert=True, extra_files=extra_files)
+        reverted_result = self._run(case_id, baseline_commit, injections, category, target_app, board, revert=True, extra_files=extra_files)
         if reverted_result["status"] != "success":
             return {
                 "accepted": False,
@@ -104,17 +133,19 @@ class FaultInjector:
             "reverted_result": reverted_result,
         }
 
-    def _run(self, case_id: str, baseline_commit: str, target_file: str, operator: str,
+    def _run(self, case_id: str, baseline_commit: str, injections: List[Dict[str, str]],
               category: str, target_app: str, board: str, revert: bool,
               extra_files: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """
-        跑一次容器：checkout baseline -> west update -> 套用 mutation
-        (revert=True 時緊接著再還原) -> west build -t run。
-        透過 bind-mount 把 tools/mutate_inject.py 掛進容器，不需要重建 image。
-        Runs one container: checkout baseline -> west update -> apply the
-        mutation (immediately reverting it too if revert=True) -> west build
-        -t run. Bind-mounts tools/mutate_inject.py into the container so no
-        image rebuild is needed.
+        跑一次容器：checkout baseline -> west update -> 依序套用每組 injection
+        的 mutation (revert=True 時緊接著依相反順序全部還原) -> west build
+        -t run。透過 bind-mount 把 tools/mutate_inject.py 掛進容器，不需要
+        重建 image。
+        Runs one container: checkout baseline -> west update -> apply each
+        injection's mutation in order (immediately reverting all of them in
+        reverse order too if revert=True) -> west build -t run. Bind-mounts
+        tools/mutate_inject.py into the container so no image rebuild is
+        needed.
         """
         suffix = "revert" if revert else "mutate"
         container_name = f"inject_{case_id}_{suffix}_{int(time.time() * 1000)}"
@@ -159,8 +190,12 @@ class FaultInjector:
         # once the container's bash re-parses this now-unquoted text, the
         # backslashes are correctly consumed as escape characters, and
         # python3 receives the original, unescaped literal value.
-        escaped_operator = re.sub(r'([^A-Za-z0-9_./:-])', r'\\\1', operator)
-        mutate_cmd = f"python3 {MUTATE_SCRIPT_CONTAINER_PATH} /zephyrproject/zephyr/{target_file} {escaped_operator}"
+        mutate_cmds = []
+        for inj in injections:
+            escaped_operator = re.sub(r'([^A-Za-z0-9_./:-])', r'\\\1', inj["operator"])
+            mutate_cmds.append(
+                f"python3 {MUTATE_SCRIPT_CONTAINER_PATH} /zephyrproject/zephyr/{inj['target_file']} {escaped_operator}"
+            )
 
         # extra_files 裡每一組 (container 相對路徑 -> host 絕對路徑) 用來支援
         # 「把既有測試移植到新板子」這類需要動到 mutation 目標檔以外的檔案的
@@ -195,9 +230,14 @@ class FaultInjector:
                 dest = f"/zephyrproject/zephyr/{container_rel_path}"
                 copy_steps.append(f"mkdir -p $(dirname {dest}) && cp {staging_path} {dest}")
 
-        steps = copy_steps + [mutate_cmd]
+        steps = copy_steps + mutate_cmds
         if revert:
-            steps.append(f"{mutate_cmd} --revert")
+            # 依相反順序全部還原——每個 operator 各自的 .orig 備份彼此獨立，
+            # 順序本身不影響正確性，但反序是比較保守、一致的慣例。
+            # Revert all of them in reverse order — each operator's .orig
+            # backup is independent, so order doesn't affect correctness, but
+            # reverse order is the more conservative, consistent convention.
+            steps.extend(f"{cmd} --revert" for cmd in reversed(mutate_cmds))
 
         # baseline commit 是動態解析出來的「main 分支目前的 tip」，image 建置
         # 當下抓到的 main 通常已經落後，本地 git 物件庫裡沒有這個新 commit，
@@ -230,12 +270,20 @@ class FaultInjector:
         # runtime_crash 類別的目標是 ztest suite：開機橫幅一定會先於測試
         # 執行出現，若一看到它就停止監控，永遠不可能觀察到測試執行期間
         # 才發生的崩潰。見 QemuOracle.evaluate 的 wait_for_completion 說明。
+        # compound 也需要同樣的耐心：它的執行期靜默邏輯錯誤子類型
+        # (compatible 綁錯 instance) 一樣是開機成功後才在特定測試斷言失敗，
+        # 提早在開機橫幅停止監控一樣會錯過；編譯期失敗的 compound 子類型
+        # 根本到不了開機橫幅，這個旗標對它是無害的。
         # The runtime_crash category targets a ztest suite: the boot banner
         # always appears before any test actually runs, so stopping at it
         # would make it impossible to ever observe a crash that happens
         # during test execution. See QemuOracle.evaluate's
-        # wait_for_completion docstring.
-        wait_for_completion = (category == "runtime_crash")
+        # wait_for_completion docstring. compound needs the same patience:
+        # its runtime silent-logic-error subtype (compatible bound to the
+        # wrong instance) also only fails a specific test assertion after a
+        # successful boot, and build-time compound cases never reach the
+        # boot banner at all, so this flag is harmless for them.
+        wait_for_completion = category in ("runtime_crash", "compound")
         result = self.oracle.evaluate(docker_cmd, container_name=container_name,
                                        wait_for_completion=wait_for_completion)
 

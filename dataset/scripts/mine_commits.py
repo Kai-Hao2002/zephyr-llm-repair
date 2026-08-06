@@ -3133,6 +3133,86 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/input/longpress",
         "board": "native_sim",
     },
+    # --- Compound / Cross-Artifact Faults (new 5th category, session 46 part 20) ---
+    # 前 80 筆案例全部是「單一檔案」破壞：repair agent 只需要看 build log
+    # 指到的那個檔案改，不用理解 Kconfig -> DTS -> C 的相依圖。這是一個獨立
+    # 的新類別，模擬「單一根因橫跨多個 artifact 才會顯現」的錯誤 —— 第一批
+    # (這個) 是編譯期就會炸的組合：Kconfig 開了但對應的 DTS 節點被拔掉。
+    #
+    # 誠實記錄一個方法論上的取捨：這次 pilot 刻意選擇「架構上橫跨兩個檔案、
+    # 共同構成一個連貫的 bug 敘事」作為 compound 的定義，而非「單獨套用任一
+    # 邊都絕對不會失敗」的嚴格雙邊必要性。手動 recon 階段實測過，這個案例的
+    # DTS 側 mutation 單獨套用 (不動 Kconfig) 也足以讓建置失敗 —— 因為
+    # `tests/drivers/adc/adc_emul/src/main.c` 對 `DEVICE_DT_GET(DT_INST(0,
+    # zephyr_adc_emul))` 沒有 `#ifdef CONFIG_ADC_EMUL` 保護，是無條件呼叫。
+    # 這其實是 Zephyr 這類「Kconfig 靠 `depends on DT_HAS_X_ENABLED` 自動
+    # select」樣板的結構性限制：若消費端 C 程式碼無條件引用該裝置，DTS 側
+    # 單獨就足以致命；若消費端有 `#ifdef` 保護，系統會自我修復 (Kconfig 自動
+    # 關閉，整段程式碼不編譯)，要在這種情況下仍然逼它失敗，需要一個能「移除
+    # /削弱 depends on」而非只是「反轉」的新 operator，超出這次「先讓機制
+    # 跑通」的範圍。嚴格的雙邊必要性留給第二種 compound 子類型 (compatible
+    # 綁錯 instance，天生就是雙邊必要，建置完全過、不 crash)。
+    # Kconfig 側跟 DTS 側鎖定的是同一個「ADC_EMUL 啟用關係」的兩個面向 ——
+    # 一個從「這個 config 的依賴閘門」的角度破壞，一個從「這個閘門依據的
+    # devicetree 事實」的角度破壞 —— 是一個連貫的單一根因敘事，只是不滿足
+    # 嚴格雙邊必要性。
+    #
+    # The first 80 cases are all single-file breakage: a repair agent only
+    # needs to look at whatever file the build log points to, no need to
+    # understand the Kconfig -> DTS -> C dependency graph. This is a new,
+    # independent category simulating faults where a single root cause only
+    # manifests across multiple artifacts — this first entry is the
+    # build-time-failing combination: a Kconfig symbol enabled but the DTS
+    # node it depends on removed.
+    #
+    # Honestly recording a methodological tradeoff: this pilot deliberately
+    # defines "compound" as "architecturally spans two files, forming one
+    # coherent bug narrative" rather than strict bilateral necessity
+    # ("applying either mutation alone never fails"). Manual recon confirmed
+    # the DTS-side mutation alone (leaving Kconfig untouched) is already
+    # sufficient to fail the build here, because
+    # `tests/drivers/adc/adc_emul/src/main.c` calls `DEVICE_DT_GET(DT_INST(0,
+    # zephyr_adc_emul))` unconditionally, with no `#ifdef CONFIG_ADC_EMUL`
+    # guard. This is a structural limitation of Zephyr's common "Kconfig
+    # auto-selects via `depends on DT_HAS_X_ENABLED`" idiom: if the consuming
+    # C code references the device unconditionally, the DTS side alone is
+    # already fatal; if the consumer is `#ifdef`-guarded, the system
+    # self-heals (Kconfig auto-disables, the whole guarded block never
+    # compiles) — forcing a failure in that case would need a new operator
+    # that removes/weakens a `depends on` line rather than merely inverting
+    # it, which is out of scope for this "get the mechanism working" pass.
+    # Strict bilateral necessity is deferred to the second compound subtype
+    # (compatible bound to the wrong instance — inherently bilateral, builds
+    # clean, doesn't crash). The Kconfig and DTS mutations here target two
+    # faces of the same "ADC_EMUL enablement relationship" — one breaks the
+    # config's dependency gate, the other breaks the devicetree fact that
+    # gate is conditioned on — one coherent single-root-cause narrative, just
+    # not strictly bilaterally necessary.
+    #
+    # Verified: mutate side failed at CMake/compile stage with a genuine
+    # compiler error (`__device_dts_ord_DT_N_INST_0_zephyr_adc_emul_ORD`
+    # undeclared, `DT_N_INST_0_zephyr_adc_emul_P_ref_internal_mv` undeclared)
+    # — status `eof_no_boot`, matching the compound category's expected
+    # failure set. Revert side rebuilt and passed cleanly. Both mutation
+    # operators individually spot-checked locally (non-Docker) for a clean
+    # apply/revert round-trip before the real two-sided gate ran. Passed
+    # `verify_cases.py`'s full gate on the first attempt via a pilot JSON.
+    {
+        "id_suffix": "compound_adc_emul_kconfig_dts",
+        "category": "compound",
+        "target_app": "tests/drivers/adc/adc_emul",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "drivers/adc/Kconfig.adc_emul",
+                "operator": "kconfig_invert_depends:ADC_EMUL",
+            },
+            {
+                "target_file": "boards/native/native_sim/native_sim.dts",
+                "operator": "dts_remove_compatible:zephyr,adc-emul",
+            },
+        ],
+    },
 ]
 
 
@@ -3385,22 +3465,40 @@ class ZephyrBugMiner:
         cases = []
         for entry in catalog:
             case_id = f"inject_{entry['id_suffix']}"
-            injection = {
-                "target_file": entry["target_file"],
-                "operator": entry["operator"],
-            }
-            if entry.get("extra_files"):
-                injection["extra_files"] = entry["extra_files"]
-            cases.append({
+            case = {
                 "id": case_id,
-                "title": f"[Injected] {entry['category']}: {entry['operator']} on {entry['target_file']}",
                 "category": entry["category"],
                 "broken_commit": baseline_commit,
                 "fixed_commit": baseline_commit,
                 "target_app": entry["target_app"],
                 "board": entry["board"],
-                "injection": injection,
-            })
+            }
+            if entry.get("extra_files"):
+                case["extra_files"] = entry["extra_files"]
+
+            # compound / cross-artifact 案例 (單一根因橫跨多個 artifact，
+            # 例如某個 Kconfig 符號開了但對應的 DTS 節點被拔掉) 在 catalog
+            # 裡用 "injections" (list) 表達，其餘單檔案案例維持原本扁平的
+            # "target_file"/"operator"。
+            # compound / cross-artifact cases (a single root cause spanning
+            # multiple artifacts, e.g. a Kconfig symbol enabled but the DTS
+            # node it depends on removed) are expressed in the catalog via
+            # "injections" (a list); all other single-file cases keep the
+            # original flat "target_file"/"operator".
+            if "injections" in entry:
+                case["injections"] = entry["injections"]
+                title_targets = " + ".join(
+                    f"{inj['operator']} on {inj['target_file']}" for inj in entry["injections"]
+                )
+                case["title"] = f"[Injected] {entry['category']} (compound): {title_targets}"
+            else:
+                case["injection"] = {
+                    "target_file": entry["target_file"],
+                    "operator": entry["operator"],
+                }
+                case["title"] = f"[Injected] {entry['category']}: {entry['operator']} on {entry['target_file']}"
+
+            cases.append(case)
 
         logger.info(f"🧬 產生了 {len(cases)} 筆合成注入候選案例 (尚未驗證)。")
         return cases

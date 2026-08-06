@@ -113,13 +113,15 @@ class ZephyrCaseVerifier:
     def _verify_one_case(self, case: dict):
         """
         驗證單一案例，供 ThreadPoolExecutor 並行呼叫。
-        依 case 是否帶有 "injection" 欄位，分派給合成注入或真實挖礦兩條驗證路徑。
+        依 case 是否帶有 "injection" (單檔案) 或 "injections" (compound，多
+        檔案) 欄位，分派給合成注入或真實挖礦兩條驗證路徑。
         Verifies a single case for parallel execution via ThreadPoolExecutor.
         Dispatches to the synthetic-injection or real-mined verification path
-        depending on whether the case carries an "injection" field.
+        depending on whether the case carries an "injection" (single-file) or
+        "injections" (compound, multi-file) field.
         """
         tag = f"[{case['id']}]"
-        if "injection" in case:
+        if "injection" in case or "injections" in case:
             return self._verify_injected_case(case, tag)
         return self._verify_mined_case(case, tag)
 
@@ -127,27 +129,46 @@ class ZephyrCaseVerifier:
         """
         驗證合成注入案例：透過 FaultInjector 的雙向驗證閘 (注入後必須重現
         預期類別的失敗、還原後必須建置並執行成功)。
+
+        向下相容兩種 schema：舊的單檔案案例存 "injection" (單一 dict)；
+        compound / cross-artifact 案例 (單一根因橫跨多個 artifact) 存
+        "injections" (list，依序套用、依相反順序還原)。這裡統一正規化成
+        list 再往下傳給 FaultInjector，不用動到既有 80 筆案例的資料。
+
         Verifies a synthetic fault-injection case via FaultInjector's
         two-sided gate (must reproduce the intended failure when mutated,
         must build and run successfully when reverted).
+
+        Backward-compatible with two schemas: legacy single-file cases store
+        "injection" (a single dict); compound / cross-artifact cases (one
+        root cause spanning multiple artifacts) store "injections" (a list,
+        applied in order and reverted in reverse order). Normalized to a
+        list here before handing off to FaultInjector — no need to touch the
+        existing 80 cases' data.
         """
-        injection = case["injection"]
+        injections = case["injections"] if "injections" in case else [case["injection"]]
         target_app = case.get("target_app", "samples/hello_world")
         board = case.get("board", "native_sim")
         category = case.get("category", "other")
 
+        targets_desc = ", ".join(f"{inj['operator']} on {inj['target_file']}" for inj in injections)
         logger.info(f"🧬 {tag} 開始驗證注入案例: {case['title']}")
-        logger.info(f"   ↳ {tag} 目標檔案: {injection['target_file']} | Operator: {injection['operator']} | App: {target_app} | Board: {board}")
+        logger.info(f"   ↳ {tag} 目標: {targets_desc} | App: {target_app} | Board: {board}")
 
+        # extra_files 目前設計成套用在整組 injections 上，尚未支援「每個
+        # injection 各自帶自己的 extra_files」——多檔案 compound 案例若也
+        # 需要額外新檔案，先掛在最外層的 case["extra_files"]。
+        # extra_files is currently applied to the whole injections group,
+        # not per-injection — a compound case that also needs extra new
+        # files should put them on the case's top-level "extra_files".
         gate_result = self.injector.inject_and_verify(
             case_id=case["id"],
             baseline_commit=case["broken_commit"],
-            target_file=injection["target_file"],
-            operator=injection["operator"],
+            injections=injections,
             category=category,
             target_app=target_app,
             board=board,
-            extra_files=injection.get("extra_files"),
+            extra_files=case.get("extra_files") or injections[0].get("extra_files"),
         )
 
         if not gate_result["accepted"]:
@@ -164,21 +185,27 @@ class ZephyrCaseVerifier:
         # 記下這個注入的 bug 具體打壞了哪一個 ztest 測試案例 (target_test)，
         # 供之後評分「修復後的 patch」時使用：只有整個套件印出成功總結還
         # 不夠，必須確認這個特定測試真的存在且真的通過，才能排除「把該
-        # 測試刪掉/跳過」這種投機修復。只對 runtime_crash 類別有意義——
-        # kconfig/dts/c_syntax 是建置失敗，log 裡根本沒有 ztest 測試名稱。
-        # 用未壓縮的原始 log 抽取，命中率比壓縮後的日誌更高。
+        # 測試刪掉/跳過」這種投機修復。只對「失敗發生在執行期」(status ==
+        # "crash") 有意義——build 階段失敗 (eof_no_boot) 的 log 裡根本沒有
+        # ztest 測試名稱。用 status 而非 category 判斷，是因為 compound
+        # 類別橫跨編譯期跟執行期兩種子類型，runtime_crash 才是唯一固定的
+        # 執行期類別 (見 EXPECTED_FAILURE_STATUSES 的說明)。用未壓縮的
+        # 原始 log 抽取，命中率比壓縮後的日誌更高。
         # Records which specific ztest test case the injected bug broke
         # (target_test), for later use when grading a repaired patch: a
         # suite-wide success summary isn't enough on its own, the specific
         # test must genuinely exist and pass, ruling out a shortcut "fix"
-        # that deletes/skips that one test. Only meaningful for the
-        # runtime_crash category — kconfig/dts/c_syntax are build failures
-        # with no ztest test name in the log at all. Extracted from the
-        # raw (uncompressed) log for a higher hit rate than the compressed
-        # version.
+        # that deletes/skips that one test. Only meaningful when the failure
+        # happened at runtime (status == "crash") — build-stage failures
+        # (eof_no_boot) have no ztest test name in the log at all. Checked
+        # via status rather than category because compound spans both a
+        # build-time and a runtime subtype, while runtime_crash is always
+        # the runtime one (see EXPECTED_FAILURE_STATUSES). Extracted from
+        # the raw (uncompressed) log for a higher hit rate than the
+        # compressed version.
         case["target_test"] = (
             extract_failing_test_name(mutated_result["log"])
-            if category == "runtime_crash" else None
+            if mutated_result["status"] == "crash" else None
         )
         return case
 
