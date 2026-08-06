@@ -3407,6 +3407,86 @@ INJECTION_CATALOG = [
             },
         ],
     },
+    # --- Compound round 4 (session 46 part 24): subtype 2's 4th target, plus
+    # 2 abandoned subtype-1 attempts with a durable process lesson ---
+    # Two subtype-1 candidates were tried and abandoned before this one
+    # landed, for two different, genuinely non-obvious reasons - both worth
+    # recording since neither was a mistake in the operators themselves:
+    #
+    # 1. `biometrics_emul` (drivers/biometrics/Kconfig.emul +
+    #    tests/drivers/biometrics/biometrics_emul/app.overlay, same proven
+    #    DT_HAS_ZEPHYR_*_ENABLED shape as ADC/DAC): passed local
+    #    (non-Docker) mutation round-trip, but the real gate's revert side
+    #    hit a runtime "Aborted" crash mid-suite *twice* in a row (2/2,
+    #    different from the earlier "eof_no_boot"-style build failures).
+    #    Manually reproducing the exact same command sequence once,
+    #    independently, passed cleanly 12/12 with `git status --porcelain`
+    #    confirming a byte-clean revert - meaning the files themselves were
+    #    never the problem. Concluded this is intrinsic flakiness in this
+    #    specific (2025-added, very new) driver's test under native_sim,
+    #    not our injection pipeline; the real gate's own 2/2 failure is the
+    #    authoritative signal (it reflects the actual oracle/pty conditions
+    #    real repair-agent runs will see), so this target was abandoned
+    #    rather than forced in.
+    # 2. `uart_emul` (drivers/serial/Kconfig.emul +
+    #    tests/drivers/uart/uart_emul/uart_emul.overlay, "EXPERIMENTAL"
+    #    UART_EMUL driver): revert side failed at `eof_no_boot`, and a
+    #    manual full reproduction of the revert sequence hit a genuine
+    #    compiler error even with `git status --porcelain` confirming both
+    #    mutated files were restored byte-identical. Root-caused by building
+    #    the *unmutated* baseline directly at the pinned baseline_commit
+    #    (`bc460feabe7038dc876782557e39be791d6c24e9`) with zero mutations
+    #    applied at all - it failed with the *exact same* compiler error
+    #    (`DT_N_NODELABEL_dummy_PARENT_ORD` undeclared, from
+    #    `device.c`'s `EMUL_UART_NODE = DT_PARENT(DT_NODELABEL(dummy))`).
+    #    This test genuinely does not build at this pinned commit,
+    #    unrelated to any mutation - a baseline/commit incompatibility, not
+    #    a pipeline bug. **New process lesson**: for any *new* target file
+    #    going forward (not just DT_HAS_ZEPHYR_*_ENABLED/dts_redirect_phandle
+    #    candidates specifically, this generalizes to any new target),
+    #    worth a quick unmutated baseline build at the pinned commit before
+    #    investing further, the same way `verify_cases.py`'s revert side
+    #    already implicitly re-proves the baseline for every *accepted*
+    #    case - this just does it *before* burning a mutate+revert cycle on
+    #    a target that might not even build cleanly to begin with.
+    #
+    # Landed target — a 4th `dts_redirect_phandle` site, on
+    # `tests/subsys/pm/power_domain/app.overlay`. `test_dev_a` and
+    # `test_dev_b` both have `power-domains = <&test_domain>;`;
+    # `ZTEST(power_domain_1cpu, test_power_domain_device_runtime)`
+    # (`tests/subsys/pm/power_domain/src/main.c`) exercises the domain's
+    # runtime-PM bookkeeping across both devices sharing that one domain
+    # (get/put reference counting, notification counts, and each device's
+    # resulting PM_DEVICE_STATE). Redirecting `test_dev_b`'s (the *second*
+    # `&test_domain` occurrence, `#2`) `power-domains` phandle to
+    # `&test_domain_balanced` — a separate, independently valid
+    # power-domain node in the same file, normally only used by the
+    # test's *other* suite (`test_power_domain_device_balanced`) — silently
+    # moves `devb` out of the domain the runtime test expects it to share
+    # with `deva`. Compiles, links, and boots completely clean; 3 of the
+    # suite's 4 tests (`test_on_power_domain`,
+    # `test_power_domain_add_remove_duplicate`,
+    # `test_power_domain_device_balanced`) pass outright, and only
+    # `test_power_domain_device_runtime` fails — specifically at the point
+    # checking `devb`'s state drops to `PM_DEVICE_STATE_OFF` once the
+    # (now-unrelated) `test_domain` fully suspends, which no longer happens
+    # to `devb` since it isn't a member of that domain anymore. `crash`
+    # status, `target_test` auto-extracted as
+    # `test_power_domain_device_runtime`. Revert side rebuilt and passed
+    # all 4 tests cleanly. Spot-checked locally (non-Docker) before the
+    # real gate ran; passed on the first attempt.
+    {
+        "id_suffix": "compound_power_domain_devb_redirect",
+        "category": "compound",
+        "target_app": "tests/subsys/pm/power_domain",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "tests/subsys/pm/power_domain/app.overlay",
+                "operator": "dts_redirect_phandle:test_domain#2:test_domain_balanced",
+            },
+        ],
+    },
 ]
 
 
