@@ -3288,6 +3288,74 @@ INJECTION_CATALOG = [
             },
         ],
     },
+    # --- Compound round 2 (session 46 part 22): a second target file for each subtype ---
+    # Subtype 1 — same proven shape as `compound_adc_emul_kconfig_dts`
+    # (Kconfig `depends on DT_HAS_ZEPHYR_X_ENABLED` inverted + the gated
+    # node's compatible removed), applied to a completely fresh pair of
+    # files: `drivers/dac/Kconfig.dac_emul`'s `config DAC_EMUL` and
+    # `tests/drivers/dac/dac_emul/boards/native_sim.overlay`'s `dac_emul0`
+    # node (one of 3 sibling DAC-emulator instances in that overlay, all
+    # sharing `compatible = "zephyr,dac-emul"` — targeted the first
+    # occurrence specifically, which is `dac_emul0`; the driver-agnostic
+    # test's own `dac_emul_setup()` asserts `device_is_ready()` on all 3
+    # instances unconditionally, so losing just one still fails the whole
+    # build). Verified: mutate side genuinely never reaches a boot signature
+    # (`ninja: build stopped: subcommand failed`, status `eof_no_boot`,
+    # matching the compound category's expected set); revert side rebuilt
+    # and passed cleanly.
+    #
+    # Subtype 2 — a second `dts_redirect_phandle` target, on
+    # `tests/subsys/pm/policy_api/app.overlay`. Its `zephyr,user` node has
+    # `test-states = <&state0 &state2>;`, feeding
+    # `PM_STATE_CONSTRAINTS_GET(DT_PATH(zephyr_user), test_states)` in
+    # `tests/subsys/pm/policy_api/src/main.c`; `ZTEST(policy_api,
+    # test_pm_policy_state_constraints)` asserts the resulting constraint
+    # list contains both a runtime-idle/substate-1 state (from `state0`) and
+    # a suspend-to-ram/substate-100 state (from `state2`) — a third sibling
+    # node in the same file, `state1` (suspend-to-ram/substate-10), is
+    # structurally just as valid a `zephyr,power-state` node but numerically
+    # distinct on every property. Redirected `state0` -> `state1`: compiles,
+    # links, and boots completely clean, and 4 of the suite's 5 tests
+    # (including the earlier `test_pm_policy_next_state_*` tests, which
+    # don't touch `test-states` at all) pass outright; only
+    # `test_pm_policy_state_constraints`'s `found_runtime_idle` check fails,
+    # exactly as predicted — the raw log even printed the substituted
+    # constraint's actual values (`Constraint 0: state=4, substate_id=10` —
+    # `state1`'s substate id, not `state0`'s `1`) confirming the mechanism
+    # directly rather than just the pass/fail outcome. Status `crash`,
+    # `target_test` auto-extracted as `test_pm_policy_state_constraints`.
+    # Revert side rebuilt and passed all 5 tests cleanly. Both mutations
+    # spot-checked locally (non-Docker) before the real gate ran; both
+    # passed `verify_cases.py`'s full gate on the first attempt via a
+    # shared pilot JSON.
+    {
+        "id_suffix": "compound_dac_emul_kconfig_dts",
+        "category": "compound",
+        "target_app": "tests/drivers/dac/dac_emul",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "drivers/dac/Kconfig.dac_emul",
+                "operator": "kconfig_invert_depends:DAC_EMUL",
+            },
+            {
+                "target_file": "tests/drivers/dac/dac_emul/boards/native_sim.overlay",
+                "operator": "dts_remove_compatible:zephyr,dac-emul",
+            },
+        ],
+    },
+    {
+        "id_suffix": "compound_pm_policy_state_redirect",
+        "category": "compound",
+        "target_app": "tests/subsys/pm/policy_api",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "tests/subsys/pm/policy_api/app.overlay",
+                "operator": "dts_redirect_phandle:state0:state1",
+            },
+        ],
+    },
 ]
 
 
