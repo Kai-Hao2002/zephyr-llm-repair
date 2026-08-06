@@ -3356,6 +3356,57 @@ INJECTION_CATALOG = [
             },
         ],
     },
+    # --- Compound round 3 (session 46 part 23): subtype 2's 3rd target file ---
+    # `tests/subsys/pm/power_states_api/boards/native_sim.overlay` has 4
+    # sibling `zephyr,power-state` nodes (`state0`..`state3`, distinct
+    # residency/latency numbers each) referenced from *two* different
+    # places: the CPU's own `cpu-power-states = <&state0 &state1 &state2
+    # &state3>;` (all four, in order) and, separately, `test_dev`'s
+    # `zephyr,disabling-power-states = <&state1 &state2>;` (the specific
+    # states this device's activity should suppress). Both properties
+    # literally contain the substring `&state2`, and since
+    # `dts_redirect_phandle`'s hint-less `.search()` behavior grabs the
+    # *first* occurrence in the whole file, a first attempt at this exact
+    # mutation (`state2:state0`, no occurrence index) landed on the
+    # `cpu-power-states` list instead of the intended
+    # `disabling-power-states` property — a genuinely different, less
+    # predictable mutation than planned, caught before ever running the
+    # real gate by reading the local (non-Docker) mutation diff, not
+    # assumed. This is exactly the class of ambiguity `#N` occurrence
+    # suffixes exist to resolve elsewhere in mutate_inject.py (see
+    # `_parse_occurrence_suffix`), so `dts_redirect_phandle` gained the same
+    # `old_label[#N]:new_label` support (previously hint-only, no
+    # occurrence index) to fix it — used here as `state2#2:state0` to
+    # target the 2nd `&state2` occurrence specifically.
+    #
+    # `ZTEST(power_states_1cpu, test_device_power_state_constraints)`
+    # (`tests/subsys/pm/power_states_api/src/main.c`) keeps `test_dev` busy
+    # via `test_driver_async_operation()`, sleeps 60ms, and asserts
+    # `suspend_to_ram_count == 0` — the device's constraint is supposed to
+    # keep the CPU out of the (50ms-residency) suspend-to-ram state while
+    # busy. Redirecting the *disabling* list's `state2` (suspend-to-ram) to
+    # `state0` (suspend-to-idle, already covered by neither list) silently
+    # drops suspend-to-ram from what gets suppressed during that busy
+    # window: build/link/boot all succeed completely clean, and the CPU
+    # actually enters suspend-to-ram mid-test — the raw log confirms the
+    # exact predicted mechanism directly (`Assertion failed ...
+    # (suspend_to_ram_count == 0 is false)`), not just a pass/fail verdict.
+    # `target_test` auto-extracted as `test_device_power_state_constraints`.
+    # Revert side rebuilt and passed cleanly. Spot-checked locally
+    # (non-Docker) before the real gate ran; passed `verify_cases.py`'s full
+    # gate on the first attempt after the `#N` fix.
+    {
+        "id_suffix": "compound_power_states_api_disabling_redirect",
+        "category": "compound",
+        "target_app": "tests/subsys/pm/power_states_api",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "tests/subsys/pm/power_states_api/boards/native_sim.overlay",
+                "operator": "dts_redirect_phandle:state2#2:state0",
+            },
+        ],
+    },
 ]
 
 

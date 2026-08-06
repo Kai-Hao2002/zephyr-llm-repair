@@ -124,11 +124,18 @@ def _dts_redirect_phandle(content: str, hint: Optional[str] = None) -> Optional[
     的邏輯或測試斷言才會抓到——用來模擬 compound 類別裡「compatible/裝置
     身分被悄悄重新導向到另一個合法但錯誤的 instance」這種靜默邏輯錯誤。
 
-    hint 必填，格式是 "old_label:new_label" (兩者都是不含 & 的節點標籤)；
-    沒有 hint 或格式不對時回傳 None (跟其他需要精準定位的 operator 一樣，
-    這裡不提供「抓檔案裡第一個 phandle」的樸素退回行為，因為隨便挑一個
-    phandle 重新導向到隨便一個標籤，产生的幾乎必然是垃圾結果，而非有意義
-    的 compound 案例)。
+    hint 必填，格式是 "old_label[#N]:new_label" (兩者都是不含 & 的節點標籤，
+    N 是可選的出現次數後綴，1-indexed，預設 1)；沒有 hint 或格式不對時回傳
+    None (跟其他需要精準定位的 operator 一樣，這裡不提供「抓檔案裡第一個
+    phandle」的樸素退回行為，因為隨便挑一個 phandle 重新導向到隨便一個
+    標籤，产生的幾乎必然是垃圾結果，而非有意義的 compound 案例)。
+
+    同一個標籤常常在檔案裡被參照不只一次 (例如某個 power-state 節點同時
+    被 CPU 自己的 `cpu-power-states` 列出、又被另一個裝置節點的屬性單獨
+    引用)——只認「檔案裡第一個 `&old_label`」在這種情況下很容易抓錯目標
+    (見 power_states_api 案例的踩坑紀錄：預設抓到的是 `cpu-power-states`
+    列表裡的那個，而不是原本想動的裝置專屬屬性)，所以需要 `#N` 才能精準
+    選到想要的那一個出現位置。
 
     Redirects a `&old_label` phandle reference to point at a different,
     already-existing, valid node `&new_label` — unlike dts_break_phandle
@@ -139,22 +146,34 @@ def _dts_redirect_phandle(content: str, hint: Optional[str] = None) -> Optional[
     compound category's "device identity silently redirected to another
     valid-but-wrong instance" class of silent logic error.
 
-    hint is required, format "old_label:new_label" (both bare node labels,
-    no &). Returns None with no hint or a malformed one — unlike other
-    operators, there's no naive "grab the first phandle in the file"
-    fallback here, since redirecting an arbitrary phandle to an arbitrary
-    label would almost certainly produce garbage rather than a meaningful
-    compound case.
+    hint is required, format "old_label[#N]:new_label" (both bare node
+    labels, no &; N is an optional 1-indexed occurrence suffix, default 1).
+    Returns None with no hint or a malformed one — unlike other operators,
+    there's no naive "grab the first phandle in the file" fallback here,
+    since redirecting an arbitrary phandle to an arbitrary label would
+    almost certainly produce garbage rather than a meaningful compound
+    case.
+
+    The same label is often referenced more than once in a file (e.g. a
+    power-state node listed both in the CPU's own `cpu-power-states` array
+    *and* referenced separately by an unrelated device node's property) —
+    matching only "the first `&old_label` in the file" can easily grab the
+    wrong occurrence in that case (see the power_states_api case's
+    postmortem: the naive default landed on the `cpu-power-states` list
+    entry instead of the intended device-specific property), so `#N` is
+    needed to pin down the exact occurrence.
     """
     if not hint or ':' not in hint:
         return None
-    old_label, new_label = hint.split(':', 1)
+    old_part, new_label = hint.split(':', 1)
+    old_label, n = _parse_occurrence_suffix(old_part)
     if not old_label or not new_label:
         return None
     pattern = re.compile(r'&' + re.escape(old_label) + r'\b')
-    m = pattern.search(content)
-    if not m:
+    matches = list(pattern.finditer(content))
+    if len(matches) < n:
         return None
+    m = matches[n - 1]
     return content[:m.start()] + f"&{new_label}" + content[m.end():]
 
 
