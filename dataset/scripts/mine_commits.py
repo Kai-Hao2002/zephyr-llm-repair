@@ -3720,6 +3720,43 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/espi",
         "board": "native_sim",
     },
+    # Session 46 part 28: continuing the kconfig/dts/c_syntax balancing
+    # pass, reusing already-baseline-verified compound-round target apps
+    # (policy_api, power_domain, power_states_api — all confirmed clean at
+    # the pinned commit during earlier compound work) to skip redundant
+    # baseline checks. `dts_remove_compatible` here hits `power_domain`'s
+    # generic "power-domain" node rather than a driver emulator's DT_INST
+    # node like the earlier dts_remove_compatible cases — the failure
+    # surfaces even earlier, at CMake's devicetree-configure stage
+    # ("power-domain controller ... lacks binding"), before any C
+    # compilation starts. A companion `kconfig_remove_select:
+    # TEST_PROVIDE_PM_HOOKS` candidate on `policy_api/Kconfig` (removing
+    # its `select HAS_PM`) was tried and rejected — the real gate came
+    # back `status=success`: Kconfig just silently downgrades `PM` from
+    # the `y` requested in prj.conf back to `n` on the unmet dependency
+    # instead of aborting the build, and since `policy_api`'s ztest code
+    # is `#ifdef CONFIG_PM_POLICY_DEFAULT`-guarded, the whole suite
+    # compiles and boots fine without PM ever being on — the same
+    # self-healing shape documented for compound subtype 1 in part 20,
+    # just discovered via `kconfig_remove_select` instead of
+    # `kconfig_invert_depends` this time. Not retried elsewhere this
+    # round; recorded here so it isn't rediscovered from scratch.
+    {
+        "id_suffix": "dts_power_domain_test_domain_compatible",
+        "category": "dts",
+        "target_file": "tests/subsys/pm/power_domain/app.overlay",
+        "operator": "dts_remove_compatible",
+        "target_app": "tests/subsys/pm/power_domain",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "c_power_states_test_driver_semicolon",
+        "category": "c_syntax",
+        "target_file": "tests/subsys/pm/power_states_api/src/test_driver.c",
+        "operator": "c_remove_semicolon",
+        "target_app": "tests/subsys/pm/power_states_api",
+        "board": "native_sim",
+    },
 ]
 
 
