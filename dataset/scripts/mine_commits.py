@@ -3667,6 +3667,34 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/dac/dac_emul",
         "board": "native_sim",
     },
+    # Round 2 of the kconfig/dts/c_syntax balancing pass. All 3 reused
+    # already-baseline-verified target apps from earlier compound rounds
+    # (uac2, pinctrl/api, rtc_api) — different files/operators than their
+    # compound siblings in each case.
+    {
+        "id_suffix": "c_uac2_desc_typo_macro",
+        "category": "c_syntax",
+        "target_file": "tests/subsys/usb/uac2/src/uac2_desc.c",
+        "operator": "c_typo_macro",
+        "target_app": "tests/subsys/usb/uac2",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "dts_pinctrl_device0_reg_cellcount",
+        "category": "dts",
+        "target_file": "tests/drivers/pinctrl/api/app.overlay",
+        "operator": "dts_corrupt_reg",
+        "target_app": "tests/drivers/pinctrl/api",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "kconfig_rtc_emul_depends",
+        "category": "kconfig",
+        "target_file": "drivers/rtc/Kconfig.emul",
+        "operator": "kconfig_invert_depends:RTC_EMUL",
+        "target_app": "tests/drivers/rtc/rtc_api",
+        "board": "native_sim",
+    },
 ]
 
 
