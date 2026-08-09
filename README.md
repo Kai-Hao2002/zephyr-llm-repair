@@ -118,5 +118,21 @@ python main.py --target ./dataset/cases/bug_001 --max_retries 5
 python evaluate.py --dataset ./dataset/cases/ --model gemini-2.5-pro
 ```
 
+### ⚠️ `evaluate.py` 設計要求：禁止把 `.git` 暴露給待測 agent / Design requirement: never expose `.git` to the agent under evaluation
+
+**[中]** `verified_zephyr_bugs.json` 裡的每一筆案例都是用 `tools/mutate_inject.py` 對一個已知乾淨的 `broken_commit`（所有案例目前共用同一個：`bc460feabe7038dc876782557e39be791d6c24e9`）做**純 working tree 層級的文字編輯**產生的——它只用 `shutil.copyfile` 備份、直接改檔案內容，從頭到尾不曾呼叫任何 `git` 指令，也不曾建立新的 commit。這代表：如果 `evaluate.py`（或任何未來的跑分 runner）比照 `tools/fault_injector.py` 自己驗證時的做法（`git checkout {broken_commit}` 之後直接套用 mutation），把那個目錄**原封不動、含 `.git`**地交給待測 agent 當工作目錄，那麼 git 的 index/HEAD 其實從頭到尾都停在乾淨的 `broken_commit`——**任何 agent 只要對整個 repo 執行一次 `git checkout -- .` 或 `git restore .`，不需要讀懂、甚至不需要看任何一行程式碼或錯誤訊息，就能讓全部 98 筆（以及未來新增的）案例同時「修復成功」**，讓整個 benchmark 的分數失去意義。
+
+`evaluate.py` 動工時，硬性要求：
+1. 準備好要交給 agent 的 broken workspace 之後、把控制權交還給 agent 之前，**必須先移除 `.git` 目錄**（例如把工作目錄用 `tar`/`rsync --exclude=.git` 複製一份乾淨的、不含版本控制歷史的副本，而不是直接掛載或複製那個做完 `git checkout` 的目錄本身）。
+2. 若 agent 執行環境有對外網路存取，同樣要考慮 agent 直接 `git clone`/`git fetch` 真正的 upstream Zephyr repo（`broken_commit` 是公開可查的 SHA）來比對差異的殘餘風險——是否要限制 agent sandbox 的對外網路存取，需要在設計 `evaluate.py` 時一併決定，不要等實際跑分才發現漏洞。
+3. 把「拿掉 `.git` 之後，agent 的工作目錄裡確實沒有可以拿來 diff 出原始碼的版本控制殘留」這件事，寫成 `evaluate.py` 自己的一個驗收測試（例如跑分前先斷言 workspace 底下沒有 `.git`／沒有任何指向 `broken_commit` 的物件），不要只靠人工檢查。
+
+**[EN]** Every case in `verified_zephyr_bugs.json` is produced by `tools/mutate_inject.py` editing a known-good `broken_commit` (all cases currently share one: `bc460feabe7038dc876782557e39be791d6c24e9`) **purely at the working-tree level** — it backs up via `shutil.copyfile` and edits file contents directly, never invoking `git` or creating a commit. This means: if `evaluate.py` (or any future runner) mirrors how `tools/fault_injector.py` verifies cases internally (`git checkout {broken_commit}`, then apply the mutation) and hands that directory to the agent under evaluation **as-is, with `.git` intact**, the git index/HEAD remain at the pristine `broken_commit` the whole time — **any agent can trivially "resolve" all 98 (and any future) cases by running `git checkout -- .` or `git restore .` on the whole repo, without reading a single line of code or error output**, making the benchmark's scores meaningless.
+
+When building `evaluate.py`, this is a hard requirement:
+1. **Strip `.git` before handing control to the agent** — e.g. copy the broken workspace out via `tar`/`rsync --exclude=.git` into a version-control-free directory, rather than mounting or copying the post-`git checkout` directory itself.
+2. If the agent's sandbox has outbound network access, also consider the residual risk of it `git clone`/`git fetch`-ing the real upstream Zephyr repo directly (the `broken_commit` SHA is a public, fetchable commit) to diff against — decide whether to sandbox network access as part of `evaluate.py`'s design, not after a real evaluation run reveals the gap.
+3. Turn "the agent's workspace genuinely has no version-control residue to diff the original source from" into one of `evaluate.py`'s own pre-flight assertions (e.g. assert no `.git` directory exists before releasing the workspace to the agent), not something only checked by hand.
+
 ## 📄 License (授權)
 MIT License. See LICENSE for more information.
