@@ -3643,6 +3643,30 @@ INJECTION_CATALOG = [
             },
         ],
     },
+    # --- Session 46 part 26: pivot to balancing kconfig/dts/c_syntax
+    # against runtime_crash's 68 (unaddressed since part 19) ---
+    # Reused already-baseline-verified compound-round target apps
+    # (rtc_api, dac_emul — both confirmed clean at the pinned commit
+    # earlier this session) to skip redundant baseline checks; each entry
+    # here is a genuinely new single-file mutation distinct from its
+    # compound sibling (a different file, or the same Kconfig file but
+    # standing alone rather than paired with a DTS mutation).
+    {
+        "id_suffix": "c_rtc_y2k_semicolon",
+        "category": "c_syntax",
+        "target_file": "tests/drivers/rtc/rtc_api/src/test_y2k.c",
+        "operator": "c_remove_semicolon",
+        "target_app": "tests/drivers/rtc/rtc_api",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "kconfig_dac_emul_depends",
+        "category": "kconfig",
+        "target_file": "drivers/dac/Kconfig.dac_emul",
+        "operator": "kconfig_invert_depends:DAC_EMUL",
+        "target_app": "tests/drivers/dac/dac_emul",
+        "board": "native_sim",
+    },
 ]
 
 
