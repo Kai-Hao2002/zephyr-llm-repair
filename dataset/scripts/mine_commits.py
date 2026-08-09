@@ -3559,6 +3559,51 @@ INJECTION_CATALOG = [
             },
         ],
     },
+    # --- Compound round 7 (session 46 part 25 continued): subtype 2's 5th
+    # target, a richer real-world topology than the earlier 4 ---
+    # `tests/subsys/usb/uac2/app.overlay` describes a full USB Audio Class
+    # 2.0 descriptor graph (clock source -> input/output terminals ->
+    # feature units, wired via `data-source`/`clock-source`/`assoc-terminal`
+    # phandles) for a simulated USB headset. `in_feature_unit`'s
+    # `data-source = <&mic_input>;` (the *2nd* `&mic_input` occurrence in
+    # the file — `#2` — the 1st is `headphones_output`'s unrelated
+    # `assoc-terminal`) feeds directly into the numeric `bSourceID` byte of
+    # that unit's generated USB descriptor
+    # (`tests/subsys/usb/uac2/src/uac2_desc.c`'s
+    # `reference_ac_mic_feature_unit_descriptor[]`, byte 5:
+    # `0x05, /* bSourceID = 5 (headset input) */`) — confirmed by reading
+    # the actual byte array before mutating, not assumed. Redirecting it to
+    # `&out_terminal` (a different, structurally valid terminal node on the
+    # *playback* side of the same topology) compiles/links/boots
+    # completely clean — the redirected phandle just becomes a different,
+    # equally legal unit-ID reference — and `ZTEST(uac2_desc,
+    # test_fs_hs_iface_and_ep_descriptors_not_shared)` still passes; only
+    # `test_fs_uac2_descriptors` (which walks the full descriptor via a
+    # sequence of `zassert_mem_equal` calls against per-block reference
+    # byte arrays) fails, catching the topology change through its
+    # generated descriptor bytes. `target_test` auto-extracted as
+    # `test_fs_uac2_descriptors`. A richer, more realistic "wrong instance"
+    # narrative than the earlier 4 (redirecting audio routing in a USB
+    # descriptor graph, not a synthetic pinctrl/PM test fixture) — worth
+    # remembering `zassert_mem_equal`-style byte-array-diffing test files
+    # are a promising, underused source of subtype-2 candidates, found by
+    # reading which literal byte in the reference array a phandle target's
+    # numeric ID feeds into before committing to a mutation. Confirmed the
+    # unmutated baseline builds and passes cleanly (4/4 tests) at the
+    # pinned `baseline_commit` first, per the part-24 standing practice.
+    # Verified via the real gate on the first attempt.
+    {
+        "id_suffix": "compound_uac2_mic_feature_unit_source_redirect",
+        "category": "compound",
+        "target_app": "tests/subsys/usb/uac2",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "tests/subsys/usb/uac2/app.overlay",
+                "operator": "dts_redirect_phandle:mic_input#2:out_terminal",
+            },
+        ],
+    },
 ]
 
 
