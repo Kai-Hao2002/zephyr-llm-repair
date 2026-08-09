@@ -3802,6 +3802,59 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/pinctrl/api",
         "board": "native_sim",
     },
+    # Session 46 part 30: round 6 of the kconfig/dts/c_syntax balancing
+    # pass. `dts` candidates in the remaining reuse pool (adc_emul,
+    # dac_emul, dma/loop_transfer, rtc_api) turned out to be thin — their
+    # own app-level overlays only tweak plain properties (no phandle/reg)
+    # on a node the `compound` sibling already fully covers via
+    # `dts_remove_compatible`, and that operator has no occurrence-index
+    # support to retarget a sibling node sharing the same compatible
+    # string (unlike `dts_redirect_phandle`'s `#N` suffix) — so this
+    # round pivoted entirely to `c_syntax`, closing out every remaining
+    # gap in the pool at once (espi, policy_api, adc_emul, power_domain,
+    # dac_emul all lacked a standalone c_syntax entry going into this
+    # round). All 5 reused already-baseline-verified target apps and
+    # passed the real gate on the first attempt.
+    {
+        "id_suffix": "c_espi_acpi_brace",
+        "category": "c_syntax",
+        "target_file": "tests/drivers/espi/src/test_acpi.c",
+        "operator": "c_remove_closing_brace",
+        "target_app": "tests/drivers/espi",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "c_policy_api_main_semicolon",
+        "category": "c_syntax",
+        "target_file": "tests/subsys/pm/policy_api/src/main.c",
+        "operator": "c_remove_semicolon",
+        "target_app": "tests/subsys/pm/policy_api",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "c_adc_emul_main_semicolon",
+        "category": "c_syntax",
+        "target_file": "tests/drivers/adc/adc_emul/src/main.c",
+        "operator": "c_remove_semicolon",
+        "target_app": "tests/drivers/adc/adc_emul",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "c_power_domain_main_typo_macro",
+        "category": "c_syntax",
+        "target_file": "tests/subsys/pm/power_domain/src/main.c",
+        "operator": "c_typo_macro",
+        "target_app": "tests/subsys/pm/power_domain",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "c_dac_emul_main_typo_macro",
+        "category": "c_syntax",
+        "target_file": "tests/drivers/dac/dac_emul/src/main.c",
+        "operator": "c_typo_macro",
+        "target_app": "tests/drivers/dac/dac_emul",
+        "board": "native_sim",
+    },
 ]
 
 
