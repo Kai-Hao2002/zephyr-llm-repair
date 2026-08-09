@@ -3604,6 +3604,45 @@ INJECTION_CATALOG = [
             },
         ],
     },
+    # --- Compound round 8 (session 46 part 25 continued): subtype 1's 5th
+    # target ---
+    # Same proven shape once more, on `drivers/dma/Kconfig.emul`'s
+    # `config DMA_EMUL` (2023, "[EXPERIMENTAL]"-tagged like `uart_emul` was
+    # — but that case's failure was a baseline/commit incompatibility, not
+    # the EXPERIMENTAL tag itself, confirmed by this round's own baseline
+    # check passing clean) + `boards/native/native_sim/native_sim.dts`'s
+    # `dma` node (`compatible = "zephyr,dma-emul"` — this file's 6th
+    # compound/dts touch, each on a different node so far:
+    # `dts_native_sim_phandle`, `dts_native_sim_compatible`, `adc_emul`,
+    # `espi_emul`, `rtc_emul`, now this). `tests/drivers/dma/loop_transfer`
+    # resolves the DMA controller via `DEVICE_DT_GET(DT_NODELABEL(dma_name))`
+    # inside an X-macro test-generator (`dma_name` bound to the node label
+    # `tst_dma0`, itself an alias for `&dma` declared right in the test's
+    # own overlay: `tst_dma0: &dma {};`). Confirmed the unmutated baseline
+    # builds and passes cleanly (2 pass, 1 skip — `suspend_resume` is
+    # skipped, unrelated to this mutation, native_sim's DMA emulator
+    # doesn't support suspend) at the pinned `baseline_commit` first, per
+    # the part-24 standing practice. Verified: mutate side never reaches a
+    # boot signature (`ninja: build stopped: subcommand failed`,
+    # `eof_no_boot`); revert side rebuilt and passed cleanly (same 2
+    # pass/1 skip as baseline). Both mutations spot-checked locally
+    # (non-Docker) before the real gate ran; passed on the first attempt.
+    {
+        "id_suffix": "compound_dma_emul_kconfig_dts",
+        "category": "compound",
+        "target_app": "tests/drivers/dma/loop_transfer",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "drivers/dma/Kconfig.emul",
+                "operator": "kconfig_invert_depends:DMA_EMUL",
+            },
+            {
+                "target_file": "boards/native/native_sim/native_sim.dts",
+                "operator": "dts_remove_compatible:zephyr,dma-emul",
+            },
+        ],
+    },
 ]
 
 
