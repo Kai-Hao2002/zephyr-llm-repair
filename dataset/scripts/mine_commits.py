@@ -3695,6 +3695,31 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/rtc/rtc_api",
         "board": "native_sim",
     },
+    # Round 3 of the balancing pass.
+    {
+        "id_suffix": "dts_espi_host_compatible",
+        "category": "dts",
+        "target_file": "tests/drivers/espi/boards/native_sim.overlay",
+        "operator": "dts_remove_compatible:zephyr,espi-emul-espi-host",
+        "target_app": "tests/drivers/espi",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "c_dma_loop_brace",
+        "category": "c_syntax",
+        "target_file": "tests/drivers/dma/loop_transfer/src/test_dma_loop.c",
+        "operator": "c_remove_closing_brace",
+        "target_app": "tests/drivers/dma/loop_transfer",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "kconfig_espi_emul_depends",
+        "category": "kconfig",
+        "target_file": "drivers/espi/Kconfig.espi_emul",
+        "operator": "kconfig_invert_depends:ESPI_EMUL",
+        "target_app": "tests/drivers/espi",
+        "board": "native_sim",
+    },
 ]
 
 
