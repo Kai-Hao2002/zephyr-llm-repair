@@ -3523,6 +3523,42 @@ INJECTION_CATALOG = [
             },
         ],
     },
+    # --- Compound round 6 (session 46 part 25): subtype 1's 4th target ---
+    # Same proven shape again, on `drivers/rtc/Kconfig.emul`'s `config
+    # RTC_EMUL` (2022, another established driver per this session's
+    # age-risk heuristic) + `boards/native/native_sim/native_sim.dts`'s
+    # `rtc` node (`compatible = "zephyr,rtc-emul"` — this file's 5th
+    # compound/dts touch, each on a different node:
+    # `dts_native_sim_phandle`, `dts_native_sim_compatible`, the part-20
+    # `adc_emul` case, the part-24 `espi_emul` case, now this). Unlike the
+    # ADC/DAC/ESPI cases (all `DEVICE_DT_GET(DT_NODELABEL(...))` or
+    # `DT_INST(...)`), this test resolves its device via `DT_ALIAS(rtc)` —
+    # `native_sim.dts`'s `aliases { rtc = &rtc; };` — the alias mechanism
+    # itself is untouched by either mutation, only the aliased node's own
+    # compatible and gating Kconfig are hit, same failure shape either way.
+    # Confirmed the unmutated baseline builds and passes cleanly (3/3
+    # tests) at the pinned `baseline_commit` before investing further, per
+    # the standing practice from part 24. Verified: mutate side never
+    # reaches a boot signature (`ninja: build stopped: subcommand failed`,
+    # `eof_no_boot`); revert side rebuilt and passed cleanly. Both
+    # mutations spot-checked locally (non-Docker) before the real gate ran;
+    # passed on the first attempt.
+    {
+        "id_suffix": "compound_rtc_emul_kconfig_dts",
+        "category": "compound",
+        "target_app": "tests/drivers/rtc/rtc_api",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "drivers/rtc/Kconfig.emul",
+                "operator": "kconfig_invert_depends:RTC_EMUL",
+            },
+            {
+                "target_file": "boards/native/native_sim/native_sim.dts",
+                "operator": "dts_remove_compatible:zephyr,rtc-emul",
+            },
+        ],
+    },
 ]
 
 
