@@ -3757,6 +3757,51 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/pm/power_states_api",
         "board": "native_sim",
     },
+    # Session 46 part 29: round 5 of the kconfig/dts/c_syntax balancing
+    # pass, continuing to reuse already-baseline-verified compound-round
+    # target apps (adc_emul, dma/loop_transfer, policy_api, pinctrl/api).
+    # ADC_EMUL/DMA_EMUL standalone depends-inversion mirror the proven
+    # dac_emul/rtc_emul/espi_emul shape exactly (same driver family,
+    # same DT_HAS_ZEPHYR_*_ENABLED gate). `dts_break_phandle` on
+    # policy_api targets `cpu1`'s `cpu-power-states = <&state2>;` — a
+    # different node/property than the compound sibling's
+    # `dts_redirect_phandle` on `zephyr,user`'s `test-states`, and a loud
+    # build-time failure (undefined node label) rather than the compound
+    # case's silent one. `c_typo_macro` on pinctrl/api/src/main.c hits
+    # the file's first `DT_NODELABEL(test_device0)` — same operator/shape
+    # as the img_util/uac2 typo-macro cases, on a fresh file.
+    {
+        "id_suffix": "kconfig_adc_emul_depends",
+        "category": "kconfig",
+        "target_file": "drivers/adc/Kconfig.adc_emul",
+        "operator": "kconfig_invert_depends:ADC_EMUL",
+        "target_app": "tests/drivers/adc/adc_emul",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "kconfig_dma_emul_depends",
+        "category": "kconfig",
+        "target_file": "drivers/dma/Kconfig.emul",
+        "operator": "kconfig_invert_depends:DMA_EMUL",
+        "target_app": "tests/drivers/dma/loop_transfer",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "dts_policy_api_cpu1_phandle",
+        "category": "dts",
+        "target_file": "tests/subsys/pm/policy_api/app.overlay",
+        "operator": "dts_break_phandle",
+        "target_app": "tests/subsys/pm/policy_api",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "c_pinctrl_main_typo_macro",
+        "category": "c_syntax",
+        "target_file": "tests/drivers/pinctrl/api/src/main.c",
+        "operator": "c_typo_macro",
+        "target_app": "tests/drivers/pinctrl/api",
+        "board": "native_sim",
+    },
 ]
 
 
