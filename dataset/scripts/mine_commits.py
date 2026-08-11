@@ -3643,6 +3643,45 @@ INJECTION_CATALOG = [
             },
         ],
     },
+    # Session 46 part 31: benchmark-validity audit follow-up (part 27,
+    # finding 3) — compound subtype 1 had been 100% `kconfig_invert_depends`
+    # + `dts_remove_compatible` across all 5 prior cases. This entry keeps
+    # `kconfig_invert_depends` (still the only reliable hard-abort kconfig
+    # mechanism found so far — `kconfig_remove_select` was tried and
+    # self-heals, see part 28's comment above) but swaps the DTS side to
+    # `dts_corrupt_reg` instead, on a brand-new target app/driver
+    # (`I2C_EMUL`, never used by any prior case). Found by noticing
+    # `boards/native/native_sim/native_sim.dts`'s `i2c0`/`spi0`/`espi0`
+    # controller nodes are the only native_sim peripherals with a real
+    # 2-cell `reg` (most others, like the `_emul` leaf drivers, have no
+    # `reg` at all) — and that `tests/drivers/i2c/i2c_emul`'s own
+    # `boards/native_sim.overlay` defines two *local* controller nodes
+    # (`i2c1`/`i2c2`) with their own `reg`, avoiding any risk to the
+    # shared board file. Baseline-verified fresh (9/9 tests pass) before
+    # investing further, per the part-24 standing practice, since this is
+    # a target app no prior case had touched. `dts_corrupt_reg` drops
+    # `i2c1`'s `reg = <0x400 4>;` to a single cell, caught by devicetree
+    # binding validation at CMake-configure time (same failure point as
+    # the `dts_corrupt_reg` cases already used standalone in `dts`) —
+    # genuinely different from every existing subtype-1 case's
+    # `dts_remove_compatible`-triggered failure shape. Passed the real
+    # gate on the first attempt.
+    {
+        "id_suffix": "compound_i2c_emul_kconfig_dts",
+        "category": "compound",
+        "target_app": "tests/drivers/i2c/i2c_emul",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "drivers/i2c/Kconfig.i2c_emul",
+                "operator": "kconfig_invert_depends:I2C_EMUL",
+            },
+            {
+                "target_file": "tests/drivers/i2c/i2c_emul/boards/native_sim.overlay",
+                "operator": "dts_corrupt_reg",
+            },
+        ],
+    },
     # --- Session 46 part 26: pivot to balancing kconfig/dts/c_syntax
     # against runtime_crash's 68 (unaddressed since part 19) ---
     # Reused already-baseline-verified compound-round target apps
