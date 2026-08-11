@@ -61,6 +61,36 @@ BOARD_PATH_RE = re.compile(r"boards/[^/]+/([^/]+)/")
 # This is a starting catalog, not a guarantee — entries that fail the
 # verify_cases.py two-sided gate are discarded automatically, same as mined
 # candidates.
+
+# Session 46 part 32: 第二個 pinned baseline commit，用來緩解 part 27 稽核
+# 發現的「全部案例共用同一個 baseline commit」多樣性風險——通用 LLM 可能
+# 對單一特定快照有先驗記憶。2026-05-14，比原本共用的
+# bc460feabe7038dc876782557e39be791d6c24e9 (2026-07-24) 早約 71 天，在目前
+# zephyr-sandbox image 的 Zephyr SDK 1.0.1 上已驗證 west update + hello_world
+# baseline build 乾淨、boot 正常。個別 catalog entry 若想刻意使用這個
+# commit 而非預設共用的 main tip，在該 entry 加上
+# `"baseline_commit": SECOND_BASELINE_COMMIT` 即可 (見
+# generate_injection_candidates() 的 entry.get("baseline_commit", ...) 覆蓋
+# 邏輯)。目前只有 inject_kconfig_fcb_depends_baseline2 這一筆證明機制可行，
+# 未來若要真的緩解 110/110 集中在單一 commit 的統計，需要之後的 session 用
+# 這個 commit 落地更多內容 (而不是全部案例都留在原本的 commit)。
+#
+# Session 46 part 32: a second pinned baseline commit, to mitigate part 27's
+# audit finding that every case shared one baseline commit — a general-
+# purpose LLM could have prior training exposure to that one specific
+# snapshot. 2026-05-14, ~71 days before the originally-shared
+# bc460feabe7038dc876782557e39be791d6c24e9 (2026-07-24), verified clean
+# (west update + hello_world baseline build + boot) on the current
+# zephyr-sandbox image's Zephyr SDK 1.0.1. An individual catalog entry that
+# wants this commit instead of the default shared main tip adds
+# `"baseline_commit": SECOND_BASELINE_COMMIT` (see the
+# entry.get("baseline_commit", ...) override in
+# generate_injection_candidates()). Only inject_kconfig_fcb_depends_baseline2
+# proves the mechanism so far — actually moving the needle on the 110/110
+# single-commit concentration needs future sessions to keep landing new
+# content against this commit rather than defaulting back to the original.
+SECOND_BASELINE_COMMIT = "4b02c5d60ae620fb23cbea58516e3ea7388c2f75"
+
 INJECTION_CATALOG = [
     # --- Kconfig Dependency and Configuration Conflicts ---
     # 兩次都失敗的教訓：console 相關的 Kconfig 符號 (lib/libc/Kconfig 的
@@ -3894,6 +3924,26 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/dac/dac_emul",
         "board": "native_sim",
     },
+    # Session 46 part 32: benchmark-validity audit follow-up (part 27,
+    # finding 4) — every case so far has shared one baseline commit. This
+    # entry proves the SECOND_BASELINE_COMMIT override mechanism works
+    # end-to-end: identical mutation/target/operator as the long-proven
+    # "kconfig_fcb_depends" entry above, deliberately pinned to a different,
+    # independently-verified-clean commit instead, so the only variable
+    # under test is "does a second commit work" — not a new mutation shape.
+    # Passed the real gate on the first attempt; initial_error_log matches
+    # the original bc460feabe-pinned case almost verbatim, confirming the
+    # FCB Kconfig block is unchanged between the two commits (~71 days
+    # apart).
+    {
+        "id_suffix": "kconfig_fcb_depends_baseline2",
+        "category": "kconfig",
+        "target_file": "subsys/fs/fcb/Kconfig",
+        "operator": "kconfig_invert_depends:FCB",
+        "target_app": "tests/subsys/fs/fcb",
+        "board": "native_sim",
+        "baseline_commit": SECOND_BASELINE_COMMIT,
+    },
 ]
 
 
@@ -4124,18 +4174,38 @@ class ZephyrBugMiner:
         """
         根據預先註冊的 mutation catalog (INJECTION_CATALOG)，產生合成錯誤
         注入候選案例。不需要呼叫 GitHub PR 搜尋 API，只需要解析一次
-        baseline commit (main 分支目前的 tip)，所有案例共用同一個 commit，
+        baseline commit (main 分支目前的 tip)，預設所有案例共用這個 commit，
         徹底避開挖礦時遇到的 SDK/Python 版本漂移問題。
+
+        個別 catalog entry 可以帶一個 "baseline_commit" 欄位覆蓋這個預設值
+        ——這是 part 27 稽核發現「全部案例共用同一個 baseline commit」
+        多樣性風險 (part 31 續，見 SECOND_BASELINE_COMMIT) 的支援機制：
+        FaultInjector.inject_and_verify()/_run() 本來就是逐案例接收
+        baseline_commit 參數 (verify_cases.py 直接讀 case["broken_commit"])，
+        從來就沒有「整批共用同一個 commit」的架構限制，這裡只是把
+        catalog 產生階段原本寫死的部分打開一個 per-entry override。
+        沒有覆蓋的 entry 行為完全不變 (仍然是解析出來的 main tip)。
 
         每筆候選都還沒經過驗證——實際能不能用，交給
         verify_cases.py 的雙向驗證閘 (FaultInjector) 判斷。
 
         Generates synthetic fault-injection candidates from the pre-registered
         mutation catalog. Doesn't need the PR search API — just resolves the
-        baseline commit once (the current tip of main), shared by every
-        candidate, entirely avoiding the SDK/Python version drift problem
-        seen during mining. Each candidate is unverified until it passes
-        verify_cases.py's two-sided gate (FaultInjector).
+        baseline commit once (the current tip of main); every candidate uses
+        it by default, entirely avoiding the SDK/Python version drift problem
+        seen during mining.
+
+        An individual catalog entry may carry a "baseline_commit" field to
+        override this default — the support mechanism for part 27's audit
+        finding that all cases shared one baseline commit (continued in part
+        31/32, see SECOND_BASELINE_COMMIT below): FaultInjector's
+        inject_and_verify()/_run() already take baseline_commit per-case
+        (verify_cases.py reads case["broken_commit"] directly) — there was
+        never an architectural constraint forcing one shared commit across a
+        whole batch, just this generation step hardcoding it. Entries without
+        an override behave exactly as before (the resolved main tip). Each
+        candidate is unverified until it passes verify_cases.py's two-sided
+        gate (FaultInjector).
         """
         if catalog is None:
             catalog = INJECTION_CATALOG
@@ -4146,11 +4216,12 @@ class ZephyrBugMiner:
         cases = []
         for entry in catalog:
             case_id = f"inject_{entry['id_suffix']}"
+            entry_commit = entry.get("baseline_commit", baseline_commit)
             case = {
                 "id": case_id,
                 "category": entry["category"],
-                "broken_commit": baseline_commit,
-                "fixed_commit": baseline_commit,
+                "broken_commit": entry_commit,
+                "fixed_commit": entry_commit,
                 "target_app": entry["target_app"],
                 "board": entry["board"],
             }
