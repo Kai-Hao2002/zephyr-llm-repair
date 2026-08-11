@@ -73,8 +73,22 @@ def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     if os.path.exists(workspace_path):
         for root, dirs, files in os.walk(workspace_path):
             for file in files:
-                # 僅讀取 C 原始碼與設定檔
-                if file.endswith(".c") or file.endswith(".conf") or file.endswith("CMakeLists.txt"):
+                # 讀取 C 原始碼、設定檔，以及 Kconfig/DTS 檔案——後者原本被
+                # 漏掉，導致這個 pipeline 結構性地看不到、修不了
+                # kconfig/dts/compound 類別的資料集案例 (無論底層 LLM 能力
+                # 如何)，見 part 27 稽核 finding 5。Kconfig 檔案本身通常沒有
+                # 副檔名 (檔名就是 "Kconfig" 或 "Kconfig.<driver>")，DTS 則用
+                # .dts/.dtsi/.overlay。
+                # Also read Kconfig/DTS files — previously missing, which
+                # made this pipeline structurally blind to (and incapable of
+                # fixing) kconfig/dts/compound-category dataset cases
+                # regardless of the underlying LLM's ability; see part 27
+                # audit finding 5. Kconfig files themselves usually have no
+                # extension (named "Kconfig" or "Kconfig.<driver>"); DTS uses
+                # .dts/.dtsi/.overlay.
+                if (file.endswith(".c") or file.endswith(".conf") or file.endswith("CMakeLists.txt")
+                        or file == "Kconfig" or file.startswith("Kconfig.")
+                        or file.endswith((".dts", ".dtsi", ".overlay"))):
                     filepath = os.path.join(root, file)
                     rel_path = os.path.relpath(filepath, workspace_path)
                     try:
