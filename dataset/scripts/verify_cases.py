@@ -273,8 +273,32 @@ class ZephyrCaseVerifier:
             f"'"
         )
 
-        # 呼叫我們先前寫好的 Test Oracle 來監控輸出
-        return self.oracle.evaluate(docker_cmd, container_name=container_name)
+        # 呼叫我們先前寫好的 Test Oracle 來監控輸出。挖礦案例事先不知道
+        # PR 修的 bug 究竟會在 build 階段還是「開機成功、測試執行期間」
+        # 才現形——跟 fault_injector.py 對 runtime_crash/compound 類別
+        # 的處理理由完全一樣 (那邊已經修過，見 tools/fault_injector.py
+        # 的 wait_for_completion 說明)，這裡卻一直沒有同步帶上
+        # wait_for_completion=True，導致 oracle 一看到開機橫幅就停止
+        # 監控，任何「boot 成功但測試執行期間才失敗」的真實 bug 都會被
+        # 誤判成 'success' 而遭捨棄——2026-08-12 手動重現 bug_111542
+        # (llext) 才發現：build 168/168 全過，但實際執行時 10/12 個
+        # ztest 測試真的失敗 (PROJECT EXECUTION FAILED)，自動化流程卻因
+        # 這個缺陷加上一次暫時性 west update 網路故障，誤判成建置失敗。
+        # Also call our existing Test Oracle to monitor the output. Mined
+        # cases don't know in advance whether the PR's bug will manifest
+        # at the build stage or only after a successful boot, during test
+        # execution — exactly the same reasoning fault_injector.py already
+        # applies to the runtime_crash/compound categories (see its own
+        # wait_for_completion docstring) — but this path never picked up
+        # wait_for_completion=True, so the oracle stopped monitoring the
+        # instant it saw the boot banner, silently discarding any real bug
+        # that only fails during test execution. Discovered 2026-08-12
+        # while manually reproducing bug_111542 (llext): the build passes
+        # cleanly (168/168) but 10/12 ztest tests genuinely fail at
+        # runtime (PROJECT EXECUTION FAILED) — the automated run instead
+        # misreported a build failure, compounded by an unrelated
+        # transient west-update network flake that session.
+        return self.oracle.evaluate(docker_cmd, container_name=container_name, wait_for_completion=True)
 
     def _save_verified_cases(self, cases: list):
         with open(self.output_path, "w", encoding="utf-8") as f:
