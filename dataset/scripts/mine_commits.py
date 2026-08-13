@@ -3961,6 +3961,7 @@ class ZephyrBugMiner:
             logger.warning("未偵測到 GITHUB_TOKEN，API 請求將受到嚴格的速率限制 (60次/小時)。")
         # 快取 GitHub contents API 查詢結果，避免對同一路徑重複發送請求
         self._path_exists_cache = {}
+        self._dir_listing_cache = {}
 
     def search_merged_bug_prs(self, max_results: int = 150, merged_after: str = "2026-03-20") -> list:
         """
@@ -4146,13 +4147,74 @@ class ZephyrBugMiner:
         self._path_exists_cache[path] = exists
         return exists
 
+    def _list_subdirs(self, path: str) -> list:
+        """
+        列出某個目錄底下的直接子目錄名稱 (用 GitHub contents API)，找不到
+        該目錄則回傳空 list。結果會快取，避免同一個目錄被重複查詢。
+        Lists the immediate subdirectory names under a path (via the GitHub
+        contents API); returns an empty list if the path doesn't exist.
+        Cached so the same directory is never queried twice.
+        """
+        if path in self._dir_listing_cache:
+            return self._dir_listing_cache[path]
+        url = f"https://api.github.com/repos/{self.repo}/contents/{path}"
+        resp = requests.get(url, headers=self.headers)
+        subdirs = []
+        if resp.status_code == 200:
+            try:
+                subdirs = [item["name"] for item in resp.json() if item.get("type") == "dir"]
+            except (ValueError, TypeError):
+                subdirs = []
+        self._dir_listing_cache[path] = subdirs
+        return subdirs
+
     def _guess_target_app(self, modified_files: list) -> str:
         """
         嘗試在 tests/ 底下尋找與修改檔案路徑對應、且真的可建置 (含 CMakeLists.txt) 的測試應用程式，
         找不到則退回 samples/hello_world (無法重現的案例會在 verify_cases.py 階段被自動捨棄)。
+
+        Session 46 part 34 稽核發現：原本只做「逐層往上鏡射修改檔案路徑」
+        這一種嘗試 (例如 subsys/fs/fcb/fcb.c -> tests/subsys/fs/fcb)，對
+        subsys/ 底下這種測試路徑剛好跟原始碼路徑同構的情況命中率不錯，
+        但對 drivers/ 底下的情況幾乎必猜錯——真實 Zephyr 測試樹通常不會
+        直接叫 tests/drivers/<vendor>/<driver_file>，而是叫一個描述性的
+        名字放在同一個子系統目錄下 (例如 drivers/entropy/mcux_trng.c 的
+        測試其實叫 tests/drivers/entropy/api，不叫
+        tests/drivers/entropy/mcux_trng)。純鏡射永遠猜不到這種情況，只能
+        退回 samples/hello_world——而 hello_world 根本不會編譯到那個有
+        bug 的驅動程式碼，幾乎注定在 verify_cases.py 階段被丟棄。
+        對 32 筆試跑候選做過實測：87.5% 落到這個 fallback。
+
+        新增第二階段嘗試：鏡射路徑本身不可建置時，改列出該路徑「一層」的
+        子目錄，逐一檢查哪個是可建置的 app——用子系統層級的關聯 (同一個
+        tests/drivers/<subsystem>/ 底下) 取代精確檔名匹配，犧牲一點精準度
+        換取更高的召回率；猜錯的候選反正會在 verify_cases.py 的驗證閘被
+        自動篩掉，不會污染最終資料集。
+
         Tries to find a tests/ directory mirroring the modified file's path that is
         actually buildable (has a CMakeLists.txt), falling back to samples/hello_world
         (unreproducible cases are discarded automatically during verify_cases.py).
+
+        Session 46 part 34 audit finding: the original approach only tried
+        mirroring the modified file's path one directory at a time (e.g.
+        subsys/fs/fcb/fcb.c -> tests/subsys/fs/fcb) — decent recall for
+        subsys/ paths where the test tree happens to mirror the source tree,
+        but nearly always wrong for drivers/ paths, where real Zephyr tests
+        live at a descriptively-named path under the same subsystem
+        directory rather than mirroring the driver's own filename (e.g.
+        drivers/entropy/mcux_trng.c's test is actually
+        tests/drivers/entropy/api, not tests/drivers/entropy/mcux_trng).
+        Pure mirroring can never find that, falling back to
+        samples/hello_world instead — which doesn't even compile the buggy
+        driver code, so it's near-certain to get discarded at
+        verify_cases.py. Empirically measured on a 32-candidate trial:
+        87.5% landed on this fallback.
+
+        Added a second-pass fallback: when the mirrored path itself isn't
+        buildable, list its immediate subdirectories and check each for
+        buildability — trading exact-filename precision for subsystem-level
+        recall; wrong guesses get filtered out by verify_cases.py's real
+        gate anyway, so they don't pollute the final dataset.
         """
         for f in modified_files:
             parts = f.split("/")
@@ -4161,6 +4223,32 @@ class ZephyrBugMiner:
                 candidate = "tests/" + "/".join(parts[:depth])
                 if self._is_buildable_app(candidate):
                     return candidate
+
+            # 第二階段：鏡射路徑本身不可建置，改列出其子目錄逐一檢查。
+            # depth 下限訂在 2 (至少要保留「子系統」這一層，例如
+            # tests/drivers/serial)，絕對不能退到 depth=1 這種
+            # tests/drivers、tests/subsys 之類的頂層容器目錄——那底下有
+            # 上百個完全不相關的子系統，關聯性弱到跟隨機猜沒兩樣 (實測
+            # 曾經把 drivers/serial/uart_pl011.c、drivers/cache/*、
+            # drivers/video/* 全部誤猜成同一個 tests/drivers/bbram，因為
+            # 那只是「哪個子目錄先被列出來」的巧合，不是真正相關)。
+            # Second pass: the mirrored path itself isn't buildable, so list
+            # its subdirectories and check each one. depth floor is 2 (must
+            # keep at least the "subsystem" level, e.g. tests/drivers/serial)
+            # — never fall back to depth=1's top-level container directories
+            # like tests/drivers or tests/subsys, which hold hundreds of
+            # unrelated subsystems and would make the match essentially
+            # random (empirically: drivers/serial/uart_pl011.c,
+            # drivers/cache/*, and drivers/video/* all got misassigned to
+            # the same tests/drivers/bbram purely because it happened to be
+            # whichever subdirectory the listing returned first, not because
+            # of any real relevance).
+            for depth in range(len(parts) - 1, 1, -1):
+                parent = "tests/" + "/".join(parts[:depth])
+                for subdir in self._list_subdirs(parent):
+                    candidate = f"{parent}/{subdir}"
+                    if self._is_buildable_app(candidate):
+                        return candidate
         return "samples/hello_world"
 
     def _resolve_main_commit(self) -> str:
