@@ -311,6 +311,45 @@ class QemuOracle:
         ]
         self.west_update_error_regex = [re.compile(p, re.IGNORECASE) for p in self.west_update_error_patterns]
 
+        # mine_commits.py 的 target_app 猜測 (`_is_buildable_app`/
+        # `_list_subdirs`) 先前查詢 GitHub contents API 時沒有帶 `ref`，
+        # 驗證的是「現在 main 分支」上的路徑是否存在，但 verify_cases.py
+        # 實際 checkout 的是 broken_commit 這個歷史 commit——路徑今天存
+        # 在不代表當時就存在 (測試可能是之後才新增/改名的)。已在
+        # mine_commits.py 修正查詢時一律帶 ref=broken_commit，但這裡多加
+        # 一層防護：舊資料 (已產生、尚未套用新 ref 修正的候選 JSON) 或任何
+        # 其他原因造成 target_app 路徑對不上該 commit 時，容器內的 `cd`
+        # 會直接印出 "No such file or directory" 然後整條 `&&` 指令鏈中
+        # 斷、行程結束，之前會被誤判為 "eof_no_boot"（ACCEPTED_FAILURE_
+        # STATUSES 之一）。這跟 west_update_error 是同一種「基礎設施/
+        # 猜測錯誤，與目標 commit 是否真的有 bug 無關」的假陽性，2026-08-
+        # 14 的 part 36 挖礦驗證批次就這樣誤收了 2 筆 (bug_106923、
+        # bug_106329)，必須明確排除。同樣不受 in_build_phase 限制 (這發生
+        # 在 west build 開始之前)。
+        #
+        # mine_commits.py's target_app guessing (`_is_buildable_app`/
+        # `_list_subdirs`) previously queried the GitHub contents API
+        # without a `ref`, validating whether a path exists on *current
+        # main* — but verify_cases.py actually checks out broken_commit, a
+        # historical commit. A path existing today doesn't mean it existed
+        # back then (the test may have been added/renamed since). Now fixed
+        # in mine_commits.py to always query with ref=broken_commit, but
+        # this is an extra layer of defense: stale candidate JSON generated
+        # before that fix, or any other reason target_app doesn't match the
+        # checked-out commit, makes the container's `cd` print "No such
+        # file or directory" and break the `&&` command chain, exiting the
+        # process — previously misclassified as "eof_no_boot" (one of
+        # ACCEPTED_FAILURE_STATUSES). Same false-positive class as
+        # west_update_error above (an infra/guessing failure unrelated to
+        # whether the target commit genuinely has a bug) — the 2026-08-14
+        # part 36 mining verification batch accepted exactly 2 cases this
+        # way (bug_106923, bug_106329) before this was caught. Also not
+        # gated by in_build_phase (happens before west build starts).
+        self.target_path_missing_patterns = [
+            r"No such file or directory",
+        ]
+        self.target_path_missing_regex = [re.compile(p) for p in self.target_path_missing_patterns]
+
         # west/git 在抓取模組時 (git fetch/checkout/west update) 印出的歷史 commit
         # 訊息，內容完全不受我們控制，字面上可能剛好包含 "Bus Fault"、"Hello World"
         # 等字樣 (例如某個歷史 commit 的 subject 是 "Fix Bus Fault during raw TX")。
@@ -448,6 +487,40 @@ class QemuOracle:
                             if self.build_start_marker.search(line):
                                 in_build_phase = True
                             else:
+                                # 0.5 只在還沒進入 build phase 時才比對「目錄
+                                # 不存在」——build phase 開始後，GCC 缺 header
+                                # 時也會印出字面上一樣的 "No such file or
+                                # directory" (例如
+                                # "fatal error: foo.h: No such file or
+                                # directory")，那是真正的編譯錯誤 (甚至可能
+                                # 正是被注入/挖到的 bug 本身)，絕不能被這個
+                                # pattern 攔截丟棄。只有在 build phase *之前*
+                                # (west build 的 `cd` 到 target_app 目錄那一
+                                # 步) 看到這句話，才確定是 target_app 路徑
+                                # 猜錯，與目標 commit 是否有 bug 無關。
+                                # Only match "path doesn't exist" before the
+                                # build phase starts — once building begins,
+                                # GCC prints the literal same "No such file
+                                # or directory" text for a missing header
+                                # (e.g. "fatal error: foo.h: No such file or
+                                # directory"), which is a genuine compile
+                                # error (possibly the injected/mined bug
+                                # itself) and must never be caught by this
+                                # pattern. Seeing this line *before* the
+                                # build phase (during the `cd` into
+                                # target_app) is what confirms it's a wrong
+                                # target_app guess, unrelated to whether the
+                                # target commit has a bug.
+                                for pattern in self.target_path_missing_regex:
+                                    if pattern.search(line):
+                                        self.logger.error(f"偵測到 target_app 路徑在這個 commit 上不存在，與目標 commit 是否有 bug 無關 (target_app path doesn't exist at this commit, unrelated to whether the target commit has a bug): {pattern.pattern}")
+                                        result["status"] = "target_path_missing"
+                                        result["error_signature"] = pattern.pattern
+                                        break
+
+                                if result["status"] == "target_path_missing":
+                                    break
+
                                 # 還在 git fetch/west update 階段，跳過特徵比對，
                                 # 避免被歷史 commit 訊息誤觸發。
                                 # Still in the git fetch/west update phase — skip

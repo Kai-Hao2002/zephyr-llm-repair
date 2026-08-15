@@ -237,6 +237,8 @@ class ZephyrCaseVerifier:
                 logger.warning(f"   ⚠️ {tag} Docker daemon 本身斷線/崩潰，與目標 commit 無關，捨棄此案例 (建議稍後重跑)。")
             elif result["status"] == "west_update_error":
                 logger.warning(f"   ⚠️ {tag} west update 抓取模組時網路故障，與目標 commit 無關，捨棄此案例 (建議稍後重跑)。")
+            elif result["status"] == "target_path_missing":
+                logger.warning(f"   ⚠️ {tag} target_app 路徑 '{target_app}' 在這個 commit 上不存在 (猜測錯誤)，與目標 commit 是否有 bug 無關，捨棄此案例。")
             else:
                 logger.warning(f"   ⚠️ {tag} 狀態為 '{result['status']}' (非明確崩潰/建置失敗特徵，可能只是逾時或環境問題)，捨棄以避免雜訊污染資料集。")
             return None

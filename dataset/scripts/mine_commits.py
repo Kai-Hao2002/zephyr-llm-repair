@@ -4062,7 +4062,7 @@ class ZephyrBugMiner:
 
             category = self._guess_category(modified_files, item.get("title", ""), item.get("body", "") or "")
             board = self._guess_board(modified_files)
-            target_app = self._guess_target_app(modified_files)
+            target_app = self._guess_target_app(modified_files, ref=broken_commit)
 
             logger.info(f"   🎯 找到相關檔案！分類: {category} | 開發板: {board} | 目標 App: {target_app}")
             valid_cases.append({
@@ -4131,44 +4131,84 @@ class ZephyrBugMiner:
                 return board
         return "native_sim"
 
-    def _is_buildable_app(self, path: str) -> bool:
+    def _is_buildable_app(self, path: str, ref: str = None) -> bool:
         """
         檢查該路徑是否為「可直接建置」的 Zephyr 應用程式根目錄，
         判斷依據是該路徑底下是否存在 CMakeLists.txt (單純的父目錄不算)。
+
+        Part 36 稽核發現的系統性 bug：這個查詢先前完全沒有帶 `ref` 參數，
+        GitHub contents API 沒帶 ref 預設查「現在的 main 分支 HEAD」，跟
+        verify_cases.py 實際會 checkout 的 `broken_commit` (通常是幾個月
+        前的歷史 commit) 完全是兩回事——一個路徑「今天存在、可建置」，
+        不代表它在那個歷史 commit 當下也存在 (該測試可能是之後才新增/
+        改名的)。實測命中兩個真實案例：guesser 猜出的 target_app 在
+        main 上真的可建置，但 checkout 到 broken_commit 後 `cd` 進去直接
+        `No such file or directory`，指令鏈中斷，QemuOracle 收到 EOF、
+        誤判成 "eof_no_boot"（一個 ACCEPTED_FAILURE_STATUSES 之一），
+        污染資料集成假陽性。修法：一律以呼叫端傳入的 `ref` (通常是
+        broken_commit) 查詢，而不是查預設分支，才是驗證階段真正會用到
+        的那個快照。
+
         Checks whether a path is a directly-buildable Zephyr app root by
         checking for a CMakeLists.txt at that exact path (a plain parent
         directory without one is not buildable via `west build <dir>`).
+
+        Part 36 audit finding, a systemic bug: this query previously never
+        passed a `ref` — the GitHub contents API without `ref` defaults to
+        the *current* main branch HEAD, which is an entirely different
+        snapshot than the `broken_commit` (usually a historical commit
+        months old) that verify_cases.py will actually check out. A path
+        being buildable *today* says nothing about whether it existed at
+        that historical commit (the test may have been added/renamed
+        since). Empirically hit on 2 real candidates: the guessed
+        target_app was genuinely buildable on main, but checking out
+        broken_commit and `cd`-ing into it failed with "No such file or
+        directory", breaking the command chain — QemuOracle saw an EOF and
+        misclassified it as "eof_no_boot" (one of
+        ACCEPTED_FAILURE_STATUSES), polluting the dataset with a false
+        positive. Fix: always query against the caller-supplied `ref`
+        (normally broken_commit) instead of the default branch, so this
+        matches the exact snapshot verification will actually use.
         """
-        if path in self._path_exists_cache:
-            return self._path_exists_cache[path]
+        cache_key = (path, ref)
+        if cache_key in self._path_exists_cache:
+            return self._path_exists_cache[cache_key]
         url = f"https://api.github.com/repos/{self.repo}/contents/{path}/CMakeLists.txt"
-        resp = requests.get(url, headers=self.headers)
+        params = {"ref": ref} if ref else None
+        resp = requests.get(url, headers=self.headers, params=params)
         exists = resp.status_code == 200
-        self._path_exists_cache[path] = exists
+        self._path_exists_cache[cache_key] = exists
         return exists
 
-    def _list_subdirs(self, path: str) -> list:
+    def _list_subdirs(self, path: str, ref: str = None) -> list:
         """
         列出某個目錄底下的直接子目錄名稱 (用 GitHub contents API)，找不到
         該目錄則回傳空 list。結果會快取，避免同一個目錄被重複查詢。
+        同上一個函式的理由，一律帶 `ref` 查詢對應的歷史 commit，而不是
+        預設分支的現在時間點。
+
         Lists the immediate subdirectory names under a path (via the GitHub
         contents API); returns an empty list if the path doesn't exist.
-        Cached so the same directory is never queried twice.
+        Cached so the same directory is never queried twice. Same reasoning
+        as the function above — always query with `ref` pinned to the
+        historical commit, not the default branch's current tip.
         """
-        if path in self._dir_listing_cache:
-            return self._dir_listing_cache[path]
+        cache_key = (path, ref)
+        if cache_key in self._dir_listing_cache:
+            return self._dir_listing_cache[cache_key]
         url = f"https://api.github.com/repos/{self.repo}/contents/{path}"
-        resp = requests.get(url, headers=self.headers)
+        params = {"ref": ref} if ref else None
+        resp = requests.get(url, headers=self.headers, params=params)
         subdirs = []
         if resp.status_code == 200:
             try:
                 subdirs = [item["name"] for item in resp.json() if item.get("type") == "dir"]
             except (ValueError, TypeError):
                 subdirs = []
-        self._dir_listing_cache[path] = subdirs
+        self._dir_listing_cache[cache_key] = subdirs
         return subdirs
 
-    def _guess_target_app(self, modified_files: list) -> str:
+    def _guess_target_app(self, modified_files: list, ref: str = None) -> str:
         """
         嘗試在 tests/ 底下尋找與修改檔案路徑對應、且真的可建置 (含 CMakeLists.txt) 的測試應用程式，
         找不到則退回 samples/hello_world (無法重現的案例會在 verify_cases.py 階段被自動捨棄)。
@@ -4221,7 +4261,7 @@ class ZephyrBugMiner:
             # 由最深的目錄逐層往上嘗試 (例如 subsys/fs/fcb/fcb.c -> tests/subsys/fs/fcb -> tests/subsys/fs)
             for depth in range(len(parts) - 1, 0, -1):
                 candidate = "tests/" + "/".join(parts[:depth])
-                if self._is_buildable_app(candidate):
+                if self._is_buildable_app(candidate, ref=ref):
                     return candidate
 
             # 第二階段：鏡射路徑本身不可建置，改列出其子目錄逐一檢查。
@@ -4245,9 +4285,9 @@ class ZephyrBugMiner:
             # of any real relevance).
             for depth in range(len(parts) - 1, 1, -1):
                 parent = "tests/" + "/".join(parts[:depth])
-                for subdir in self._list_subdirs(parent):
+                for subdir in self._list_subdirs(parent, ref=ref):
                     candidate = f"{parent}/{subdir}"
-                    if self._is_buildable_app(candidate):
+                    if self._is_buildable_app(candidate, ref=ref):
                         return candidate
         return "samples/hello_world"
 
