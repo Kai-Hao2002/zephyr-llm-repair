@@ -397,6 +397,188 @@ def _runtime_remove_null_check(content: str, hint: Optional[str] = None) -> Opti
     return None
 
 
+def _runtime_double_free(content: str, hint: Optional[str] = None) -> Optional[str]:
+    """把指定測試案例函式本體內某個資源釋放呼叫 (`k_free(x);`/`free(x);` 這類)
+    原地重複一次，製造真正的 double free——第二次呼叫傳入一個已經被釋放
+    過的指標，跟現有 4 個 runtime_crash operator 完全不同的錯誤機制 (記憶體
+    配置器內部狀態損毀，而不是排程/邊界/API 語意/NULL 檢查)。
+
+    hint 格式為 "<test_name>[#N]:<free_call>"：先用 `_find_ztest_block` 鎖定
+    `ZTEST(suite, test_name)` (或退回一般 C 函式定義) 的函式本體，只在該
+    函式內找 free_call 的第 N 次出現 (預設第一次)，在那次呼叫「之後」原封
+    不動地把同一段文字再插入一次。free_call 必須是完整的一行呼叫 (含結尾
+    分號)，例如 "k_free(buf);"。
+
+    選擇候選目標時的關鍵判斷 (實測前務必先確認，避免重蹈
+    dts_reg_offbyone/mspi_flash/ina237 那種「自我一致性死路」)：
+    - 優先選擇明確走 host libc `malloc`/`free` (而非 Zephyr 自己的
+      `k_malloc`/`k_free` heap) 的程式碼路徑——native_sim 上程式是真的跑
+      在 host Linux 上，glibc 的配置器對 double free 有內建、決定性的偵測
+      (預設會印 "free(): double free detected ..." 然後 abort())，直接
+      命中 QemuOracle 既有的 "Aborted" crash pattern。Zephyr 自己的
+      `sys_heap` (`k_malloc`/`k_free` 背後的實作) 沒有保證等同的偵測機制，
+      重複釋放可能只是悄悄損毀 free-list，要到「之後某次不相關的配置」才
+      裂開，時機不確定、不適合當作黃金案例。
+    - 確認插入第二次呼叫之後，該指標在函式剩餘範圍內不會被合法地
+      重新配置/覆寫 (例如 `ptr = k_malloc(...)` 又指回別的位置)，否則第二次
+      free 可能其實是在釋放一個全新的、合法的配置，不會產生錯誤。
+
+    Duplicates a specific resource-release call (`k_free(x);`/`free(x);`-
+    shaped) in place, inside a named test case's function body, creating a
+    genuine double free — the second call frees a pointer that was already
+    freed. This is a structurally different failure mechanism from all 4
+    existing runtime_crash operators (allocator internal-state corruption,
+    not scheduling/boundary/API-semantics/NULL-check).
+
+    hint format is "<test_name>[#N]:<free_call>": pins to the
+    `ZTEST(suite, test_name)` function body (or a plain C function
+    definition) via `_find_ztest_block`, finds the Nth occurrence (default
+    1st) of free_call within that scope, and re-inserts the exact same
+    text immediately after it. free_call must be the complete call
+    including its trailing semicolon, e.g. "k_free(buf);".
+
+    Key judgment calls when picking a real candidate (verify before
+    investing further, to avoid repeating the dts_reg_offbyone/
+    mspi_flash/ina237 class of self-consistency dead end):
+    - Prefer a code path that clearly goes through host libc `malloc`/
+      `free` rather than Zephyr's own `k_malloc`/`k_free` heap — on
+      native_sim the code genuinely runs on host Linux, and glibc's
+      allocator has a built-in, deterministic double-free detector (it
+      prints "free(): double free detected ..." and calls abort() by
+      default), landing directly on QemuOracle's existing "Aborted" crash
+      pattern. Zephyr's own `sys_heap` (what `k_malloc`/`k_free` actually
+      use) has no equivalent guarantee — a repeated free there may just
+      silently corrupt the free list, only surfacing at some later,
+      unrelated allocation — timing is unpredictable, unsuitable for a
+      golden case.
+    - Confirm the pointer isn't legitimately reallocated/reassigned
+      between the two free calls (e.g. `ptr = k_malloc(...)` pointing it
+      somewhere new) — otherwise the second free is freeing a fresh, valid
+      allocation and produces no bug at all.
+    """
+    if not hint:
+        return None
+    test_name, sep, free_call = hint.partition(":")
+    if not sep or not free_call:
+        return None
+
+    occurrence = 1
+    if "#" in test_name:
+        test_name, _, occurrence_str = test_name.rpartition("#")
+        if not test_name or not occurrence_str.isdigit():
+            return None
+        occurrence = int(occurrence_str)
+        if occurrence < 1:
+            return None
+
+    block = _find_ztest_block(content, test_name)
+    if block is None:
+        return None
+    start, end = block
+
+    idx = -1
+    search_from = start
+    for _ in range(occurrence):
+        idx = content.find(free_call, search_from, end)
+        if idx == -1:
+            return None
+        search_from = idx + len(free_call)
+
+    insertion_point = idx + len(free_call)
+    return content[:insertion_point] + " " + free_call + content[insertion_point:]
+
+
+def _runtime_buffer_shrink(content: str, hint: Optional[str] = None) -> Optional[str]:
+    """把一個固定大小緩衝區的宣告 (陣列大小、`K_THREAD_STACK_DEFINE` 的
+    stack 大小等) 縮小，但完全不去動實際寫入這塊記憶體的程式碼——寫入端還
+    是照原本的量寫，於是每次執行都確定會寫出界，是一種跟現有 4 個
+    runtime_crash operator 完全不同的錯誤機制 (記憶體佈局/容量不足，而非
+    排程/邊界比較/API 語意/NULL 檢查)。
+
+    跟 `runtime_off_by_one`/`runtime_remove_null_check` 的 hint-with-colon
+    分支是同一種通用「精確文字定位取代」機制，這裡另外取一個誠實反映語意
+    的名字，而不是借用那兩個名字底下的通用逃生口——資料集的 operator
+    欄位要能被信任地反映「這個案例實際上是哪種錯誤類別」，用
+    runtime_off_by_one 的名字去標一個其實是緩衝區溢位的案例會誤導之後的
+    分析。
+
+    hint 格式為 "<old_text>[#N]:<new_text>"：old_text 是宣告當下的完整
+    字面文字 (例如 "char rx_buf[128];" 或
+    "K_THREAD_STACK_DEFINE(my_stack, 1024);")，選檔案裡第 N 次出現 (預設
+    第一次)，整段換成 new_text (例如把陣列大小換小、或把 stack 大小換小)。
+
+    選擇候選目標時的關鍵判斷 (實測前務必先確認，避免重蹈
+    dts_reg_offbyone/mspi_flash/ina237 那種「自我一致性死路」)：
+    - 確認實際寫入這塊緩衝區的迴圈邊界/複製長度是另一個獨立的字面值或
+      常數，不是從縮小後的這個宣告本身 (例如 `sizeof(rx_buf)`) 算出來的
+      ——否則寫入端會跟著縮小的宣告一起變小，仍然「自我一致」，不會真的
+      溢位 (跟 part 25/31 記錄的死路完全同一種陷阱，只是換了個地方犯)。
+    - 縮小陣列比縮小 K_THREAD_STACK_DEFINE 更可預期：一般陣列的溢位是
+      直接踩到相鄰記憶體 (棧上鄰居變數/返回位址，或堆積相鄰的配置區塊
+      metadata)，在有 `CONFIG_STACK_PROTECTOR`/glibc FORTIFY 的組態下通常
+      會被偵測到並印出可辨識的錯誤然後 abort()/segfault，命中既有的
+      "Aborted"/"Segmentation fault" pattern；K_THREAD_STACK_DEFINE 縮小
+      是否真的觸發偵測到的堆疊溢位，在 native_sim (POSIX arch，執行緒的
+      真正 C 呼叫堆疊來自底層 host pthread，不一定直接受這個巨集控制)
+      上不一定可靠，實測前不能假設一定會生效——這正是需要先在 Docker
+      裡走一次真實驗證閘的原因，跟其他所有 operator 一樣。
+
+    Shrinks a fixed-size buffer declaration (an array's size, a
+    `K_THREAD_STACK_DEFINE`'s stack size, etc.) while leaving the code
+    that actually writes into it completely untouched — the write side
+    still writes the original amount, so every run deterministically
+    writes out of bounds. A structurally different failure mechanism from
+    all 4 existing runtime_crash operators (memory layout/capacity, not
+    scheduling/boundary-comparison/API-semantics/NULL-check).
+
+    Mechanically the same generic "anchor exact literal text, replace it"
+    trick already embedded in `runtime_off_by_one`/
+    `runtime_remove_null_check`'s hint-with-colon branches — given its own
+    honestly-named operator here rather than reusing their generic escape
+    hatch under a misleading name, since the dataset's operator field
+    needs to be trustworthy about which bug class a case actually
+    injects; labeling a buffer-overflow case as `runtime_off_by_one` would
+    mislead later analysis.
+
+    hint format is "<old_text>[#N]:<new_text>": old_text is the complete
+    literal declaration text (e.g. "char rx_buf[128];" or
+    "K_THREAD_STACK_DEFINE(my_stack, 1024);"), matched at its Nth
+    occurrence in the file (default 1st), replaced wholesale with new_text
+    (e.g. a smaller array size, or a smaller stack size).
+
+    Key judgment calls when picking a real candidate (verify before
+    investing further, to avoid repeating the dts_reg_offbyone/
+    mspi_flash/ina237 class of self-consistency dead end):
+    - Confirm the loop bound/copy length that actually writes into this
+      buffer is an independent literal or constant, not derived from this
+      same shrunk declaration (e.g. `sizeof(rx_buf)`) — otherwise the
+      write side shrinks right along with the declaration and stays
+      self-consistent, producing no real overflow (the exact same trap
+      documented in parts 25/31, just relocated).
+    - Shrinking a plain array is more predictable than shrinking a
+      `K_THREAD_STACK_DEFINE`: a plain array overflow directly clobbers
+      adjacent memory (a stack neighbor/return address, or an adjacent
+      heap allocation's metadata), and under
+      `CONFIG_STACK_PROTECTOR`/glibc FORTIFY it's typically detected with
+      a recognizable message and an abort()/segfault, landing on the
+      existing "Aborted"/"Segmentation fault" patterns. Whether shrinking
+      `K_THREAD_STACK_DEFINE` reliably triggers a detected stack overflow
+      on native_sim (POSIX arch — a thread's real C call stack comes from
+      the underlying host pthread, not necessarily governed directly by
+      this macro) isn't something to assume without testing — exactly why
+      it still needs a real Docker verification pass first, same as every
+      other operator.
+    """
+    if not hint or ':' not in hint:
+        return None
+    old_part, new_text = hint.split(':', 1)
+    old_text, n = _parse_occurrence_suffix(old_part)
+    idx = _find_nth_occurrence(content, old_text, n, 0, len(content))
+    if idx == -1:
+        return None
+    return content[:idx] + new_text + content[idx + len(old_text):]
+
+
 # ============================================================
 # 執行緒排程類別 mutation operators
 # ============================================================
@@ -710,6 +892,8 @@ MUTATION_OPERATORS: Dict[str, Callable[..., Optional[str]]] = {
     "c_typo_macro": _c_typo_macro,
     "runtime_off_by_one": _runtime_off_by_one,
     "runtime_remove_null_check": _runtime_remove_null_check,
+    "runtime_double_free": _runtime_double_free,
+    "runtime_buffer_shrink": _runtime_buffer_shrink,
     "thread_priority_swap": _thread_priority_swap,
     "c_api_substitute": _c_api_substitute,
 }
