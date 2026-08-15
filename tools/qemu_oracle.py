@@ -253,6 +253,64 @@ class QemuOracle:
         ]
         self.docker_infra_error_regex = [re.compile(p) for p in self.docker_infra_error_patterns]
 
+        # `west update` 抓取模組時若網路故障 (例如某個 hal module 的 git
+        # remote 暫時連不上)，west/git 會印出這類錯誤然後結束，行程收到
+        # EOF——由於這發生在 `west build: generating a build system` 標記
+        # 之前，尚未進入 in_build_phase，之前完全沒有專門的分類，只能落入
+        # EOF 分支被歸類成 "eof_no_boot"，而 "eof_no_boot" 正好是
+        # verify_cases.py 的 ACCEPTED_FAILURE_STATUSES 之一，等於把一次
+        # 純網路失敗誤判成「成功重現了目標 commit 的 bug」。
+        # 2026-08-12 挖礦驗證 (bug_111542/llext) 就是這樣被誤判成假陽性
+        # 的，`initial_error_log` 存的其實是 west update 過程的雜訊
+        # (`ERROR: update failed for project hal_bouffalolab`)，跟 PR 真正
+        # 修的 bug 完全無關；隔天人工重跑才發現這是暫時性網路問題，跟
+        # docker_infra_error 是同一類「基礎設施本身出錯，與目標 commit 是
+        # 否有 bug 無關」，必須明確排除，不能靠 eof_no_boot 這個通用桶子
+        # 蒙混過去。同樣不受 in_build_phase 限制 (west update 一定發生在
+        # build 開始之前)，且 pattern 錨定行首，避免比對到歷史 commit
+        # 訊息裡剛好包含類似字樣的文字 (跟下面 build_start_marker 的說明
+        # 是同一種風險，但 anchor-at-line-start 已經足以避免——west/git
+        # 自己印的錯誤訊息一定是獨立、無縮排的一行，嵌在某個 commit
+        # subject 裡的引用文字幾乎不會剛好整行都是這個格式)。
+        #
+        # If `west update` hits a network failure fetching a module (e.g. a
+        # hal module's git remote is briefly unreachable), west/git prints
+        # an error like this and exits, giving pexpect an EOF. Because this
+        # happens before the `west build: generating a build system` marker
+        # (still pre-in_build_phase), there was previously no dedicated
+        # classification for it — it fell through to the EOF branch and got
+        # labeled "eof_no_boot", which happens to be one of
+        # verify_cases.py's ACCEPTED_FAILURE_STATUSES — silently turning a
+        # pure network failure into a false "successfully reproduced the
+        # target commit's bug". This is exactly what happened during the
+        # 2026-08-12 mining verification of bug_111542 (llext): the stored
+        # `initial_error_log` was actually west-update noise (`ERROR:
+        # update failed for project hal_bouffalolab`), unrelated to the
+        # PR's real bug; a manual re-run the next day is what caught it.
+        # Same class of problem as docker_infra_error above — an
+        # infrastructure failure unrelated to whether the target commit has
+        # a bug — and must be excluded the same way rather than falling
+        # into the generic eof_no_boot bucket. Also not gated behind
+        # in_build_phase (west update always happens before the build
+        # starts), and patterns are anchored at line start to avoid
+        # matching a historical commit message that happens to quote
+        # similar text (same class of risk the build_start_marker comment
+        # below describes, but anchoring is enough here — west/git's own
+        # error output is always its own unindented line, not something a
+        # commit subject would happen to reproduce verbatim).
+        self.west_update_error_patterns = [
+            r"^ERROR: update failed for project",
+            r"^fatal: unable to access '",
+            r"^fatal: unable to connect to",
+            r"^fatal: could not read from remote repository",
+            r"^fatal: the remote end hung up unexpectedly",
+            r"^fatal: early EOF",
+            r"^fatal: index-pack failed",
+            r"^error: RPC failed; curl",
+            r"Could not resolve host:",
+        ]
+        self.west_update_error_regex = [re.compile(p, re.IGNORECASE) for p in self.west_update_error_patterns]
+
         # west/git 在抓取模組時 (git fetch/checkout/west update) 印出的歷史 commit
         # 訊息，內容完全不受我們控制，字面上可能剛好包含 "Bus Fault"、"Hello World"
         # 等字樣 (例如某個歷史 commit 的 subject 是 "Fix Bus Fault during raw TX")。
@@ -369,6 +427,21 @@ class QemuOracle:
                                 break
 
                         if result["status"] == "docker_infra_error":
+                            break
+
+                        # -0.5. 檢查 west update 抓取模組是否網路故障
+                        # (同樣不受 in_build_phase 限制，見上方註解)
+                        # Check for a west-update module-fetch network
+                        # failure (also not gated by in_build_phase, see
+                        # comment above)
+                        for pattern in self.west_update_error_regex:
+                            if pattern.search(line):
+                                self.logger.error(f"偵測到 west update 模組抓取失敗，與目標 commit 無關 (west update module-fetch failure detected, unrelated to the target commit): {pattern.pattern}")
+                                result["status"] = "west_update_error"
+                                result["error_signature"] = pattern.pattern
+                                break
+
+                        if result["status"] == "west_update_error":
                             break
 
                         if not in_build_phase:
