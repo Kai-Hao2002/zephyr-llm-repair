@@ -177,6 +177,107 @@ def _dts_redirect_phandle(content: str, hint: Optional[str] = None) -> Optional[
     return content[:m.start()] + f"&{new_label}" + content[m.end():]
 
 
+def _dts_swap_phandle_pair(content: str, hint: Optional[str] = None) -> Optional[str]:
+    """把兩個「本來就存在、各自合法」的 `&label_a`/`&label_b` phandle 參照
+    互換位置——不是像 `dts_redirect_phandle` 那樣把一個參照改指向任意挑選
+    的另一個節點 (「這個 phandle 該指向哪個特定 instance」的錯誤)，而是模擬
+    「兩個角色/兩個裝置的接線在複製貼上時對調了」這種真實工程失誤——跟
+    `thread_priority_swap` 對調兩個執行緒優先權字面值是同一種敘事，只是
+    換成 DTS 的 phandle 參照。建置跟開機都會成功 (兩邊換完後各自仍然是
+    結構有效的參照)，只有依賴「這條線接的是哪一個特定裝置」的邏輯或測試
+    斷言才會抓到。
+
+    hint 必填，格式是 "label_a[#N]:label_b[#M]" (兩者都是不含 & 的節點
+    標籤，N/M 是可選的出現次數後綴，1-indexed，預設 1)。分別找出
+    `&label_a` 第 N 次、`&label_b` 第 M 次出現的位置，把這兩個位置的
+    參照互換 (label_a 出現的地方換成 &label_b，反之亦然)——跟
+    `thread_priority_swap` 的兩值互換邏輯完全同構，只是操作對象換成
+    phandle 參照而不是優先權常數。
+
+    選擇候選目標時的關鍵判斷 (實測前務必先確認，避免重蹈
+    dts_reg_offbyone 在 flash_simulator 上踩到的「自我一致性死路」——
+    這正是 compound subtype 2 上一次嘗試多樣化操作子時的失敗紀錄，
+    part 31 有詳細記載)：
+    - 確認驗證這兩個 phandle 該接到哪裡的邏輯/斷言，其「期望值」不是從
+      同一批被交換的節點本身算出來的 (例如兩個節點各自的 `reg`/屬性值
+      被拿來互相比較，而不是跟一個獨立、外部固定的期望值比較)——否則
+      交換後兩邊仍然「自我一致」，測試找不到任何矛盾。
+    - 兩個 label 各自在檔案裡的出現次數與位置都要先確認清楚 (跟
+      `dts_redirect_phandle` 一樣，同一個標籤常常在檔案裡的別處也被引用，
+      例如某個節點同時出現在一個陣列列表裡、又被另一個屬性單獨引用)，
+      需要時用 "#N" 精準選到想要的那一次出現，不能假設「檔案裡第一次
+      出現」就是想動的那個。
+
+    Swaps two already-existing, individually-valid `&label_a`/`&label_b`
+    phandle references with each other — unlike `dts_redirect_phandle`
+    (which points one reference at an arbitrarily chosen *different* node,
+    modeling "this phandle points at the wrong specific instance"), this
+    models "two roles'/devices' wiring got swapped during a copy-paste" —
+    the same narrative `thread_priority_swap` uses for two thread-priority
+    literals, just applied to DTS phandle references instead. Build and
+    boot both succeed (each side is still a structurally valid reference
+    after the swap); only logic or a test assertion that depends on "which
+    specific device this wire connects to" will catch it.
+
+    hint is required, format "label_a[#N]:label_b[#M]" (both bare node
+    labels, no &; N/M are optional 1-indexed occurrence suffixes, default
+    1). Finds the Nth occurrence of `&label_a` and the Mth occurrence of
+    `&label_b`, and swaps just those two references (wherever label_a
+    appeared becomes `&label_b` and vice versa) — structurally identical
+    to `thread_priority_swap`'s two-value-swap logic, just operating on
+    phandle references instead of priority constants.
+
+    Key judgment calls when picking a real candidate (verify before
+    investing further, to avoid repeating the self-consistency dead end
+    `dts_reg_offbyone` hit on `flash_simulator` — documented in part 31 as
+    the previous, unsuccessful attempt to diversify compound subtype 2):
+    - Confirm the logic/assertion that checks which device each phandle is
+      wired to derives its *expected* value from something external and
+      fixed, not from the very nodes being swapped themselves (e.g. two
+      nodes' own `reg`/property values compared against *each other*
+      rather than against an independent, fixed expectation) — otherwise
+      the two sides stay self-consistent after the swap and no test finds
+      any contradiction.
+    - Confirm each label's occurrence count/position in the file up front
+      (same as `dts_redirect_phandle`): the same label is often referenced
+      elsewhere too (e.g. a node appears both in an array/list property
+      *and* is referenced separately by another property) — use "#N" to
+      pin the exact intended occurrence rather than assuming "the first
+      one in the file" is the right one.
+    """
+    if not hint:
+        return None
+    label_a, _, label_b = hint.partition(":")
+    if not label_b or label_a == label_b:
+        return None
+
+    label_a, occ_a = _parse_occurrence_suffix(label_a)
+    label_b, occ_b = _parse_occurrence_suffix(label_b)
+    if not label_a or not label_b:
+        return None
+
+    matches_a = list(re.finditer(r'&' + re.escape(label_a) + r'\b', content))
+    matches_b = list(re.finditer(r'&' + re.escape(label_b) + r'\b', content))
+    if len(matches_a) < occ_a or len(matches_b) < occ_b:
+        return None
+    m_a = matches_a[occ_a - 1]
+    m_b = matches_b[occ_b - 1]
+
+    if m_a.start() < m_b.start():
+        first, first_repl, second, second_repl = m_a, label_b, m_b, label_a
+    else:
+        first, first_repl, second, second_repl = m_b, label_a, m_a, label_b
+
+    if first.end() > second.start():
+        return None  # overlapping matches — ambiguous, decline rather than guess
+
+    return (
+        content[:first.start()] + f"&{first_repl}"
+        + content[first.end():second.start()] + f"&{second_repl}"
+        + content[second.end():]
+    )
+
+
 def _dts_corrupt_reg(content: str, hint: Optional[str] = None) -> Optional[str]:
     """把第一個找到的 `reg = <...>;` 屬性刪掉最後一個 cell，讓暫存器長度不合法。"""
     pattern = re.compile(r'(reg\s*=\s*<)([^>]+)(>\s*;)')
@@ -885,6 +986,7 @@ MUTATION_OPERATORS: Dict[str, Callable[..., Optional[str]]] = {
     "dts_remove_compatible": _dts_remove_compatible,
     "dts_break_phandle": _dts_break_phandle,
     "dts_redirect_phandle": _dts_redirect_phandle,
+    "dts_swap_phandle_pair": _dts_swap_phandle_pair,
     "dts_corrupt_reg": _dts_corrupt_reg,
     "dts_reg_offbyone": _dts_reg_offbyone,
     "c_remove_semicolon": _c_remove_semicolon,
