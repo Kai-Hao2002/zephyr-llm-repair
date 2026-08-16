@@ -3634,6 +3634,44 @@ INJECTION_CATALOG = [
             },
         ],
     },
+    # Session 46 part 39: subtype 2's first genuinely different operator —
+    # all 5 prior subtype-2 cases used dts_redirect_phandle exclusively;
+    # part 31's attempt to diversify it (dts_reg_offbyone on
+    # flash_simulator) hit a self-consistency dead end (the test's own
+    # boundary constants were computed from the same DT node being
+    # mutated). tests/subsys/pm/device_power_domains/app.overlay's
+    # `test_dev` node has two separate phandle properties: `power-domains
+    # = <&test_reg_1>;` (its real, functionally-consumed power domain --
+    # Zephyr's PM_DEVICE_DT_DEFINE machinery reads this from DT
+    # automatically) and `alternate-domain = <&test_reg_chained>;` (a
+    # custom property this specific test's C code never actually reads,
+    # confirmed by grepping main.c -- purely decorative for this test).
+    # Swapping the two labels makes `power-domains` resolve to
+    # `test_reg_chained` (itself chained to `test_reg_0`) instead of the
+    # simple `test_reg_1` -- a completely different power-domain state
+    # machine, while `alternate-domain`'s new value has no effect either
+    # way. src/main.c's test body checks device/domain state transitions
+    # against hardcoded, externally-fixed expectations (not derived from
+    # the DTS structure itself), avoiding the part-31 trap. Baseline
+    # confirmed clean first (1/1 pass). Verified via the real gate on the
+    # first attempt: mutated status=crash, landed exactly where predicted
+    # -- `Assertion failed ... main.c:94: (pm_device_is_powered(dev) is
+    # false)` right after "Cycling: test_reg_1", since dev's actual power
+    # domain no longer responds to reg_1 requests at all. Reverted
+    # status=success.
+    {
+        "id_suffix": "compound_device_power_domains_swap",
+        "category": "compound",
+        "target_app": "tests/subsys/pm/device_power_domains",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "tests/subsys/pm/device_power_domains/app.overlay",
+                "operator": "dts_swap_phandle_pair:test_reg_1:test_reg_chained",
+            },
+        ],
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
     # --- Compound round 8 (session 46 part 25 continued): subtype 1's 5th
     # target ---
     # Same proven shape once more, on `drivers/dma/Kconfig.emul`'s
