@@ -4001,6 +4001,49 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
     },
+    # Session 46 part 38: 2 more real candidates each for the same 2
+    # operators introduced in part 37, both passed the real gate on the
+    # first attempt.
+    #
+    # tests/subsys/portability/posix/threads_base/src/key.c's thread_top()
+    # (a pthread entry function, found via _find_ztest_block's plain-
+    # function-definition fallback, not a ZTEST macro body) allocates via
+    # k_malloc, stores the pointer in a POSIX thread-specific-data slot,
+    # then frees it via k_free(value) with no reassignment in between —
+    # duplicating that call reproduces the exact double-free mechanism
+    # from part 37's zbus/dyn_channel case, just on a different app/
+    # function shape (plain C function instead of a ZTEST body).
+    {
+        "id_suffix": "runtime_posix_key_double_free",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/portability/posix/threads_base/src/key.c",
+        "operator": "runtime_double_free:thread_top:k_free(value);",
+        "target_app": "tests/subsys/portability/posix/threads_base",
+        "board": "native_sim",
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
+    # tests/subsys/mgmt/mcumgr/enum_mgmt/src/main.c's
+    # `struct details_entries { char expected_name[32]; ... };` is written
+    # via `strcpy(details_response[N].expected_name, SHELL_MGMT_NAME)` and
+    # siblings — independent macro string literals (up to 11 bytes incl.
+    # NUL for "shell mgmt"), not derived from the struct field's own
+    # declared size at all, so shrinking just the declaration to 4
+    # guarantees an overflow the moment any of them runs. A struct-field
+    # array rather than part 37's plain file-scope array, showing the
+    # operator generalizes across declaration shapes as long as the write
+    # bound stays independent. Landed on test_details (the first test that
+    # populates expected_name), caught by the same glibc _FORTIFY_SOURCE
+    # "*** buffer overflow detected ***: terminated" -> Aborted mechanism
+    # as part 37's case.
+    {
+        "id_suffix": "runtime_enum_mgmt_buffer_shrink",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/mgmt/mcumgr/enum_mgmt/src/main.c",
+        "operator": "runtime_buffer_shrink:char expected_name[32];:char expected_name[4];",
+        "target_app": "tests/subsys/mgmt/mcumgr/enum_mgmt",
+        "board": "native_sim",
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
 ]
 
 
