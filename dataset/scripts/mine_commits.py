@@ -4075,6 +4075,57 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "baseline_commit": SECOND_BASELINE_COMMIT,
     },
+    # Session 46 part 43: benchmark-validity audit follow-up (part 42's
+    # reconfirmed finding — 118/119 injected cases still on the primary
+    # pin). Scales up part 32's proof-of-concept from 1 to 5 baseline2
+    # cases, deliberately spanning 4 different categories/apps/operators
+    # (not just repeating FCB) so this isn't just a second single-point
+    # proof but a real, if still modest, dent in the concentration
+    # statistic. Same discipline as part 32: reuse long-proven
+    # mutation/target/operator combinations unchanged, so the only
+    # variable under test per entry is "does this specific target's
+    # content still match on the second commit" — not new mutation-design
+    # risk. Confirmed each target file's exact mutated text (Kconfig
+    # symbol name, DTS compatible string, NULL-check literal) is still
+    # present verbatim on SECOND_BASELINE_COMMIT before spending a Docker
+    # cycle. All 4 baselines confirmed clean first, all 4 passed the real
+    # gate on the first attempt.
+    {
+        "id_suffix": "kconfig_dac_emul_depends_baseline2",
+        "category": "kconfig",
+        "target_file": "drivers/dac/Kconfig.dac_emul",
+        "operator": "kconfig_invert_depends:DAC_EMUL",
+        "target_app": "tests/drivers/dac/dac_emul",
+        "board": "native_sim",
+        "baseline_commit": SECOND_BASELINE_COMMIT,
+    },
+    {
+        "id_suffix": "dts_espi_host_compatible_baseline2",
+        "category": "dts",
+        "target_file": "tests/drivers/espi/boards/native_sim.overlay",
+        "operator": "dts_remove_compatible:zephyr,espi-emul-espi-host",
+        "target_app": "tests/drivers/espi",
+        "board": "native_sim",
+        "baseline_commit": SECOND_BASELINE_COMMIT,
+    },
+    {
+        "id_suffix": "c_rtc_y2k_semicolon_baseline2",
+        "category": "c_syntax",
+        "target_file": "tests/drivers/rtc/rtc_api/src/test_y2k.c",
+        "operator": "c_remove_semicolon",
+        "target_app": "tests/drivers/rtc/rtc_api",
+        "board": "native_sim",
+        "baseline_commit": SECOND_BASELINE_COMMIT,
+    },
+    {
+        "id_suffix": "runtime_can_loopback_nullcheck_baseline2",
+        "category": "runtime_crash",
+        "target_file": "drivers/can/can_loopback.c",
+        "operator": "runtime_remove_null_check:if (state != NULL) {:if (1) {",
+        "target_app": "tests/drivers/can/api",
+        "board": "native_sim",
+        "baseline_commit": SECOND_BASELINE_COMMIT,
+    },
     # Session 46 part 37: runtime_crash's 4 operators (thread_priority_swap,
     # runtime_off_by_one, c_api_substitute, runtime_remove_null_check) were
     # 94.1% of the category — these are the first 2 real candidates for the
