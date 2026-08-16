@@ -3712,6 +3712,59 @@ INJECTION_CATALOG = [
         ],
         "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
     },
+    # Session 46 part 41: mined 2 more candidates from the same
+    # tests/lib/devicetree/api fixture, following up on part 40's note
+    # that its systematic one-macro-per-property-shape structure likely
+    # had more equally-clean candidates nearby. Both confirmed via the
+    # same method: grep the property's C-side assertion, confirm the
+    # expected value is an external DT_NODELABEL(...) rather than derived
+    # from the mutated property itself, confirm each swapped label's
+    # occurrence count in the overlay is exactly 1 (no ambiguity). Both
+    # passed the real gate on the first attempt.
+    #
+    # `dmas = <&test_dma1 1 2>, <&test_dma2 3 4>;` — the exact same shape
+    # as io-channels/test_adc_1/test_adc_2, checked via
+    # `DT_SAME_NODE(DT_DMAS_CTLR_BY_IDX(TEST_TEMP, 0), TEST_DMA_CTLR_1)`
+    # where TEST_DMA_CTLR_1 is DT_NODELABEL(test_dma1) directly.
+    {
+        "id_suffix": "compound_devicetree_api_dmas_swap",
+        "category": "compound",
+        "target_app": "tests/lib/devicetree/api",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "tests/lib/devicetree/api/app.overlay",
+                "operator": "dts_swap_phandle_pair:test_dma1:test_dma2",
+            },
+        ],
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
+    # `pinctrl-0 = <&test_pincfg_a &test_pincfg_b>;` /
+    # `pinctrl-1 = <&test_pincfg_c &test_pincfg_d>;` — a different property
+    # shape than io-channels/dmas (pinctrl states rather than a phandle
+    # array with per-entry specifier cells), still checked the same way:
+    # `DT_SAME_NODE(DT_PINCTRL_BY_IDX(TEST_TEMP, 1, 0),
+    # DT_NODELABEL(test_pincfg_c))` and `DT_SAME_NODE(DT_PINCTRL_0(TEST_TEMP,
+    # 0), DT_NODELABEL(test_pincfg_a))`. test_pincfg_b/test_pincfg_d were
+    # avoided as swap partners since test_pincfg_d occurs twice in the
+    # overlay (pinctrl-1 and pinctrl-2) — test_pincfg_a/test_pincfg_c were
+    # each confirmed to occur exactly once first. Landed on `test_pinctrl`
+    # (`Assertion failed ... main.c:3623:
+    # (DT_SAME_NODE(DT_PINCTRL_BY_IDX(TEST_TEMP, 1, 0),
+    # DT_NODELABEL(test_pincfg_c)) is false)`).
+    {
+        "id_suffix": "compound_devicetree_api_pinctrl_swap",
+        "category": "compound",
+        "target_app": "tests/lib/devicetree/api",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "tests/lib/devicetree/api/app.overlay",
+                "operator": "dts_swap_phandle_pair:test_pincfg_a:test_pincfg_c",
+            },
+        ],
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
     # --- Compound round 8 (session 46 part 25 continued): subtype 1's 5th
     # target ---
     # Same proven shape once more, on `drivers/dma/Kconfig.emul`'s
