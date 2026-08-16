@@ -3944,6 +3944,63 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "baseline_commit": SECOND_BASELINE_COMMIT,
     },
+    # Session 46 part 37: runtime_crash's 4 operators (thread_priority_swap,
+    # runtime_off_by_one, c_api_substitute, runtime_remove_null_check) were
+    # 94.1% of the category — these are the first 2 real candidates for the
+    # 2 newly-designed operators (runtime_double_free, runtime_buffer_shrink)
+    # from the same part. Both passed the real two-sided gate on the first
+    # attempt.
+    #
+    # zbus/dyn_channel's test_malloc allocates via k_malloc, later frees the
+    # same pointer via k_free(actual_message_data->reference) — duplicating
+    # that exact call (before the following line NULLs the struct field, so
+    # the second call still sees a live, non-NULL pointer) produces a
+    # genuine double free. Confirmed via source-reading Zephyr's own
+    # lib/heap/heap.c beforehand: sys_heap_free() (which both k_free and
+    # CONFIG_COMMON_LIBC_MALLOC's free() route through) has a built-in
+    # double-free check gated on SYS_HEAP_HARDENING_BASIC — the default
+    # level whenever CONFIG_ASSERT=y (set in this app's prj.conf), so this
+    # wasn't a blind guess. In practice the mutated run surfaced a plain
+    # host "Segmentation fault" rather than the predicted k_panic() message
+    # — still an unambiguous, already-matched crash pattern, just a
+    # different concrete mechanism than the one read in the source.
+    {
+        "id_suffix": "runtime_zbus_dyn_channel_double_free",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/zbus/dyn_channel/src/main.c",
+        "operator": "runtime_double_free:test_malloc:k_free(actual_message_data->reference);",
+        "target_app": "tests/subsys/zbus/dyn_channel",
+        "board": "native_sim",
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
+    # tests/lib/c_lib/common/src/main.c declares a file-scope
+    # `char buffer[BUFSIZE];` (BUFSIZE == 10) shared by many ZTEST cases,
+    # each writing into it via the BUFSIZE *macro* rather than
+    # `sizeof(buffer)` — shrinking only the array's declared size (not the
+    # macro) leaves every write site's length unchanged, guaranteeing an
+    # out-of-bounds write the moment any of them runs. Landed on
+    # `test_memset` (the first BUFSIZE-writing test in execution order, not
+    # `test_strcpy` which was the original target picked while reading the
+    # source) — glibc's `_FORTIFY_SOURCE` catches it at the fortified
+    # `memset` call via `__builtin_object_size` knowing the *true* (shrunk)
+    # destination size at compile time, prints "*** buffer overflow
+    # detected ***: terminated", and aborts — already matched by the
+    # existing "Aborted" crash pattern. Worth noting for future buffer-
+    # shrink candidates: this worked even though `buffer` is a file-scope
+    # global, not a stack-local variable — FORTIFY_SOURCE's static
+    # object-size check doesn't care which segment the buffer lives in, so
+    # "prefer a stack buffer for a more reliable crash" (the original
+    # caution in runtime_buffer_shrink's own docstring) turned out to be
+    # unnecessary caution, at least for glibc-backed native_sim builds.
+    {
+        "id_suffix": "runtime_c_lib_common_buffer_shrink",
+        "category": "runtime_crash",
+        "target_file": "tests/lib/c_lib/common/src/main.c",
+        "operator": "runtime_buffer_shrink:char buffer[BUFSIZE];:char buffer[4];",
+        "target_app": "tests/lib/c_lib/common",
+        "board": "native_sim",
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
 ]
 
 
