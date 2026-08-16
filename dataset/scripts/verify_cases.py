@@ -249,6 +249,27 @@ class ZephyrCaseVerifier:
         compressed_log = self.log_filter.compress_log(result["log"])
         case["initial_error_log"] = compressed_log
         case["error_type"] = result["status"]
+
+        # part 42 稽核發現：這裡從一開始就沒有像 _verify_injected_case 那樣
+        # 記錄 target_test，導致 status == "crash" 的挖礦案例 (目前唯一一筆
+        # 是 bug_111542) 完全沒有防投機修復用的 target_test 欄位——一個能讓
+        # 評分階段誤判「刪掉/跳過那個被打壞的測試」也算修復成功的真實缺口。
+        # 跟 _verify_injected_case 用同一個 extract_failing_test_name()，
+        # 理由完全相同：只有 status == "crash" 時 log 裡才會有 ztest 測試
+        # 名稱可抽取，build 階段失敗 (eof_no_boot) 的 log 裡沒有。
+        # Part 42 audit finding: this path never recorded target_test the
+        # way _verify_injected_case does, so any mined case with
+        # status == "crash" (currently just bug_111542) had zero
+        # protection against a shortcut "fix" that deletes/skips the exact
+        # test the bug broke — a real gap in the anti-shortcut mechanism.
+        # Reuses the same extract_failing_test_name() as
+        # _verify_injected_case, same reasoning: only status == "crash"
+        # logs have a ztest test name to extract; build-stage failures
+        # (eof_no_boot) don't.
+        case["target_test"] = (
+            extract_failing_test_name(result["log"])
+            if result["status"] == "crash" else None
+        )
         return case
 
     def _run_sandbox_test(self, case_id: str, commit_sha: str, target_app: str, board: str) -> dict:

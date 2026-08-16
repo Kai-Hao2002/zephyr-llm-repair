@@ -134,6 +134,28 @@ When building `evaluate.py`, this is a hard requirement:
 2. If the agent's sandbox has outbound network access, also consider the residual risk of it `git clone`/`git fetch`-ing the real upstream Zephyr repo directly (the `broken_commit` SHA is a public, fetchable commit) to diff against — decide whether to sandbox network access as part of `evaluate.py`'s design, not after a real evaluation run reveals the gap.
 3. Turn "the agent's workspace genuinely has no version-control residue to diff the original source from" into one of `evaluate.py`'s own pre-flight assertions (e.g. assert no `.git` directory exists before releasing the workspace to the agent), not something only checked by hand.
 
+### ⚠️ `evaluate.py` 設計要求：`injection`/`injections` 欄位絕不能交給待測 agent / Design requirement: never expose the `injection`/`injections` field to the agent under evaluation
+
+**[中]** `verified_zephyr_bugs.json` 每一筆案例的 `injection`（或 compound 案例的 `injections`）欄位，其 `operator` 字串**直接、逐字寫死了這個案例的完整 mutation 手法**，包括被改動的確切原始文字（例如
+`"runtime_double_free:test_malloc:k_free(actual_message_data->reference);"`
+或
+`"dts_swap_phandle_pair:test_reg_1:test_reg_chained"`）——這不是像 `.git` 風險那樣「runner 實作方式不當才會暴露」的間接風險，而是**只要這個欄位以任何形式讓待測 agent 看到（完整 case dict 被直接餵進 prompt、debug log 印出案例內容、跑分過程的中介檔案沒有先過濾這個欄位等），就等於直接把答案寫在考卷上**——agent 完全不需要讀懂錯誤訊息或原始碼，只要抓到 `operator` 字串裡的 `target_file`/舊文字/新文字就能機械式地做出「正確」的反向修改。
+
+`evaluate.py` 動工時，硬性要求：
+1. 交給 agent 的任何內容（prompt、workspace、任何形式的中介輸出）**絕對不能包含 `injection`/`injections` 欄位**，也不能包含由它反推得出的資訊（例如把 `operator` 字串印進除錯 log、或把整個 case dict 序列化後存進 agent 看得到的檔案）。agent 唯一該看到的錯誤相關資訊是 `initial_error_log`（已經是壓縮過的建置/執行期錯誤訊息，不含 mutation 手法本身）。
+2. `target_test`/`category`/`board`/`target_app` 這些欄位本身是安全的（不洩漏具體改了什麼），可以視需要交給 agent；`broken_commit`/`fixed_commit` 則要搭配上面 `.git` 那條規則一起考慮（`fixed_commit` 若被 agent 看到，等同直接洩漏答案所在的那個上游修復 commit，同樣不能出現在 agent 可見的任何地方）。
+3. 把「agent 可見的所有內容都經過白名單過濾、不含 `injection`/`injections`/`fixed_commit`」寫成 `evaluate.py` 自己的一個驗收測試，不要只靠人工檢查——跟上面 `.git` 那條的第 3 點是同一種紀律。
+
+**[EN]** Every case's `injection` (or `injections` for compound cases) field in `verified_zephyr_bugs.json` has an `operator` string that **literally, verbatim encodes the case's complete mutation recipe**, including the exact original text that was changed (e.g.
+`"runtime_double_free:test_malloc:k_free(actual_message_data->reference);"`
+or
+`"dts_swap_phandle_pair:test_reg_1:test_reg_chained"`). Unlike the `.git` risk above (which only leaks if the runner implements things a specific wrong way), this one leaks **the moment the field reaches the agent under evaluation in any form** — the full case dict fed into a prompt, case contents echoed into a debug log, an intermediate scoring file that wasn't filtered first — since the agent then needs zero understanding of the error message or source code to mechanically reverse-apply the `target_file`/old-text/new-text spelled out in `operator`.
+
+When building `evaluate.py`, this is a hard requirement:
+1. Anything handed to the agent (prompt, workspace, any intermediate output) **must never include the `injection`/`injections` field**, nor anything derived from it (e.g. printing the `operator` string to a debug log, or serializing the whole case dict into a file the agent can read). The only error-related information the agent should ever see is `initial_error_log` (already a compressed build/runtime error message, containing no mutation-recipe detail).
+2. `target_test`/`category`/`board`/`target_app` are safe to expose (they don't reveal what was actually changed) if needed; `broken_commit`/`fixed_commit` need to be considered alongside the `.git` rule above — if the agent ever sees `fixed_commit`, that directly leaks the upstream commit containing the answer, so it must never appear anywhere agent-visible either.
+3. Turn "everything agent-visible is allowlist-filtered, with no `injection`/`injections`/`fixed_commit`" into one of `evaluate.py`'s own pre-flight assertions, not something only checked by hand — the same discipline as point 3 of the `.git` rule above.
+
 ### 🕒 Baseline commit 多樣性 / Baseline commit diversity
 
 **[中]** `verified_zephyr_bugs.json` 的絕大多數案例目前仍固定在同一個 pinned commit（`bc460feabe7038dc876782557e39be791d6c24e9`，2026-07-24）上——這本身是另一種多樣性風險：任何在這個日期之後訓練、且訓練資料涵蓋公開 GitHub 歷史的通用 LLM，都可能對這個特定原始碼快照本身有先驗記憶，跟它是否真的理解注入的 bug 機制無關。`dataset/scripts/mine_commits.py` 已經支援用第二個（或更多）pinned commit：`INJECTION_CATALOG` 裡的個別 entry 可以帶 `"baseline_commit": SECOND_BASELINE_COMMIT` 覆蓋預設共用的 commit（見該檔案裡 `SECOND_BASELINE_COMMIT` 常數上方的註解）——`tools/fault_injector.py`/`dataset/scripts/verify_cases.py` 本來就是逐案例讀取 `broken_commit`，從來就沒有「整批必須共用同一個 commit」的架構限制。目前只有 `inject_kconfig_fcb_depends_baseline2` 這一筆落在第二個 commit（`4b02c5d60ae620fb23cbea58516e3ea7388c2f75`，2026-05-14）上，用來證明機制可行；未來要真正緩解「幾乎全部案例集中在單一 commit」這個統計，需要之後的 session 持續把新案例分散注入到多個已驗證乾淨的 pinned commit，而不是預設一律沿用最早那一個。
