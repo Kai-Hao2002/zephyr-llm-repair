@@ -3672,6 +3672,46 @@ INJECTION_CATALOG = [
         ],
         "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
     },
+    # Session 46 part 40: 2nd dts_swap_phandle_pair candidate, found via a
+    # more targeted search strategy than part 39's — deliberately looked at
+    # tests/lib/devicetree/api, a large (43-distinct-label) fixture whose
+    # entire purpose is verifying individual DT macros against hardcoded
+    # expected values, on the theory that a file built explicitly to test
+    # macro correctness is likely to have exactly the "assertion checks a
+    # specific phandle-derived value against an external, fixed
+    # expectation" shape needed to avoid the part-31 self-consistency trap.
+    # Confirmed directly: `io-channels = <&test_adc_1 10>, <&test_adc_2
+    # 20>;` is checked by
+    # `zassert_true(DT_SAME_NODE(DT_IO_CHANNELS_CTLR_BY_IDX(TEST_TEMP, 0),
+    # TEST_IO_CHANNEL_CTLR_1), "")` where TEST_IO_CHANNEL_CTLR_1 is
+    # `DT_NODELABEL(test_adc_1)` directly — external to the mutated
+    # property entirely. Two dead ends checked and ruled out first this
+    # part: tests/subsys/sensing's `reporters = <&base_accel_gyro
+    # &lid_accel_gyro>;` looked equally promising but is unexercised by any
+    # test (re-confirmed part 25's finding still holds); tests/subsys/pm/
+    # device_driver_init's domain-chain dependency is only observable
+    # under a CONFIG_PM_DEVICE_RUNTIME=y twister test variant that
+    # fault_injector.py's fixed `west build -b {board}` invocation has no
+    # way to request (no extra-Kconfig-args mechanism exists in the
+    # pipeline). Baseline confirmed clean first (all tests incl.
+    # test_io_channel_inputs pass). Verified via the real gate on the
+    # first attempt: mutated status=crash, landed exactly where predicted
+    # — `Assertion failed ... main.c:1466:
+    # (DT_SAME_NODE(DT_IO_CHANNELS_CTLR_BY_IDX(TEST_TEMP, 0),
+    # TEST_IO_CHANNEL_CTLR_1) is false)`. Reverted status=success.
+    {
+        "id_suffix": "compound_devicetree_api_io_channels_swap",
+        "category": "compound",
+        "target_app": "tests/lib/devicetree/api",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "tests/lib/devicetree/api/app.overlay",
+                "operator": "dts_swap_phandle_pair:test_adc_1:test_adc_2",
+            },
+        ],
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
     # --- Compound round 8 (session 46 part 25 continued): subtype 1's 5th
     # target ---
     # Same proven shape once more, on `drivers/dma/Kconfig.emul`'s
