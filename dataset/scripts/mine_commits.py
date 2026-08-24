@@ -4460,6 +4460,22 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/gpio/gpio_get_direction",
         "board": "native_sim",
     },
+    # Session 46 part 44 (dilution round 5, same session): 3rd instance of
+    # runtime_double_free — tests/kernel/cleanup's foo_destructor() is a
+    # plain function invoked indirectly via the SCOPE_VAR_DEFINE
+    # cleanup-attribute macro (not called directly by name anywhere in the
+    # file), showing the operator's plain-function-fallback match still
+    # works when the call site is behind an RAII-style indirection, not
+    # just a directly-spawned thread entry (parts 37/44's prior 2 double-
+    # free function-shape instances).
+    {
+        "id_suffix": "kernel_cleanup_foo_destructor_double_free",
+        "category": "runtime_crash",
+        "target_file": "tests/kernel/cleanup/src/main.c",
+        "operator": "runtime_double_free:foo_destructor:k_free(f.buf);",
+        "target_app": "tests/kernel/cleanup",
+        "board": "native_sim",
+    },
 ]
 
 
