@@ -4582,6 +4582,30 @@ INJECTION_CATALOG = [
         "target_app": "tests/lib/multi_heap",
         "board": "native_sim",
     },
+    # Session 46 part 44 (dilution round 12, same session): 2 dts
+    # entries via dts_break_phandle on the "aliases { X = &X; }"
+    # self-referencing alias pattern shared by biometrics_emul's and
+    # gnss_emul's overlays — a genuinely different failure mechanism
+    # (DT_ALIAS resolution/undefined node label) from the
+    # dts_remove_compatible cases used elsewhere, on the same 2 apps
+    # already used for this session's GNSS_EMUL/BIOMETRICS_EMUL kconfig
+    # cases (different mechanism, not a repeat).
+    {
+        "id_suffix": "biometrics_emul_alias_break",
+        "category": "dts",
+        "target_file": "tests/drivers/biometrics/biometrics_emul/app.overlay",
+        "operator": "dts_break_phandle:biometrics",
+        "target_app": "tests/drivers/biometrics/biometrics_emul",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "gnss_emul_alias_break",
+        "category": "dts",
+        "target_file": "tests/drivers/gnss/gnss_emul/app.overlay",
+        "operator": "dts_break_phandle:gnss",
+        "target_app": "tests/drivers/gnss/gnss_emul",
+        "board": "native_sim",
+    },
 ]
 
 
