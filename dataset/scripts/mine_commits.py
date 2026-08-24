@@ -4559,6 +4559,29 @@ INJECTION_CATALOG = [
         "target_app": "tests/lib/heap_kasan",
         "board": "native_sim",
     },
+    # Session 46 part 44 (dilution round 11, same session): 2 more
+    # c_remove_closing_brace entries, 1 on a brand-new app
+    # (tests/lib/net_buf/buf) and 1 on a second, distinct source file
+    # within an already-used target_app (tests/lib/multi_heap's
+    # test_mheap_concept.c, alongside test_mheap_api.c's existing
+    # runtime_double_free case) — a legitimately different mutation on a
+    # different file, not a repeat.
+    {
+        "id_suffix": "net_buf_brace",
+        "category": "c_syntax",
+        "target_file": "tests/lib/net_buf/buf/src/main.c",
+        "operator": "c_remove_closing_brace",
+        "target_app": "tests/lib/net_buf/buf",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "multi_heap_concept_brace",
+        "category": "c_syntax",
+        "target_file": "tests/lib/multi_heap/src/test_mheap_concept.c",
+        "operator": "c_remove_closing_brace",
+        "target_app": "tests/lib/multi_heap",
+        "board": "native_sim",
+    },
 ]
 
 
