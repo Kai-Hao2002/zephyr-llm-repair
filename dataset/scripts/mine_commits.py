@@ -4392,6 +4392,31 @@ INJECTION_CATALOG = [
         "target_app": "tests/lib/devicetree/api",
         "board": "native_sim",
     },
+    # Session 46 part 44 (dilution round 2, same session): 2 more fresh
+    # *_EMUL Kconfig files, same proven "depends on DT_HAS_ZEPHYR_..._ENABLED"
+    # shape as ADC_EMUL/DAC_EMUL/DMA_EMUL/ESPI_EMUL/I2C_EMUL/RTC_EMUL — each
+    # test app's own DEVICE_DT_GET(...) at file scope requires the driver's
+    # ordinal-based device struct to link, which the source-gated .c file
+    # (zephyr_library_sources_ifdef(CONFIG_X_EMUL ...)) never produces once
+    # its Kconfig becomes unsatisfiable. Both confirmed genuine "undefined
+    # reference to `__device_dts_ord_N`" link errors, not fallback/generic
+    # failures.
+    {
+        "id_suffix": "bbram_emul_depends",
+        "category": "kconfig",
+        "target_file": "drivers/bbram/Kconfig.bbram_emul",
+        "operator": "kconfig_invert_depends:BBRAM_EMUL",
+        "target_app": "tests/drivers/bbram/emul",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "biometrics_emul_depends",
+        "category": "kconfig",
+        "target_file": "drivers/biometrics/Kconfig.emul",
+        "operator": "kconfig_invert_depends:BIOMETRICS_EMUL",
+        "target_app": "tests/drivers/biometrics/biometrics_emul",
+        "board": "native_sim",
+    },
 ]
 
 
