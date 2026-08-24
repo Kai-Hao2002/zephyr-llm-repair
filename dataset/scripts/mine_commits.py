@@ -91,6 +91,47 @@ BOARD_PATH_RE = re.compile(r"boards/[^/]+/([^/]+)/")
 # content against this commit rather than defaulting back to the original.
 SECOND_BASELINE_COMMIT = "4b02c5d60ae620fb23cbea58516e3ea7388c2f75"
 
+# Session 46 part 44: 第三個 pinned baseline commit，延續 part 32/43 緩解單一
+# baseline commit集中度的手法。2026-03-20，比 SECOND_BASELINE_COMMIT
+# (2026-05-14) 早約 55 天、比主要共用的 bc460feabe7038dc876782557e39be791d6c24e9
+# (2026-07-25) 早約 127 天，拉開的時間跨度比現有兩個 pin 之間的間距更大。
+#
+# 選定過程踩到一個值得記錄的坑：原本先選的 2026-03-04 候選
+# (014b2db1f753764b69970eb13c5a722b525c96ec) 在乾淨度 probe 就被攔下來
+# ——`find_package(Zephyr-sdk 0.16)`，跟 zephyr-sandbox image 裝的 SDK 1.0.1
+# 不相容。追出根因：commit d204d2487697b1db7a6e67ed961f522162c80324
+# (2026-03-17) 把最低 SDK 需求拉到 1.0，所以改選 3 天後、需求已經是
+# `Zephyr-sdk 1.0` 的這個 commit。往前選第三個 pin 時若還要更早的日期，
+# 記得先確認同樣的 SDK 版本邊界。
+#
+# 已驗證：west update + samples/hello_world build+boot 乾淨 (真實 boot
+# banner v4.3.0-9263-g5286027c8594)。用法跟 SECOND_BASELINE_COMMIT 完全
+# 相同——entry 上加 "baseline_commit": THIRD_BASELINE_COMMIT 即可覆蓋預設的
+# main tip。
+#
+# Session 46 part 44: a third pinned baseline commit, continuing the
+# part-32/43 pattern of mitigating single-baseline-commit concentration.
+# 2026-03-20, ~55 days before SECOND_BASELINE_COMMIT (2026-05-14) and ~127
+# days before the primary shared commit
+# bc460feabe7038dc876782557e39be791d6c24e9 (2026-07-25) — a wider spread than
+# the gap between the two existing pins.
+#
+# Selection hit a real, worth-documenting dead end: the first candidate
+# picked, 2026-03-04 (014b2db1f753764b69970eb13c5a722b525c96ec), failed the
+# clean-baseline probe outright — `find_package(Zephyr-sdk 0.16)`,
+# incompatible with the zephyr-sandbox image's installed SDK 1.0.1. Root
+# cause traced to commit d204d2487697b1db7a6e67ed961f522162c80324
+# (2026-03-17), which bumped the minimum required SDK to 1.0 — so the
+# commit 3 days later, already requiring `Zephyr-sdk 1.0`, was picked
+# instead. Any future pin picked even earlier than this one should re-check
+# the same SDK-version boundary first.
+#
+# Verified clean: west update + samples/hello_world build+boot succeeded
+# (real boot banner v4.3.0-9263-g5286027c8594). Used exactly like
+# SECOND_BASELINE_COMMIT — add "baseline_commit": THIRD_BASELINE_COMMIT to
+# an entry to override the default main-tip resolution.
+THIRD_BASELINE_COMMIT = "5286027c85945d043a814d2d1783b3e935e5256e"
+
 INJECTION_CATALOG = [
     # --- Kconfig Dependency and Configuration Conflicts ---
     # 兩次都失敗的教訓：console 相關的 Kconfig 符號 (lib/libc/Kconfig 的
@@ -4225,6 +4266,131 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/mgmt/mcumgr/enum_mgmt",
         "board": "native_sim",
         "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
+    # Session 46 part 44: THIRD_BASELINE_COMMIT's first 4 entries — same
+    # discipline as part 43's SECOND_BASELINE_COMMIT scale-up (reuse
+    # already-long-proven mutation/target/operator combinations unchanged,
+    # spanning 4 different categories), just against the new third pin.
+    # Each target file's exact mutated text confirmed present verbatim on
+    # THIRD_BASELINE_COMMIT before spending Docker time. All 4 passed the
+    # real gate on the first attempt.
+    {
+        "id_suffix": "kconfig_img_manager_depends_baseline3",
+        "category": "kconfig",
+        "target_file": "subsys/dfu/Kconfig",
+        "operator": "kconfig_invert_depends:MCUBOOT_IMG_MANAGER",
+        "target_app": "tests/subsys/dfu/img_util",
+        "board": "native_sim",
+        "baseline_commit": THIRD_BASELINE_COMMIT,
+    },
+    {
+        "id_suffix": "dts_power_domain_test_domain_compatible_baseline3",
+        "category": "dts",
+        "target_file": "tests/subsys/pm/power_domain/app.overlay",
+        "operator": "dts_remove_compatible",
+        "target_app": "tests/subsys/pm/power_domain",
+        "board": "native_sim",
+        "baseline_commit": THIRD_BASELINE_COMMIT,
+    },
+    {
+        "id_suffix": "c_hello_world_brace_baseline3",
+        "category": "c_syntax",
+        "target_file": "samples/hello_world/src/main.c",
+        "operator": "c_remove_closing_brace",
+        "target_app": "samples/hello_world",
+        "board": "native_sim",
+        "baseline_commit": THIRD_BASELINE_COMMIT,
+    },
+    {
+        "id_suffix": "runtime_sem_offbyone_baseline3",
+        "category": "runtime_crash",
+        "target_file": "kernel/sem.c",
+        "operator": "runtime_off_by_one:sem->count != sem->limit:sem->count != sem->limit + 1",
+        "target_app": "tests/kernel/semaphore/semaphore",
+        "board": "native_sim",
+        "baseline_commit": THIRD_BASELINE_COMMIT,
+    },
+    # Session 46 part 44 (continued, same session): first round of post-
+    # part-44 scaling toward the 150-case stop-loss, prioritizing the
+    # standing backlog — runtime_crash's 4-operator concentration and
+    # compound subtype 2's dts_swap_phandle_pair. All on the primary shared
+    # baseline commit (bc460feabe7038dc876782557e39be791d6c24e9).
+    #
+    # tests/lib/multi_heap/src/test_mheap_api.c's malloc_free_handler()
+    # (found via _find_ztest_block's plain-function fallback, spawned as a
+    # thread by ZTEST(mheap_api, test_mheap_malloc_free)) allocates
+    # BLK_NUM_MAX*2 blocks via k_malloc in a loop, then frees each one via
+    # k_free(block[i]) in a second loop — duplicating that literal call
+    # means every loop iteration frees the same block[i] twice in a row
+    # (not two calls freeing two different iterations' pointers), a clean
+    # double free via the same SYS_HEAP_HARDENING_BASIC->k_panic()
+    # mechanism as parts 37-38's cases. Confirmed CONFIG_SYS_HEAP_HARDENING
+    # defaults to at least "Basic" regardless of CONFIG_ASSERT (choice
+    # default is MODERATE if ASSERT else BASIC, both >=1), so this doesn't
+    # depend on this app's prj.conf setting ASSERT explicitly.
+    {
+        "id_suffix": "multi_heap_malloc_free_double_free",
+        "category": "runtime_crash",
+        "target_file": "tests/lib/multi_heap/src/test_mheap_api.c",
+        "operator": "runtime_double_free:malloc_free_handler:k_free(block[i]);",
+        "target_app": "tests/lib/multi_heap",
+        "board": "native_sim",
+    },
+    # tests/subsys/portability/cmsis_rtos_v2/src/thread_apis.c's thread2()
+    # (a CMSIS thread entry function, same plain-function-fallback shape as
+    # the posix/key.c case) allocates a thread-ID array via k_calloc
+    # (routes through the same sys_heap allocator as k_malloc) and frees it
+    # once via k_free(thread_array) with no reassignment before the
+    # function returns — same double-free mechanism, third distinct
+    # app/function shape for this operator.
+    {
+        "id_suffix": "cmsis_thread2_double_free",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/portability/cmsis_rtos_v2/src/thread_apis.c",
+        "operator": "runtime_double_free:thread2:k_free(thread_array);",
+        "target_app": "tests/subsys/portability/cmsis_rtos_v2",
+        "board": "native_sim",
+    },
+    # tests/subsys/settings/src/settings_test_getset_int.c's
+    # test_config_getset_int ZTEST declares `char name[80];` and writes it
+    # twice via `strcpy(name, "myfoo/mybar");` — a fixed 12-byte (incl. NUL)
+    # literal totally independent of the array's declared size, so
+    # shrinking just the declaration to 4 guarantees overflow on the first
+    # strcpy. This source file is shared (via `add_subdirectory` +
+    # `FILE(GLOB ...)`) across several settings test variants; landed
+    # specifically on tests/subsys/settings/file, whose tests.yaml allows
+    # native_sim. Same glibc _FORTIFY_SOURCE mechanism as parts 37-38's
+    # buffer_shrink cases.
+    {
+        "id_suffix": "settings_getset_int_name_buffer_shrink",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/settings/src/settings_test_getset_int.c",
+        "operator": "runtime_buffer_shrink:char name[80];:char name[4];",
+        "target_app": "tests/subsys/settings/file",
+        "board": "native_sim",
+    },
+    # tests/lib/devicetree/api/app.overlay's test_temp_sensor node has a
+    # `pinctrl-1 = <&test_pincfg_c &test_pincfg_d>;` property that parts
+    # 40-41 didn't touch (they used io-channels/dmas/pinctrl-0 in the same
+    # file). Both labels are single-occurrence-before-this-property (
+    # test_pincfg_d's only other reference, in pinctrl-2, comes after), so
+    # the default #1 occurrence for each hits the intended pair. The test
+    # file's assertions (both DT_PINCTRL_BY_IDX/BY_NAME node_id and
+    # DT_INST_* variants) compare against DT_NODELABEL(test_pincfg_c)/
+    # DT_NODELABEL(test_pincfg_d) directly — an external, fixed expectation
+    # independent of the swapped nodes themselves — so the swap survives
+    # self-consistency the same way as the 4 existing dts_swap_phandle_pair
+    # cases. 5th instance of this operator, 4th within this same rich
+    # fixture file (noted in part 42's audit as file-level, not content-
+    # level, concentration — 3 different unrelated DT property shapes, now
+    # 4).
+    {
+        "id_suffix": "devicetree_api_pinctrl1_swap",
+        "category": "compound",
+        "target_file": "tests/lib/devicetree/api/app.overlay",
+        "operator": "dts_swap_phandle_pair:test_pincfg_c:test_pincfg_d",
+        "target_app": "tests/lib/devicetree/api",
+        "board": "native_sim",
     },
 ]
 
