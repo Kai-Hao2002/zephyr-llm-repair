@@ -4515,6 +4515,29 @@ INJECTION_CATALOG = [
         "target_app": "tests/lib/cbprintf_package",
         "board": "native_sim",
     },
+    # Session 46 part 44 (dilution round 8-9, same session): 2 more *_EMUL
+    # kconfig attempts. UART_EMUL (drivers/serial/Kconfig.emul,
+    # tests/drivers/uart/uart_emul) was correctly rejected — even the
+    # *reverted* baseline fails to build for this specific test app at the
+    # primary pin, because its default variant needs an extra
+    # DTC_OVERLAY_FILE="uart_emul.overlay" build argument
+    # (tests.yaml's extra_args) that the injection pipeline's plain
+    # `west build -b {board} -p always -t run` doesn't pass — an
+    # infrastructure limitation of this one test app, not a bug in the
+    # mutation or a real dead end worth recording as a catalog entry.
+    # GNSS_EMUL (drivers/gnss/Kconfig.emul,
+    # tests/drivers/gnss/gnss_emul) passed cleanly — unrelated to session
+    # 37's ruled-out gnss_emul.c investigation, which was hunting a
+    # runtime_off_by_one bug in the driver's own source logic, a
+    # completely different operator/target.
+    {
+        "id_suffix": "gnss_emul_depends",
+        "category": "kconfig",
+        "target_file": "drivers/gnss/Kconfig.emul",
+        "operator": "kconfig_invert_depends:GNSS_EMUL",
+        "target_app": "tests/drivers/gnss/gnss_emul",
+        "board": "native_sim",
+    },
 ]
 
 
