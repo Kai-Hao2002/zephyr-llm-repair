@@ -4447,6 +4447,19 @@ INJECTION_CATALOG = [
         ],
         "baseline_commit": THIRD_BASELINE_COMMIT,
     },
+    # Session 46 part 44 (dilution round 4, same session): GPIO_EMUL, the
+    # same proven Kconfig shape as the 9 other *_EMUL cases, landed on a
+    # target_app (tests/drivers/gpio/gpio_get_direction) different from
+    # gpio_emul.c's existing runtime_remove_null_check case (a different
+    # target_app entirely) — same driver family, different bug/mechanism.
+    {
+        "id_suffix": "gpio_emul_depends",
+        "category": "kconfig",
+        "target_file": "drivers/gpio/Kconfig.emul",
+        "operator": "kconfig_invert_depends:GPIO_EMUL",
+        "target_app": "tests/drivers/gpio/gpio_get_direction",
+        "board": "native_sim",
+    },
 ]
 
 
