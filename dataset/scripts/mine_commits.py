@@ -4624,6 +4624,28 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/queue",
         "board": "native_sim",
     },
+    # Session 46 part 44 (dilution round 14, same session): final 2
+    # entries closing the gap to the 150-case stop-loss. Both
+    # c_remove_closing_brace on fresh source files within already-used-
+    # elsewhere target_apps (msgq_api/mutex_api both have existing
+    # c_api_substitute cases on *different* source files — main.c and
+    # complex_inversion.c here are new, distinct targets).
+    {
+        "id_suffix": "msgq_api_brace",
+        "category": "c_syntax",
+        "target_file": "tests/kernel/msgq/msgq_api/src/main.c",
+        "operator": "c_remove_closing_brace",
+        "target_app": "tests/kernel/msgq/msgq_api",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "mutex_api_complex_inversion_brace",
+        "category": "c_syntax",
+        "target_file": "tests/kernel/mutex/mutex_api/src/complex_inversion.c",
+        "operator": "c_remove_closing_brace",
+        "target_app": "tests/kernel/mutex/mutex_api",
+        "board": "native_sim",
+    },
 ]
 
 
