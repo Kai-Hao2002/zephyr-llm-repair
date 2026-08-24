@@ -4606,6 +4606,24 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/gnss/gnss_emul",
         "board": "native_sim",
     },
+    # Session 46 part 44 (dilution round 13, same session): 2 more
+    # c_remove_closing_brace entries on fresh native_sim apps.
+    {
+        "id_suffix": "timer_api_brace",
+        "category": "c_syntax",
+        "target_file": "tests/kernel/timer/timer_api/src/main.c",
+        "operator": "c_remove_closing_brace",
+        "target_app": "tests/kernel/timer/timer_api",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "kernel_queue_brace",
+        "category": "c_syntax",
+        "target_file": "tests/kernel/queue/src/main.c",
+        "operator": "c_remove_closing_brace",
+        "target_app": "tests/kernel/queue",
+        "board": "native_sim",
+    },
 ]
 
 
