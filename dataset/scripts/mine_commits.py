@@ -4476,6 +4476,25 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/cleanup",
         "board": "native_sim",
     },
+    # Session 46 part 44 (dilution round 6, same session): 4th instance of
+    # runtime_double_free — tests/subsys/mgmt/mcumgr/os_mgmt_mpstat's
+    # cleanup_test() ztest "after" fixture hook duplicates
+    # free(malloc_test_object). Interesting mechanism twist: unlike this
+    # session's other 3 double-free cases, this build routes libc free()
+    # through Zephyr's own sys_heap (not host glibc directly) — the log
+    # shows "os_heap: heap corruption (double free?)" -> "ZEPHYR FATAL
+    # ERROR 4: Kernel panic", the exact same SYS_HEAP_HARDENING_BASIC
+    # detection mechanism as the k_malloc/k_free-based cases, just reached
+    # via free() instead. Confirms this app's libc config doesn't bypass
+    # to raw host malloc the way native_sim sometimes does.
+    {
+        "id_suffix": "os_mgmt_mpstat_cleanup_double_free",
+        "category": "runtime_crash",
+        "target_file": "tests/subsys/mgmt/mcumgr/os_mgmt_mpstat/src/main.c",
+        "operator": "runtime_double_free:cleanup_test:free(malloc_test_object);",
+        "target_app": "tests/subsys/mgmt/mcumgr/os_mgmt_mpstat",
+        "board": "native_sim",
+    },
 ]
 
 
