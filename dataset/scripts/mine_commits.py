@@ -4417,6 +4417,36 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/biometrics/biometrics_emul",
         "board": "native_sim",
     },
+    # Session 46 part 44 (dilution round 3, same session): neither
+    # SECOND_BASELINE_COMMIT nor THIRD_BASELINE_COMMIT had a single compound
+    # case yet — ported 2 already-proven compound (kconfig+dts) cases,
+    # confirming each's exact mutated text still present verbatim first.
+    # Only 1/2 actually landed: I2C_EMUL's port to SECOND_BASELINE_COMMIT
+    # was correctly rejected by the two-sided gate — the *reverted* build
+    # hit a genuine, pre-existing i2c_emul test failure
+    # (test_failed_read_request assertion) unrelated to the mutation,
+    # meaning that specific test suite isn't clean at that historical
+    # commit. Not a methodology bug — the gate did exactly its job,
+    # discarding a candidate/pin combination that doesn't actually work,
+    # the same way it discards mined candidates. DAC_EMUL's port to
+    # THIRD_BASELINE_COMMIT passed cleanly on the first attempt.
+    {
+        "id_suffix": "compound_dac_emul_kconfig_dts_baseline3",
+        "category": "compound",
+        "target_app": "tests/drivers/dac/dac_emul",
+        "board": "native_sim",
+        "injections": [
+            {
+                "target_file": "drivers/dac/Kconfig.dac_emul",
+                "operator": "kconfig_invert_depends:DAC_EMUL",
+            },
+            {
+                "target_file": "tests/drivers/dac/dac_emul/boards/native_sim.overlay",
+                "operator": "dts_remove_compatible:zephyr,dac-emul",
+            },
+        ],
+        "baseline_commit": THIRD_BASELINE_COMMIT,
+    },
 ]
 
 
