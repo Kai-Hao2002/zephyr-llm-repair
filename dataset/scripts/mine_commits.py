@@ -4495,6 +4495,26 @@ INJECTION_CATALOG = [
         "target_app": "tests/subsys/mgmt/mcumgr/os_mgmt_mpstat",
         "board": "native_sim",
     },
+    # Session 46 part 44 (dilution round 7, same session): 3rd instance of
+    # runtime_buffer_shrink — tests/lib/cbprintf_package's file-scope
+    # `static char compare_buf[128];`, written via
+    # `strcpy(compare_buf, exp_str)` where exp_str is a caller-supplied
+    # test-expectation string, independent of the buffer's own declared
+    # size. Interesting mechanism twist vs. this session's other 2
+    # buffer_shrink cases: instead of glibc FORTIFY_SOURCE aborting
+    # immediately, the overflow silently corrupts adjacent memory and the
+    # *test's own* strcmp(buf->buf, compare_buf) assertion catches the
+    # resulting wrong value — a genuinely different observable failure
+    # shape (silent corruption -> wrong-value assertion) from the same
+    # underlying bug class.
+    {
+        "id_suffix": "cbprintf_package_compare_buf_shrink",
+        "category": "runtime_crash",
+        "target_file": "tests/lib/cbprintf_package/src/main.c",
+        "operator": "runtime_buffer_shrink:static char compare_buf[128];:static char compare_buf[4];",
+        "target_app": "tests/lib/cbprintf_package",
+        "board": "native_sim",
+    },
 ]
 
 
