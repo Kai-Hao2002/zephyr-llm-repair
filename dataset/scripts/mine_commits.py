@@ -4538,6 +4538,27 @@ INJECTION_CATALOG = [
         "target_app": "tests/drivers/gnss/gnss_emul",
         "board": "native_sim",
     },
+    # Session 46 part 44 (dilution round 10, same session): 2 fresh
+    # c_syntax entries via the generic, near-100%-reliable
+    # c_remove_closing_brace operator (deletes the file's last standalone
+    # '}' line — works on virtually any valid C file) on brand-new
+    # native_sim apps.
+    {
+        "id_suffix": "ringbuffer_brace",
+        "category": "c_syntax",
+        "target_file": "tests/lib/ringbuffer/src/main.c",
+        "operator": "c_remove_closing_brace",
+        "target_app": "tests/lib/ringbuffer",
+        "board": "native_sim",
+    },
+    {
+        "id_suffix": "heap_kasan_brace",
+        "category": "c_syntax",
+        "target_file": "tests/lib/heap_kasan/src/main.c",
+        "operator": "c_remove_closing_brace",
+        "target_app": "tests/lib/heap_kasan",
+        "board": "native_sim",
+    },
 ]
 
 
