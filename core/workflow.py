@@ -62,6 +62,36 @@ def analyzer_node(state: ZephyrAgentState) -> Dict[str, Any]:
         "messages": [f"Analyzer 診斷 ({result.error_category}): {result.reasoning}"]
     }
 
+def build_devops_docker_cmd(workspace_path: str, board: str, target_app: str) -> str:
+    """
+    組出 DevOps Expert 用來建置/執行一個案例的 docker 指令。抽成獨立函式，
+    讓 evaluate.py 準備好 workspace 之後，可以用完全相同的指令先做一次
+    「重現初始失敗」的驗收檢查，而不是各自維護一份容易漂移的複製字串。
+
+    掛載點必須是 /zephyrproject/zephyr，不能是 /workspace：見 devops_node
+    內的說明——映像檔的 ZEPHYR_BASE 環境變數在建置當下就烤死指向
+    /zephyrproject/zephyr，掛在別的路徑會讓 west build 實際上去用容器內建、
+    從未被我們修改過的那份 Zephyr 原始碼。
+
+    Builds the docker command the DevOps Expert uses to build/run a case.
+    Factored out so evaluate.py can run the exact same command as a
+    "reproduces the initial failure" sanity check right after preparing a
+    workspace, instead of maintaining a second, driftable copy of this
+    string.
+
+    The mount point must be /zephyrproject/zephyr, not /workspace — see the
+    comment inside devops_node: the image bakes ZEPHYR_BASE to point at
+    /zephyrproject/zephyr at build time, so mounting anywhere else makes
+    west build actually use the container's stock, never-modified Zephyr
+    source.
+    """
+    return (
+        f"docker run --rm -i -v {os.path.abspath(workspace_path)}:/zephyrproject/zephyr:ro "
+        f"-w /zephyrproject/zephyr/{target_app} zephyr-sandbox "
+        f"bash -c 'west build -b {board} -d /tmp/build -p always -t run .'"
+    )
+
+
 def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     print("\n🛠️ [LLM Patch] 正在生成精確修補區塊...")
     
@@ -178,14 +208,22 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
     target_app = state.get("target_app", ".")
     required_pass_test = state.get("required_pass_test")
 
-    docker_cmd = (
-        f"docker run --rm -i -v {os.path.abspath(workspace_path)}:/workspace:ro "
-        f"-w /workspace/{target_app} zephyr-sandbox "
-        f"bash -c 'west build -b {board} -d /tmp/build -p always -t run .'"
-    )
+    # 見 build_devops_docker_cmd 的說明：掛載點必須是 /zephyrproject/zephyr。
+    # See build_devops_docker_cmd's docstring: the mount point must be
+    # /zephyrproject/zephyr.
+    docker_cmd = build_devops_docker_cmd(workspace_path, board, target_app)
 
     print("   🔨 開始在隔離容器中編譯並執行 QEMU...")
-    oracle = QemuOracle(timeout=15)
+    # timeout=15 對一次真正的 west build (可能要編譯 Zephyr kernel + app)
+    # 來說遠遠不夠，幾乎每次都會提早 timeout，把任何案例都誤判為建置卡住
+    # ——FaultInjector 驗證資料集時本來就是用 600s (tools/fault_injector.py)，
+    # 這裡跟著對齊，而不是沿用 QemuOracle 建構子預設值 15。
+    # timeout=15 is far too short for an actual west build (which may need
+    # to compile the Zephyr kernel plus the app) — nearly every run would
+    # time out early and get misclassified as stuck. FaultInjector already
+    # uses 600s to verify this dataset (tools/fault_injector.py); align
+    # with that instead of QemuOracle's constructor default of 15.
+    oracle = QemuOracle(timeout=600)
     eval_result = oracle.evaluate(docker_cmd, required_pass_test=required_pass_test)
 
     if eval_result["status"] == "missing_required_test":
