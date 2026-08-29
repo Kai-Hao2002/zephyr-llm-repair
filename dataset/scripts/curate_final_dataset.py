@@ -56,7 +56,19 @@ def main():
     with open(DATASET_PATH, encoding="utf-8") as f:
         data = json.load(f)
 
-    final = [c for c in data if c["id"] not in EXCLUDE_IDS]
+    # 論文方法論決定：Zephyr-Eval 以「純注入」作為唯一建構方式（見 thesis
+    # proposal「Mined versus Injected Faults」一節），挖礦案例（id 前綴
+    # "bug_"）因此不列入最終資料集——這是方法論範圍決定，不是這些案例本身
+    # 品質有問題；它們仍完整保留在 verified_zephyr_bugs.json 這個完整驗證池
+    # 裡，供未來如果決定要做額外的 real-world generalization check 使用。
+    # Thesis methodology decision: Zephyr-Eval uses injection as the sole
+    # construction method (see the proposal's "Mined versus Injected Faults"
+    # section), so mined cases (id prefix "bug_") are excluded from the final
+    # dataset -- a scope decision, not a quality judgment on those cases.
+    # They remain fully intact in verified_zephyr_bugs.json, the full
+    # verification pool, in case a future real-world generalization check is
+    # ever wanted.
+    final = [c for c in data if c["id"] not in EXCLUDE_IDS and not c["id"].startswith("bug_")]
 
     print(f"Base pool: {len(data)}, excluded: {len(EXCLUDE_IDS)}, kept: {len(final)}")
     print("Final category distribution:", dict(Counter(c["category"] for c in final)))
