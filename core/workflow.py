@@ -1,5 +1,6 @@
 # core/workflow.py
 import os
+import re
 import logging
 from typing import Dict, Any, List
 from pydantic import BaseModel, Field
@@ -84,48 +85,165 @@ def build_devops_docker_cmd(workspace_path: str, board: str, target_app: str) ->
     /zephyrproject/zephyr at build time, so mounting anywhere else makes
     west build actually use the container's stock, never-modified Zephyr
     source.
+
+    掛載必須可寫 (不能帶 :ro)：CMake 的 toolchain capability 檢查
+    (extensions.cmake 的 zephyr_check_compiler_flag) 會把快取寫進
+    <zephyr>/.cache/ToolchainCapabilityDatabase/ ——這個目錄在原始碼樹
+    裡面，不是獨立的 build 目錄。掛成唯讀時，west build 在真正編譯到
+    app 原始碼之前就會先在這一步失敗 (`file failed to open for writing`)，
+    產生的失敗特徵跟 eof_no_boot 這個狀態桶完全一樣，會把「真正的注入
+    bug 造成的建置失敗」跟「這個純粹的掛載寫入權限問題」混為一談 (實測
+    2026-08-30：inject_c_hello_world_brace 的初始重現檢查一路回報
+    eof_no_boot，表面上跟資料集記錄的預期值吻合，但拿掉 :ro 重測後才發現
+    先前每一次其實都是卡在這裡，從未真正編譯到那個少一個大括號的
+    main.c)。PatchApplier 本來就是在 docker 外面直接寫 host 檔案系統，
+    :ro 從未真正提供任何隔離保護，只是讓 CMake 自己的快取寫入失敗；拿掉
+    它才會跟 FaultInjector 驗證資料集時 (容器原生、可寫的檔案系統) 的
+    建置行為一致。
+
+    The mount must be writable (no :ro): CMake's toolchain-capability check
+    (extensions.cmake's zephyr_check_compiler_flag) writes its cache into
+    <zephyr>/.cache/ToolchainCapabilityDatabase/ — inside the source tree,
+    not a separate build directory. Mounted read-only, west build fails at
+    this step (`file failed to open for writing`) before ever reaching the
+    app's own source — and that failure lands in the exact same
+    "eof_no_boot" bucket as a genuine build-time bug, conflating "the
+    injected bug actually broke the build" with "this mount is merely
+    read-only" (confirmed 2026-08-30: inject_c_hello_world_brace's initial
+    repro-check kept reporting eof_no_boot, superficially matching the
+    dataset's recorded expected value, but re-testing without :ro revealed
+    every prior run had actually been stuck here the whole time, never once
+    reaching the real missing-brace bug in main.c). PatchApplier already
+    writes directly to the host filesystem outside docker, so :ro was never
+    providing real isolation — only breaking CMake's own cache writes;
+    dropping it matches the writable, native container filesystem
+    FaultInjector actually verified this dataset against.
     """
     return (
-        f"docker run --rm -i -v {os.path.abspath(workspace_path)}:/zephyrproject/zephyr:ro "
+        f"docker run --rm -i -v {os.path.abspath(workspace_path)}:/zephyrproject/zephyr "
         f"-w /zephyrproject/zephyr/{target_app} zephyr-sandbox "
         f"bash -c 'west build -b {board} -d /tmp/build -p always -t run .'"
     )
 
 
+_LOG_PATH_PREFIX = "/zephyrproject/zephyr/"
+_LOG_EXT_PATH_RE = re.compile(re.escape(_LOG_PATH_PREFIX) + r"([\w\-./]+\.(?:c|h|conf|dts|dtsi|overlay))\b")
+_LOG_KCONFIG_PATH_RE = re.compile(re.escape(_LOG_PATH_PREFIX) + r"([\w\-./]+/Kconfig(?:\.\w+)?)\b")
+
+# 若比對出來的檔案總大小仍然偏大 (例如 target_app 本身就是個檔案很多的大型
+# app)，設一個保守上限並截斷，寧可讓 Patch 用不完整的上下文重試，也不要
+# 重演「整棵 zephyr 樹被塞進單一次呼叫、直接打穿供應商配額」的事故 (見
+# _collect_relevant_context_paths 的說明)。
+# If the matched files' total size is still large (e.g. target_app itself
+# happens to be a big app with many files), cap it and truncate rather than
+# risk repeating the "the whole zephyr tree in one call" quota-blowing
+# incident (see _collect_relevant_context_paths's docstring).
+_MAX_PATCH_CONTEXT_CHARS = 300_000
+
+
+def _is_context_source_file(filename: str) -> bool:
+    # 讀取 C 原始碼、設定檔，以及 Kconfig/DTS 檔案——後者原本被漏掉，導致
+    # 這個 pipeline 結構性地看不到、修不了 kconfig/dts/compound 類別的
+    # 資料集案例 (無論底層 LLM 能力如何)，見 part 27 稽核 finding 5。
+    # Kconfig 檔案本身通常沒有副檔名 (檔名就是 "Kconfig" 或
+    # "Kconfig.<driver>")，DTS 則用 .dts/.dtsi/.overlay。
+    # Also read Kconfig/DTS files — previously missing, which made this
+    # pipeline structurally blind to (and incapable of fixing)
+    # kconfig/dts/compound-category dataset cases regardless of the
+    # underlying LLM's ability; see part 27 audit finding 5. Kconfig files
+    # themselves usually have no extension (named "Kconfig" or
+    # "Kconfig.<driver>"); DTS uses .dts/.dtsi/.overlay.
+    return (filename.endswith(".c") or filename.endswith(".conf") or filename == "CMakeLists.txt"
+            or filename == "Kconfig" or filename.startswith("Kconfig.")
+            or filename.endswith((".dts", ".dtsi", ".overlay")))
+
+
+def _collect_relevant_context_paths(workspace_path: str, target_app: str, error_log: str) -> List[str]:
+    """
+    決定要餵給 Patch LLM 哪些檔案的內容——不能再像過去那樣 os.walk 整個
+    workspace_path：workspace_path 現在是完整的 Zephyr checkout (見
+    build_devops_docker_cmd 的說明)，對真實資料集案例來說是 3.7 萬個檔案、
+    11MB+ 文字，單一次呼叫就會打穿 LLM 供應商的 token 配額 (2026-08-30 實測：
+    inject_c_hello_world_brace 這種最簡單的案例都能把免費層 2,000,000
+    token/分鐘的額度直接打爆)。
+
+    改成只收兩種來源：
+    1. current_error_log 裡明確以 /zephyrproject/zephyr/... 開頭提到的檔案
+       路徑 (編譯期錯誤 — c_syntax/kconfig/dts 這幾類 — gcc/CMake 的診斷
+       訊息一定會用容器內的絕對路徑指出出錯的檔案)。
+    2. target_app 目錄本身 (含子目錄) 底下的原始碼/設定檔——通常是個位數
+       到幾十個檔案，遠比整棵樹小得多。
+
+    對 runtime_crash 這類日誌只有 "Segmentation fault" 之類崩潰特徵、完全
+    沒有檔案路徑可循的案例，這兩種來源仍然定位不到真正該修的檔案 (通常在
+    target_app 之外的 drivers/subsys 裡)——這需要真正的檢索 (Knowledge
+    Expert 的圖譜、未來的 Hybrid RAG) 才能解決，不是這裡要處理的範圍。
+
+    Decides which files' content to feed the Patch LLM — can no longer
+    os.walk the entire workspace_path like before: workspace_path is now a
+    full Zephyr checkout (see build_devops_docker_cmd's docstring), which
+    for a real dataset case means ~38k files / 11MB+ of text, enough to
+    blow through an LLM provider's token quota in a single call (confirmed
+    2026-08-30: even the simplest case, inject_c_hello_world_brace, maxed
+    out the free tier's 2,000,000 tokens/minute limit outright).
+
+    Now sourced from just two places:
+    1. File paths explicitly mentioned in current_error_log as
+       /zephyrproject/zephyr/... (build-time errors — c_syntax/kconfig/dts
+       — gcc/CMake diagnostics always cite the failing file by its absolute
+       in-container path).
+    2. target_app's own directory tree — typically single digits to a few
+       dozen files, far smaller than the whole tree.
+
+    For runtime_crash-category cases whose log is just a crash signature
+    ("Segmentation fault") with no file path to go on, neither source can
+    locate the actual file to fix (usually outside target_app, in
+    drivers/subsys) — that needs real retrieval (Knowledge Expert's graph,
+    eventually Hybrid RAG), out of scope here.
+    """
+    candidates = set()
+    candidates.update(_LOG_EXT_PATH_RE.findall(error_log))
+    candidates.update(_LOG_KCONFIG_PATH_RE.findall(error_log))
+
+    target_app_dir = os.path.join(workspace_path, target_app)
+    if os.path.isdir(target_app_dir):
+        for root, dirs, files in os.walk(target_app_dir):
+            for file in files:
+                if _is_context_source_file(file):
+                    candidates.add(os.path.relpath(os.path.join(root, file), workspace_path))
+
+    # 只留下真的存在於這次 workspace 裡的路徑 (日誌裡提到的路徑可能因為
+    # 之前的 patch 已經被改名/刪除)。
+    # Only keep paths that genuinely exist in this workspace (a log-cited
+    # path may have been renamed/deleted by an earlier patch attempt).
+    return sorted(p for p in candidates if os.path.isfile(os.path.join(workspace_path, p)))
+
+
 def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     print("\n🛠️ [LLM Patch] 正在生成精確修補區塊...")
-    
+
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0)
 
-    # 動態讀取專案內的原始碼檔案，提供給 LLM 作為上下文
+    # 動態讀取專案內的原始碼檔案，提供給 LLM 作為上下文——範圍限縮邏輯見
+    # _collect_relevant_context_paths。
     workspace_path = state.get("workspace_path", "")
+    target_app = state.get("target_app", ".")
+    error_log = state.get("current_error_log", "")
     project_files_content = ""
     if os.path.exists(workspace_path):
-        for root, dirs, files in os.walk(workspace_path):
-            for file in files:
-                # 讀取 C 原始碼、設定檔，以及 Kconfig/DTS 檔案——後者原本被
-                # 漏掉，導致這個 pipeline 結構性地看不到、修不了
-                # kconfig/dts/compound 類別的資料集案例 (無論底層 LLM 能力
-                # 如何)，見 part 27 稽核 finding 5。Kconfig 檔案本身通常沒有
-                # 副檔名 (檔名就是 "Kconfig" 或 "Kconfig.<driver>")，DTS 則用
-                # .dts/.dtsi/.overlay。
-                # Also read Kconfig/DTS files — previously missing, which
-                # made this pipeline structurally blind to (and incapable of
-                # fixing) kconfig/dts/compound-category dataset cases
-                # regardless of the underlying LLM's ability; see part 27
-                # audit finding 5. Kconfig files themselves usually have no
-                # extension (named "Kconfig" or "Kconfig.<driver>"); DTS uses
-                # .dts/.dtsi/.overlay.
-                if (file.endswith(".c") or file.endswith(".conf") or file.endswith("CMakeLists.txt")
-                        or file == "Kconfig" or file.startswith("Kconfig.")
-                        or file.endswith((".dts", ".dtsi", ".overlay"))):
-                    filepath = os.path.join(root, file)
-                    rel_path = os.path.relpath(filepath, workspace_path)
-                    try:
-                        with open(filepath, "r", encoding="utf-8") as f:
-                            project_files_content += f"\n--- {rel_path} ---\n{f.read()}\n"
-                    except Exception:
-                        pass
+        total_chars = 0
+        for rel_path in _collect_relevant_context_paths(workspace_path, target_app, error_log):
+            filepath = os.path.join(workspace_path, rel_path)
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                continue
+            if total_chars + len(content) > _MAX_PATCH_CONTEXT_CHARS:
+                print(f"   ⚠️ 上下文已達 {_MAX_PATCH_CONTEXT_CHARS} 字元上限，略過 {rel_path} 及其後續檔案。")
+                break
+            project_files_content += f"\n--- {rel_path} ---\n{content}\n"
+            total_chars += len(content)
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", """你是一位頂尖的嵌入式軟體工程師，專精於修復 Zephyr RTOS 的程式碼。
@@ -172,21 +290,37 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
     current_iter = state.get("iterations", 0) + 1
     workspace_path = state.get("workspace_path")
     patch_content = state.get("patch_content", "")
-    
+
+    # route_after_devops 只靠 iterations >= max_iterations 決定要不要停
+    # (goto "finish")，但先前失敗路徑的 return dict 從來沒有寫回
+    # final_status——圖確實會停，但 state 永遠停在初始值 "in_progress"，
+    # 呼叫端 (main.py/evaluate.py) 沒辦法分辨「真的重試到底仍失敗」跟
+    # 「還在跑/某處提早中斷」。所有失敗路徑統一算這個值並寫回。
+    # route_after_devops decides whether to stop (goto "finish") purely
+    # from iterations >= max_iterations, but every failure-path return dict
+    # never wrote final_status back — the graph does stop, but state stays
+    # at its initial "in_progress" forever, leaving callers (main.py/
+    # evaluate.py) unable to tell "genuinely exhausted retries and failed"
+    # apart from "still running/aborted early somewhere". Computed once and
+    # included on every failure path below.
+    max_iterations = state.get("max_iterations", 5)
+    failure_final_status = "failed_max_retries" if current_iter >= max_iterations else "in_progress"
+
     print(f"\n⚙️ [DevOps Expert] 啟動第 {current_iter} 次迭代的測試流程...")
-    
+
     # 1. 應用修補程式
     applier = PatchApplier(workspace_path=workspace_path)
     patch_result = applier.apply_patches(patch_content)
-    
+
     if not patch_result["success"]:
         print("   ❌ 修補應用失敗！格式錯誤或找不到匹配的原始碼。")
         return {
             "current_error_log": f"Patch Application Failed:\n{patch_result['error']}",
             "error_type": "patch_format_error",
-            "iterations": current_iter
+            "iterations": current_iter,
+            "final_status": failure_final_status
         }
-        
+
     print(f"   ✅ 修補成功應用至: {patch_result.get('applied_files', [])}")
 
     # 2. 建置與執行期驗證
@@ -233,7 +367,8 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
             "current_error_log": log_filter.compress_log(eval_result["log"])
                 + f"\n\n[判定失敗：套件整體成功，但目標測試 '{required_pass_test}' 未見 PASS，patch 疑似繞過而非真正修復。]",
             "error_type": "missing_required_test",
-            "iterations": current_iter
+            "iterations": current_iter,
+            "final_status": failure_final_status
         }
 
     if eval_result["status"] == "success":
@@ -250,7 +385,8 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
     return {
         "current_error_log": log_filter.compress_log(eval_result["log"]),
         "error_type": eval_result["status"],
-        "iterations": current_iter
+        "iterations": current_iter,
+        "final_status": failure_final_status
     }
 
 # ==========================================
