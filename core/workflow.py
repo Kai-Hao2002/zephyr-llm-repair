@@ -20,7 +20,9 @@ from tools.qemu_oracle import QemuOracle
 from agents.analyzer import analyzer_node
 from agents.knowledge_expert import knowledge_expert_node
 from agents.patch_expert import patch_node
-from agents.supervisor import route_after_apply_patch, route_after_static_check, route_after_build
+from agents.supervisor import (
+    route_after_apply_patch, route_after_static_check, route_after_build, record_attempt_outcome,
+)
 from tools.static_checker import StaticChecker
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -134,7 +136,8 @@ def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
             "error_type": "patch_format_error",
             "applied_files": [],
             "iterations": current_iter,
-            "final_status": failure_final_status
+            "final_status": failure_final_status,
+            **record_attempt_outcome(current_iter, f"套用修補失敗 (格式錯誤/找不到匹配的原始碼)：{patch_result['error']}"),
         }
 
     applied_files = patch_result.get("applied_files", [])
@@ -180,7 +183,8 @@ def static_check_node(state: ZephyrAgentState) -> Dict[str, Any]:
     return {
         "current_error_log": result["log"],
         "error_type": "static_check_failed",
-        "final_status": failure_final_status
+        "final_status": failure_final_status,
+        **record_attempt_outcome(current_iter, f"修補已套用至 {applied_files}，但靜態分析發現問題：{result['log']}"),
     }
 
 
@@ -190,6 +194,7 @@ def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
     failure_final_status = _compute_failure_final_status(current_iter, max_iterations)
 
     workspace_path = state.get("workspace_path")
+    applied_files = state.get("applied_files", [])
 
     # board/target_app 之前寫死成 qemu_x86 + workspace 根目錄，只能對付
     # main.py 的單一 demo 場景；現在改成從 state 讀取，才能正確對應資料集
@@ -235,7 +240,12 @@ def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
                 + f"\n\n[判定失敗：套件整體成功，但目標測試 '{required_pass_test}' 未見 PASS，patch 疑似繞過而非真正修復。]",
             "error_type": "missing_required_test",
             "iterations": current_iter,
-            "final_status": failure_final_status
+            "final_status": failure_final_status,
+            **record_attempt_outcome(
+                current_iter,
+                f"修補已套用至 {applied_files}，套件整體回報成功，但目標測試 '{required_pass_test}' 未見 PASS，"
+                f"疑似投機取巧而非真正修復。",
+            ),
         }
 
     if eval_result["status"] == "success":
@@ -249,11 +259,17 @@ def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
 
     print(f"   💥 測試失敗 (狀態: {eval_result['status']})，正在過濾日誌...")
     log_filter = LogFilter()
+    compressed_log = log_filter.compress_log(eval_result["log"])
     return {
-        "current_error_log": log_filter.compress_log(eval_result["log"]),
+        "current_error_log": compressed_log,
         "error_type": eval_result["status"],
         "iterations": current_iter,
-        "final_status": failure_final_status
+        "final_status": failure_final_status,
+        **record_attempt_outcome(
+            current_iter,
+            f"修補已套用至 {applied_files}，通過靜態分析後完整建置，但建置/執行失敗 "
+            f"(狀態: {eval_result['status']})：{compressed_log}",
+        ),
     }
 
 # ==========================================

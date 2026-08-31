@@ -143,6 +143,20 @@ def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
             project_files_content += f"\n--- {rel_path} ---\n{content}\n"
             total_chars += len(content)
 
+    # 跨迭代記憶——見 agents/supervisor.py 的 record_attempt_outcome 與
+    # core/state.py 的 attempt_history 說明：沒有這段之前，Patch 完全不
+    # 知道前幾次已經試過什麼、為什麼沒用，實測觀察到 LLM 會在同一批看得到
+    # 的檔案間反覆打轉。列進 prompt 讓它至少知道「這幾個方向已經證明
+    # 無效」。
+    # Cross-iteration memory — see agents/supervisor.py's
+    # record_attempt_outcome and core/state.py's attempt_history for the
+    # rationale: without this, Patch had zero memory of what earlier
+    # iterations tried or why they failed, and was observed empirically to
+    # circle between the same visible files. Listed in the prompt so it at
+    # least knows which directions are already shown not to work.
+    attempt_history = state.get("attempt_history", [])
+    attempt_history_text = "\n".join(attempt_history) if attempt_history else "（這是第一次嘗試，尚無歷史紀錄）"
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", """你是一位頂尖的嵌入式軟體工程師，專精於修復 Zephyr RTOS 的程式碼。
 請根據錯誤日誌與提供的專案原始碼，輸出修復程式碼。
@@ -158,7 +172,11 @@ SEARCH 區塊內的程式碼必須與原始檔案「一模一樣」（包含縮�
 ========
 <修復後的新程式碼>
 >>>>>>>> REPLACE"""),
-        ("human", """[目前專案原始碼與設定檔內容]
+        ("human", """[之前已經嘗試過的修補與結果]
+{attempt_history}
+（判讀原則：若某筆紀錄是「套用失敗」，代表 SEARCH 區塊的文字沒有跟檔案內容逐字元比對成功——原始碼完全沒有被改動，請對照下方最新的原始碼內容重新逐字元、含縮排確認，修改方向本身不一定有錯，不需要因此更換方向；若某筆紀錄是「套用成功但建置/執行仍失敗」，代表這個修改方向已經證明無效，請換一個不同的方式或檔案。）
+
+[目前專案原始碼與設定檔內容]
 {project_files}
 
 [檢索到的知識圖譜上下文]
@@ -172,6 +190,7 @@ SEARCH 區塊內的程式碼必須與原始檔案「一模一樣」（包含縮�
 
     chain = prompt | llm
     response = chain.invoke({
+        "attempt_history": attempt_history_text,
         "project_files": project_files_content,
         "context": state.get("retrieved_context", "無"),
         "error_log": state.get("current_error_log", "")
