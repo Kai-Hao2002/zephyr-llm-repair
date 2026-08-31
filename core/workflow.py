@@ -1,13 +1,9 @@
 # core/workflow.py
 import os
-import re
 import logging
-from typing import Dict, Any, List
-from pydantic import BaseModel, Field
+from typing import Dict, Any
 
 from langgraph.graph import StateGraph, END
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI 
 
 # 引入自訂工具鏈與狀態
 from core.state import ZephyrAgentState
@@ -15,53 +11,20 @@ from tools.patch_applier import PatchApplier
 from tools.log_filter import LogFilter
 from tools.qemu_oracle import QemuOracle
 
+# 代理人節點的實作邏輯都搬到 agents/*.py 了 (跟 README 描述的架構對齊)，
+# workflow.py 現在只負責把它們接成圖，以及 DevOps/建置這個非「代理人」
+# 屬性的執行期節點。
+# Agent node logic has moved to agents/*.py (matching the architecture
+# README.md describes) — workflow.py now only wires them into the graph,
+# plus the DevOps/build execution node, which isn't an "agent" persona.
+from agents.analyzer import analyzer_node
 from agents.knowledge_expert import knowledge_expert_node
+from agents.patch_expert import patch_node
+from agents.supervisor import route_after_devops
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
-# ==========================================
-# 1. 定義 Analyzer 強型別輸出
-# ==========================================
-class AnalyzerOutput(BaseModel):
-    """分析建置錯誤並決定後續動作"""
-    reasoning: str = Field(description="簡短解釋你認為錯誤的原因，以及為何需要或不需要檢索圖譜。")
-    search_keywords: List[str] = Field(
-        description="如果要檢索 Kconfig 符號或 DTS 節點，列出精確的關鍵字 (例如 ['I2C', 'bme280'])。如果只是一般 C 語法錯誤，請回傳空列表 []。"
-    )
-    error_category: str = Field(description="將錯誤分類為: 'kconfig', 'dts', 'c_syntax', 'cmake', 'other'")
-
-# ==========================================
-# 2. 定義代理人節點
-# ==========================================
-
-def analyzer_node(state: ZephyrAgentState) -> Dict[str, Any]:
-    print(f"\n🧠 [LLM Analyzer] 正在分析第 {state['iterations']} 次迭代的日誌...")
-    
-    # 改用 Gemini 1.5 Flash (快速且便宜，適合分類任務)
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)
-    structured_llm = llm.with_structured_output(AnalyzerOutput)
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """你是一位資深的 Zephyr RTOS 除錯專家。
-你的任務是分析經過壓縮的編譯或執行期錯誤日誌。
-
-決策規則：
-1. 若錯誤涉及硬體、周邊、未定義的巨集 (如 DT_NODELABEL)，代表需要檢索圖譜。請提取精確元件名稱作為 search_keywords。
-2. 若錯誤是單純的 C 語言語法錯誤 (如漏掉分號、括號)，不需要檢索圖譜，search_keywords 必須回傳空列表 []。"""),
-        ("human", "這是我專案目前的錯誤日誌：\n{error_log}")
-    ])
-
-    chain = prompt | structured_llm
-    result: AnalyzerOutput = chain.invoke({"error_log": state.get("current_error_log", "")})
-    
-    print(f"   ↳ 推論: {result.reasoning}")
-    print(f"   ↳ 提取關鍵字: {result.search_keywords}")
-    
-    return {
-        "search_keywords": result.search_keywords,
-        "messages": [f"Analyzer 診斷 ({result.error_category}): {result.reasoning}"]
-    }
 
 def build_devops_docker_cmd(workspace_path: str, board: str, target_app: str) -> str:
     """
@@ -125,166 +88,6 @@ def build_devops_docker_cmd(workspace_path: str, board: str, target_app: str) ->
         f"bash -c 'west build -b {board} -d /tmp/build -p always -t run .'"
     )
 
-
-_LOG_PATH_PREFIX = "/zephyrproject/zephyr/"
-_LOG_EXT_PATH_RE = re.compile(re.escape(_LOG_PATH_PREFIX) + r"([\w\-./]+\.(?:c|h|conf|dts|dtsi|overlay))\b")
-_LOG_KCONFIG_PATH_RE = re.compile(re.escape(_LOG_PATH_PREFIX) + r"([\w\-./]+/Kconfig(?:\.\w+)?)\b")
-
-# 若比對出來的檔案總大小仍然偏大 (例如 target_app 本身就是個檔案很多的大型
-# app)，設一個保守上限並截斷，寧可讓 Patch 用不完整的上下文重試，也不要
-# 重演「整棵 zephyr 樹被塞進單一次呼叫、直接打穿供應商配額」的事故 (見
-# _collect_relevant_context_paths 的說明)。
-# If the matched files' total size is still large (e.g. target_app itself
-# happens to be a big app with many files), cap it and truncate rather than
-# risk repeating the "the whole zephyr tree in one call" quota-blowing
-# incident (see _collect_relevant_context_paths's docstring).
-_MAX_PATCH_CONTEXT_CHARS = 300_000
-
-
-def _is_context_source_file(filename: str) -> bool:
-    # 讀取 C 原始碼、設定檔，以及 Kconfig/DTS 檔案——後者原本被漏掉，導致
-    # 這個 pipeline 結構性地看不到、修不了 kconfig/dts/compound 類別的
-    # 資料集案例 (無論底層 LLM 能力如何)，見 part 27 稽核 finding 5。
-    # Kconfig 檔案本身通常沒有副檔名 (檔名就是 "Kconfig" 或
-    # "Kconfig.<driver>")，DTS 則用 .dts/.dtsi/.overlay。
-    # Also read Kconfig/DTS files — previously missing, which made this
-    # pipeline structurally blind to (and incapable of fixing)
-    # kconfig/dts/compound-category dataset cases regardless of the
-    # underlying LLM's ability; see part 27 audit finding 5. Kconfig files
-    # themselves usually have no extension (named "Kconfig" or
-    # "Kconfig.<driver>"); DTS uses .dts/.dtsi/.overlay.
-    return (filename.endswith(".c") or filename.endswith(".conf") or filename == "CMakeLists.txt"
-            or filename == "Kconfig" or filename.startswith("Kconfig.")
-            or filename.endswith((".dts", ".dtsi", ".overlay")))
-
-
-def _collect_relevant_context_paths(workspace_path: str, target_app: str, error_log: str) -> List[str]:
-    """
-    決定要餵給 Patch LLM 哪些檔案的內容——不能再像過去那樣 os.walk 整個
-    workspace_path：workspace_path 現在是完整的 Zephyr checkout (見
-    build_devops_docker_cmd 的說明)，對真實資料集案例來說是 3.7 萬個檔案、
-    11MB+ 文字，單一次呼叫就會打穿 LLM 供應商的 token 配額 (2026-08-30 實測：
-    inject_c_hello_world_brace 這種最簡單的案例都能把免費層 2,000,000
-    token/分鐘的額度直接打爆)。
-
-    改成只收兩種來源：
-    1. current_error_log 裡明確以 /zephyrproject/zephyr/... 開頭提到的檔案
-       路徑 (編譯期錯誤 — c_syntax/kconfig/dts 這幾類 — gcc/CMake 的診斷
-       訊息一定會用容器內的絕對路徑指出出錯的檔案)。
-    2. target_app 目錄本身 (含子目錄) 底下的原始碼/設定檔——通常是個位數
-       到幾十個檔案，遠比整棵樹小得多。
-
-    對 runtime_crash 這類日誌只有 "Segmentation fault" 之類崩潰特徵、完全
-    沒有檔案路徑可循的案例，這兩種來源仍然定位不到真正該修的檔案 (通常在
-    target_app 之外的 drivers/subsys 裡)——這需要真正的檢索 (Knowledge
-    Expert 的圖譜、未來的 Hybrid RAG) 才能解決，不是這裡要處理的範圍。
-
-    Decides which files' content to feed the Patch LLM — can no longer
-    os.walk the entire workspace_path like before: workspace_path is now a
-    full Zephyr checkout (see build_devops_docker_cmd's docstring), which
-    for a real dataset case means ~38k files / 11MB+ of text, enough to
-    blow through an LLM provider's token quota in a single call (confirmed
-    2026-08-30: even the simplest case, inject_c_hello_world_brace, maxed
-    out the free tier's 2,000,000 tokens/minute limit outright).
-
-    Now sourced from just two places:
-    1. File paths explicitly mentioned in current_error_log as
-       /zephyrproject/zephyr/... (build-time errors — c_syntax/kconfig/dts
-       — gcc/CMake diagnostics always cite the failing file by its absolute
-       in-container path).
-    2. target_app's own directory tree — typically single digits to a few
-       dozen files, far smaller than the whole tree.
-
-    For runtime_crash-category cases whose log is just a crash signature
-    ("Segmentation fault") with no file path to go on, neither source can
-    locate the actual file to fix (usually outside target_app, in
-    drivers/subsys) — that needs real retrieval (Knowledge Expert's graph,
-    eventually Hybrid RAG), out of scope here.
-    """
-    candidates = set()
-    candidates.update(_LOG_EXT_PATH_RE.findall(error_log))
-    candidates.update(_LOG_KCONFIG_PATH_RE.findall(error_log))
-
-    target_app_dir = os.path.join(workspace_path, target_app)
-    if os.path.isdir(target_app_dir):
-        for root, dirs, files in os.walk(target_app_dir):
-            for file in files:
-                if _is_context_source_file(file):
-                    candidates.add(os.path.relpath(os.path.join(root, file), workspace_path))
-
-    # 只留下真的存在於這次 workspace 裡的路徑 (日誌裡提到的路徑可能因為
-    # 之前的 patch 已經被改名/刪除)。
-    # Only keep paths that genuinely exist in this workspace (a log-cited
-    # path may have been renamed/deleted by an earlier patch attempt).
-    return sorted(p for p in candidates if os.path.isfile(os.path.join(workspace_path, p)))
-
-
-def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
-    print("\n🛠️ [LLM Patch] 正在生成精確修補區塊...")
-
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0)
-
-    # 動態讀取專案內的原始碼檔案，提供給 LLM 作為上下文——範圍限縮邏輯見
-    # _collect_relevant_context_paths。
-    workspace_path = state.get("workspace_path", "")
-    target_app = state.get("target_app", ".")
-    error_log = state.get("current_error_log", "")
-    project_files_content = ""
-    if os.path.exists(workspace_path):
-        total_chars = 0
-        for rel_path in _collect_relevant_context_paths(workspace_path, target_app, error_log):
-            filepath = os.path.join(workspace_path, rel_path)
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    content = f.read()
-            except Exception:
-                continue
-            if total_chars + len(content) > _MAX_PATCH_CONTEXT_CHARS:
-                print(f"   ⚠️ 上下文已達 {_MAX_PATCH_CONTEXT_CHARS} 字元上限，略過 {rel_path} 及其後續檔案。")
-                break
-            project_files_content += f"\n--- {rel_path} ---\n{content}\n"
-            total_chars += len(content)
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """你是一位頂尖的嵌入式軟體工程師，專精於修復 Zephyr RTOS 的程式碼。
-請根據錯誤日誌與提供的專案原始碼，輸出修復程式碼。
-
-【嚴格格式要求】
-你必須使用以下的 SEARCH/REPLACE 區塊格式來修改檔案。
-絕對不要在區塊外加上 ``` 程式碼區塊符號。
-SEARCH 區塊內的程式碼必須與原始檔案「一模一樣」（包含縮排）。
-
-<檔案的相對路徑>
-<<<<<<<< SEARCH
-<要被替換的原始程式碼>
-========
-<修復後的新程式碼>
->>>>>>>> REPLACE"""),
-        ("human", """[目前專案原始碼與設定檔內容]
-{project_files}
-
-[檢索到的知識圖譜上下文]
-{context}
-
-[目前的錯誤日誌]
-{error_log}
-
-請開始生成修補區塊：""")
-    ])
-
-    chain = prompt | llm
-    response = chain.invoke({
-        "project_files": project_files_content,
-        "context": state.get("retrieved_context", "無"),
-        "error_log": state.get("current_error_log", "")
-    })
-    
-    patch_text = response.content
-    print("   ↳ 成功生成修補區塊！")
-    return {
-        "patch_content": patch_text,
-        "messages": [f"Patch Expert 已生成修補方案。"]
-    }
 
 def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
     current_iter = state.get("iterations", 0) + 1
@@ -390,15 +193,10 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
     }
 
 # ==========================================
-# 3. 定義邊界與建立狀態機 (與原本相同)
+# 3. 定義邊界與建立狀態機
 # ==========================================
 def route_after_analyzer(state: ZephyrAgentState) -> str:
     return "goto_knowledge" if len(state.get("search_keywords", [])) > 0 else "goto_patch"
-
-def route_after_devops(state: ZephyrAgentState) -> str:
-    if state.get("error_type") == "success" or state.get("iterations", 0) >= state.get("max_iterations", 5):
-        return "finish"
-    return "retry"
 
 def build_zephyr_graph() -> StateGraph:
     workflow = StateGraph(ZephyrAgentState)
