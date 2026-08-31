@@ -48,7 +48,8 @@ def _is_context_source_file(filename: str) -> bool:
             or filename.endswith((".dts", ".dtsi", ".overlay")))
 
 
-def _collect_relevant_context_paths(workspace_path: str, target_app: str, error_log: str) -> List[str]:
+def _collect_relevant_context_paths(workspace_path: str, target_app: str, error_log: str,
+                                     retrieved_files: List[str] = None) -> List[str]:
     """
     決定要餵給 Patch LLM 哪些檔案的內容——不能 os.walk 整個 workspace_path：
     workspace_path 是完整的 Zephyr checkout，對真實資料集案例來說是 3.7 萬
@@ -56,22 +57,25 @@ def _collect_relevant_context_paths(workspace_path: str, target_app: str, error_
     實測：inject_c_hello_world_brace 這種最簡單的案例都能把免費層 2,000,000
     token/分鐘的額度直接打爆)。
 
-    改成只收兩種來源：
+    改成只收三種來源：
     1. current_error_log 裡明確以 /zephyrproject/zephyr/... 開頭提到的檔案
        路徑 (編譯期錯誤 — c_syntax/kconfig/dts 這幾類 — gcc/CMake 的診斷
        訊息一定會用容器內的絕對路徑指出出錯的檔案)。
     2. target_app 目錄本身 (含子目錄) 底下的原始碼/設定檔——通常是個位數
        到幾十個檔案，遠比整棵樹小得多。
+    3. retrieved_files：Knowledge Expert 的 Hybrid RAG (BM25 + 語意
+       embedding，見 graph_rag/hybrid_retriever.py) 額外檢索出的候選檔案。
 
-    已知的定位缺口 (2026-08-30/31 兩次真實 pilot 都踩到，Phase 3 Hybrid RAG
-    才該解決，不是這裡要處理的範圍)：
+    第 3 種來源是為了補上前兩種的已知定位缺口 (2026-08-30/31 兩次真實
+    pilot 都踩到)：
     - runtime_crash 這類日誌只有 "Segmentation fault" 之類崩潰特徵、完全
       沒有檔案路徑可循的案例 (`inject_runtime_fcb_nullcheck`)。
     - 就算日誌裡有路徑，也可能只是 Zephyr 產生出來的通用巨集標頭檔
       (`include/zephyr/devicetree.h` 之類)，不是真正該改的 Kconfig/DTS
       原始檔 (`inject_compound_adc_emul_kconfig_dts`)。
-    這兩種情況，這兩種來源都定位不到真正該修的檔案 (通常在 target_app 之外
-    的 drivers/subsys/boards 裡)。
+    這兩種情況，前兩種來源都定位不到真正該修的檔案 (通常在 target_app 之外
+    的 drivers/subsys/boards 裡)；retrieved_files 用 Analyzer 提取的
+    search_keywords 對整棵樹做內容檢索，不依賴日誌裡有沒有路徑線索。
 
     Decides which files' content to feed the Patch LLM — can't os.walk the
     entire workspace_path: workspace_path is a full Zephyr checkout, which
@@ -80,28 +84,34 @@ def _collect_relevant_context_paths(workspace_path: str, target_app: str, error_
     2026-08-30: even the simplest case, inject_c_hello_world_brace, maxed
     out the free tier's 2,000,000 tokens/minute limit outright).
 
-    Now sourced from just two places:
+    Now sourced from three places:
     1. File paths explicitly mentioned in current_error_log as
        /zephyrproject/zephyr/... (build-time errors — c_syntax/kconfig/dts
        — gcc/CMake diagnostics always cite the failing file by its absolute
        in-container path).
     2. target_app's own directory tree — typically single digits to a few
        dozen files, far smaller than the whole tree.
+    3. retrieved_files: candidate files Knowledge Expert's Hybrid RAG
+       (BM25 + semantic embedding, see graph_rag/hybrid_retriever.py)
+       additionally retrieved.
 
-    Known localization gap (hit by two real pilots on 2026-08-30/31; this
-    is Phase 3's (Hybrid RAG) problem, out of scope here):
+    Source 3 closes the known localization gap the first two sources have
+    (hit by two real pilots on 2026-08-30/31):
     - runtime_crash logs that are just a crash signature ("Segmentation
       fault") with no file path at all (`inject_runtime_fcb_nullcheck`).
     - Logs that do cite a path, but it's one of Zephyr's generated,
       generic DT-macro headers (`include/zephyr/devicetree.h`, etc.), not
       the actual Kconfig/DTS source responsible
       (`inject_compound_adc_emul_kconfig_dts`).
-    In both cases neither source can locate the real file to fix (usually
-    outside target_app, in drivers/subsys/boards).
+    In both cases the first two sources can't locate the real file to fix
+    (usually outside target_app, in drivers/subsys/boards); retrieved_files
+    searches the whole tree's content using the Analyzer's
+    search_keywords, without depending on the log containing a path clue.
     """
     candidates = set()
     candidates.update(_LOG_EXT_PATH_RE.findall(error_log))
     candidates.update(_LOG_KCONFIG_PATH_RE.findall(error_log))
+    candidates.update(retrieved_files or [])
 
     target_app_dir = os.path.join(workspace_path, target_app)
     if os.path.isdir(target_app_dir):
@@ -130,7 +140,8 @@ def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     project_files_content = ""
     if os.path.exists(workspace_path):
         total_chars = 0
-        for rel_path in _collect_relevant_context_paths(workspace_path, target_app, error_log):
+        retrieved_files = state.get("retrieved_files", [])
+        for rel_path in _collect_relevant_context_paths(workspace_path, target_app, error_log, retrieved_files):
             filepath = os.path.join(workspace_path, rel_path)
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
