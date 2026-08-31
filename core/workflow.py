@@ -20,7 +20,8 @@ from tools.qemu_oracle import QemuOracle
 from agents.analyzer import analyzer_node
 from agents.knowledge_expert import knowledge_expert_node
 from agents.patch_expert import patch_node
-from agents.supervisor import route_after_devops
+from agents.supervisor import route_after_apply_patch, route_after_static_check, route_after_build
+from tools.static_checker import StaticChecker
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -89,29 +90,40 @@ def build_devops_docker_cmd(workspace_path: str, board: str, target_app: str) ->
     )
 
 
-def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
+# route_after_apply_patch/route_after_static_check 都用這個值決定要不要
+# 直接結束——「已經用完迭代預算」這件事只該有一種算法，寫成共用函式，
+# 不要在 apply_patch_node/static_check_node/build_node 三個地方各自重算
+# 一次容易漂移的邏輯。
+# route_after_apply_patch/route_after_static_check both use this value to
+# decide whether to stop outright — "iteration budget exhausted" should
+# have exactly one formula, factored out instead of re-derived slightly
+# differently in each of apply_patch_node/static_check_node/build_node.
+def _compute_failure_final_status(current_iter: int, max_iterations: int) -> str:
+    return "failed_max_retries" if current_iter >= max_iterations else "in_progress"
+
+
+def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
+    """
+    ApplyPatch：把 Patch Expert 產生的 SEARCH/REPLACE 區塊套用到 workspace
+    的實體檔案上。`iterations` 在這裡遞增一次，代表「第幾次修補嘗試」——
+    後面的 StaticCheck/Build 不管走到哪一步都只讀這個值，不會再遞增，這樣
+    「一次迭代」的定義才是單一、一致的，不會因為 StaticCheck 提早打回
+    Patch 重生成而被算成兩次。
+    ApplyPatch: applies the Patch Expert's SEARCH/REPLACE blocks to real
+    files in the workspace. `iterations` is incremented exactly once here,
+    representing "which patch attempt this is" — StaticCheck/Build further
+    down only ever read this value, never increment it again, so "one
+    iteration" stays a single, consistent definition regardless of whether
+    StaticCheck bounces back to Patch to regenerate.
+    """
     current_iter = state.get("iterations", 0) + 1
     workspace_path = state.get("workspace_path")
     patch_content = state.get("patch_content", "")
-
-    # route_after_devops 只靠 iterations >= max_iterations 決定要不要停
-    # (goto "finish")，但先前失敗路徑的 return dict 從來沒有寫回
-    # final_status——圖確實會停，但 state 永遠停在初始值 "in_progress"，
-    # 呼叫端 (main.py/evaluate.py) 沒辦法分辨「真的重試到底仍失敗」跟
-    # 「還在跑/某處提早中斷」。所有失敗路徑統一算這個值並寫回。
-    # route_after_devops decides whether to stop (goto "finish") purely
-    # from iterations >= max_iterations, but every failure-path return dict
-    # never wrote final_status back — the graph does stop, but state stays
-    # at its initial "in_progress" forever, leaving callers (main.py/
-    # evaluate.py) unable to tell "genuinely exhausted retries and failed"
-    # apart from "still running/aborted early somewhere". Computed once and
-    # included on every failure path below.
     max_iterations = state.get("max_iterations", 5)
-    failure_final_status = "failed_max_retries" if current_iter >= max_iterations else "in_progress"
+    failure_final_status = _compute_failure_final_status(current_iter, max_iterations)
 
-    print(f"\n⚙️ [DevOps Expert] 啟動第 {current_iter} 次迭代的測試流程...")
+    print(f"\n⚙️ [ApplyPatch] 套用第 {current_iter} 次迭代的修補...")
 
-    # 1. 應用修補程式
     applier = PatchApplier(workspace_path=workspace_path)
     patch_result = applier.apply_patches(patch_content)
 
@@ -120,13 +132,65 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
         return {
             "current_error_log": f"Patch Application Failed:\n{patch_result['error']}",
             "error_type": "patch_format_error",
+            "applied_files": [],
             "iterations": current_iter,
             "final_status": failure_final_status
         }
 
-    print(f"   ✅ 修補成功應用至: {patch_result.get('applied_files', [])}")
+    applied_files = patch_result.get("applied_files", [])
+    print(f"   ✅ 修補成功應用至: {applied_files}")
+    return {
+        "error_type": "patch_applied",
+        "applied_files": applied_files,
+        "iterations": current_iter,
+    }
 
-    # 2. 建置與執行期驗證
+
+def static_check_node(state: ZephyrAgentState) -> Dict[str, Any]:
+    """
+    StaticCheck：在真正跑一次完整 west build -t run (通常要花好幾分鐘)
+    之前，先用 cppcheck + west build --cmake-only 快速檔住明顯壞掉的
+    patch，沒過就直接打回 Patch 重新生成 (proposal 說的
+    early-exit-back-to-GeneratePatch)，不用等一次完整建置才知道。
+
+    StaticCheck: before spending several minutes on a full
+    `west build -t run`, use cppcheck + `west build --cmake-only` to
+    quickly catch an obviously broken patch; a failure bounces straight
+    back to Patch to regenerate (the proposal's
+    early-exit-back-to-GeneratePatch), without waiting out a full build.
+    """
+    current_iter = state.get("iterations", 0)
+    max_iterations = state.get("max_iterations", 5)
+    failure_final_status = _compute_failure_final_status(current_iter, max_iterations)
+
+    workspace_path = state.get("workspace_path")
+    target_app = state.get("target_app", ".")
+    board = state.get("board", "qemu_x86")
+    applied_files = state.get("applied_files", [])
+
+    print(f"\n🔍 [StaticCheck] 對第 {current_iter} 次迭代的修補做靜態分析...")
+    checker = StaticChecker()
+    result = checker.check(workspace_path, target_app, board, applied_files)
+
+    if result["passed"]:
+        print("   ✅ 靜態分析通過，進入完整建置。")
+        return {"error_type": "static_check_passed"}
+
+    print("   ⚠️ 靜態分析發現問題，直接打回 Patch 重新生成，跳過這次完整建置。")
+    return {
+        "current_error_log": result["log"],
+        "error_type": "static_check_failed",
+        "final_status": failure_final_status
+    }
+
+
+def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
+    current_iter = state.get("iterations", 0)
+    max_iterations = state.get("max_iterations", 5)
+    failure_final_status = _compute_failure_final_status(current_iter, max_iterations)
+
+    workspace_path = state.get("workspace_path")
+
     # board/target_app 之前寫死成 qemu_x86 + workspace 根目錄，只能對付
     # main.py 的單一 demo 場景；現在改成從 state 讀取，才能正確對應資料集
     # 裡任何一筆案例真正的目標板子與 app 子目錄 (例如
@@ -150,7 +214,7 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
     # /zephyrproject/zephyr.
     docker_cmd = build_devops_docker_cmd(workspace_path, board, target_app)
 
-    print("   🔨 開始在隔離容器中編譯並執行 QEMU...")
+    print(f"\n🔨 [Build] 第 {current_iter} 次迭代：開始在隔離容器中編譯並執行 QEMU...")
     # timeout=15 對一次真正的 west build (可能要編譯 Zephyr kernel + app)
     # 來說遠遠不夠，幾乎每次都會提早 timeout，把任何案例都誤判為建置卡住
     # ——FaultInjector 驗證資料集時本來就是用 600s (tools/fault_injector.py)，
@@ -182,7 +246,7 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
             "iterations": current_iter,
             "final_status": "resolved"
         }
-        
+
     print(f"   💥 測試失敗 (狀態: {eval_result['status']})，正在過濾日誌...")
     log_filter = LogFilter()
     return {
@@ -203,12 +267,24 @@ def build_zephyr_graph() -> StateGraph:
     workflow.add_node("Analyzer", analyzer_node)
     workflow.add_node("Knowledge", knowledge_expert_node)
     workflow.add_node("Patch", patch_node)
-    workflow.add_node("DevOps", devops_node)
+    workflow.add_node("ApplyPatch", apply_patch_node)
+    workflow.add_node("StaticCheck", static_check_node)
+    workflow.add_node("Build", build_node)
 
     workflow.set_entry_point("Analyzer")
     workflow.add_conditional_edges("Analyzer", route_after_analyzer, {"goto_knowledge": "Knowledge", "goto_patch": "Patch"})
     workflow.add_edge("Knowledge", "Patch")
-    workflow.add_edge("Patch", "DevOps")
-    workflow.add_conditional_edges("DevOps", route_after_devops, {"finish": END, "retry": "Analyzer"})
-    
+    workflow.add_edge("Patch", "ApplyPatch")
+    workflow.add_conditional_edges("ApplyPatch", route_after_apply_patch, {
+        "goto_static_check": "StaticCheck",
+        "retry_analyzer": "Analyzer",
+        "finish": END,
+    })
+    workflow.add_conditional_edges("StaticCheck", route_after_static_check, {
+        "goto_build": "Build",
+        "retry_patch": "Patch",
+        "finish": END,
+    })
+    workflow.add_conditional_edges("Build", route_after_build, {"finish": END, "retry": "Analyzer"})
+
     return workflow.compile()
