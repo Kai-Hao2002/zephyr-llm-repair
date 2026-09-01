@@ -134,14 +134,41 @@ class HybridRetriever:
 
     def _ensure_embeddings(self) -> GoogleGenerativeAIEmbeddings:
         if self._embeddings is None:
-            self._embeddings = GoogleGenerativeAIEmbeddings(model=_EMBEDDING_MODEL)
+            # request_options={"timeout": 120}：GoogleGenerativeAIEmbeddings
+            # 沒有 ChatGoogleGenerativeAI 那個 timeout 建構參數，這是它自己
+            # 的等效介面 (直接轉給底層 google-genai SDK 的 request_options)。
+            # 理由跟 agents/analyzer.py 一樣：實測 Gemini API 偶爾會完全沒
+            # 回應，沒設 timeout 呼叫端會無限期卡住。
+            # request_options={"timeout": 120}: GoogleGenerativeAIEmbeddings
+            # has no ChatGoogleGenerativeAI-style timeout constructor arg —
+            # this is its equivalent (passed straight through to the
+            # underlying google-genai SDK's request_options). Same rationale
+            # as agents/analyzer.py: Gemini API calls have been observed to
+            # hang with no response at all; without a timeout the caller
+            # blocks indefinitely.
+            self._embeddings = GoogleGenerativeAIEmbeddings(
+                model=_EMBEDDING_MODEL, request_options={"timeout": 120}
+            )
         return self._embeddings
 
-    def retrieve(self, query: str, top_k: int = 5) -> List[str]:
+    def retrieve(self, query: str, top_k: int = 5, bm25_only: bool = False) -> List[str]:
         """
         回傳跟 query (通常是 Analyzer 的 search_keywords 接成的字串) 最
         相關的前 top_k 個檔案相對路徑；索引是空的、query 是空字串，或
         BM25 完全沒有命中的候選時回傳空列表。
+
+        bm25_only=True 時跳過語意重排步驟，直接回傳純 BM25 排序的前
+        top_k 個候選——給 B2 (Single Agent + Text RAG, BM25-only) baseline
+        用，讓它跟 Proposed 的差異乾淨地只在「有沒有語意層的 Hybrid 融合」
+        這一個變因上，其餘檢索流程 (索引建置、BM25 評分) 完全共用同一份
+        實作，不會有兩份容易漂移的 BM25 邏輯。
+        When bm25_only=True, skips the semantic re-ranking step and returns
+        the top_k candidates in plain BM25 order — used by the B2 (Single
+        Agent + Text RAG, BM25-only) baseline, so its difference from
+        Proposed is isolated to exactly one variable ("is there a semantic
+        Hybrid-fusion layer or not"), while sharing the same indexing/BM25-
+        scoring implementation rather than risking two drifting copies of
+        the BM25 logic.
         """
         self._ensure_index()
         if self._bm25 is None or not query.strip():
@@ -157,6 +184,9 @@ class HybridRetriever:
         # candidate_paths is already ordered by BM25 score (index 0 = top
         # BM25 score).
         candidate_paths = [self._file_paths[i] for i in candidate_indices]
+
+        if bm25_only:
+            return candidate_paths[:top_k]
 
         try:
             embeddings = self._ensure_embeddings()

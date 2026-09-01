@@ -23,12 +23,12 @@ _LOG_KCONFIG_PATH_RE = re.compile(re.escape(_LOG_PATH_PREFIX) + r"([\w\-./]+/Kco
 # 若比對出來的檔案總大小仍然偏大 (例如 target_app 本身就是個檔案很多的大型
 # app)，設一個保守上限並截斷，寧可讓 Patch 用不完整的上下文重試，也不要
 # 重演「整棵 zephyr 樹被塞進單一次呼叫、直接打穿供應商配額」的事故 (見
-# _collect_relevant_context_paths 的說明)。
+# collect_relevant_context_paths 的說明)。
 # If the matched files' total size is still large (e.g. target_app itself
 # happens to be a big app with many files), cap it and truncate rather than
 # risk repeating the "the whole zephyr tree in one call" quota-blowing
-# incident (see _collect_relevant_context_paths's docstring).
-_MAX_PATCH_CONTEXT_CHARS = 300_000
+# incident (see collect_relevant_context_paths's docstring).
+MAX_PATCH_CONTEXT_CHARS = 300_000
 
 
 def _is_context_source_file(filename: str) -> bool:
@@ -48,7 +48,7 @@ def _is_context_source_file(filename: str) -> bool:
             or filename.endswith((".dts", ".dtsi", ".overlay")))
 
 
-def _collect_relevant_context_paths(workspace_path: str, target_app: str, error_log: str,
+def collect_relevant_context_paths(workspace_path: str, target_app: str, error_log: str,
                                      retrieved_files: List[str] = None) -> List[str]:
     """
     決定要餵給 Patch LLM 哪些檔案的內容——不能 os.walk 整個 workspace_path：
@@ -130,10 +130,17 @@ def _collect_relevant_context_paths(workspace_path: str, target_app: str, error_
 def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     print("\n🛠️ [LLM Patch] 正在生成精確修補區塊...")
 
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0)
+    # timeout=300 (見 agents/analyzer.py 的說明，這裡的上限拉長是因為送進去
+    # 的上下文可能到 300k 字元，真正生成花的時間本來就比分類任務長，
+    # 120 秒可能連正常、沒卡住的請求都會誤殺)。
+    # timeout=300 (see agents/analyzer.py; longer here because the context
+    # sent in can be up to 300k chars — genuine generation legitimately
+    # takes longer than a classification task, and 120s risked cutting off
+    # requests that weren't actually hung).
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0, timeout=300)
 
     # 動態讀取專案內的原始碼檔案，提供給 LLM 作為上下文——範圍限縮邏輯見
-    # _collect_relevant_context_paths。
+    # collect_relevant_context_paths。
     workspace_path = state.get("workspace_path", "")
     target_app = state.get("target_app", ".")
     error_log = state.get("current_error_log", "")
@@ -141,15 +148,15 @@ def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     if os.path.exists(workspace_path):
         total_chars = 0
         retrieved_files = state.get("retrieved_files", [])
-        for rel_path in _collect_relevant_context_paths(workspace_path, target_app, error_log, retrieved_files):
+        for rel_path in collect_relevant_context_paths(workspace_path, target_app, error_log, retrieved_files):
             filepath = os.path.join(workspace_path, rel_path)
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     content = f.read()
             except Exception:
                 continue
-            if total_chars + len(content) > _MAX_PATCH_CONTEXT_CHARS:
-                print(f"   ⚠️ 上下文已達 {_MAX_PATCH_CONTEXT_CHARS} 字元上限，略過 {rel_path} 及其後續檔案。")
+            if total_chars + len(content) > MAX_PATCH_CONTEXT_CHARS:
+                print(f"   ⚠️ 上下文已達 {MAX_PATCH_CONTEXT_CHARS} 字元上限，略過 {rel_path} 及其後續檔案。")
                 break
             project_files_content += f"\n--- {rel_path} ---\n{content}\n"
             total_chars += len(content)

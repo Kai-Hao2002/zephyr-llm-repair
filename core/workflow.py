@@ -104,6 +104,43 @@ def _compute_failure_final_status(current_iter: int, max_iterations: int) -> str
     return "failed_max_retries" if current_iter >= max_iterations else "in_progress"
 
 
+def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
+                             required_pass_test: str = None) -> Dict[str, Any]:
+    """
+    執行一次 west build -t run 並判讀結果，回傳 {"status", "resolved", "log"}。
+
+    「套件整體成功，但 required_pass_test 沒有真的通過 (投機取巧/繞過)」這個
+    判讀屬於防呆邏輯的核心一環，被 Build (Proposed pipeline) 跟 B1/B2/B3
+    baseline 共用同一份實作——拆出來是為了不讓這個判斷在多個呼叫點各自實作、
+    容易在某一處漏掉 (漏掉的後果是讓一個刪測試的投機 patch 被誤判為修復成功)。
+
+    Runs one `west build -t run` and interprets the result, returning
+    {"status", "resolved", "log"}. The "suite as a whole reports success, but
+    required_pass_test never actually PASSed (a shortcut patch bypassing the
+    test)" judgment is core fail-safe logic, shared by Build (the Proposed
+    pipeline) and the B1/B2/B3 baselines — factored out so this check isn't
+    reimplemented at each call site (where forgetting it once would let a
+    test-deleting shortcut patch be misjudged as a successful repair).
+    """
+    docker_cmd = build_devops_docker_cmd(workspace_path, board, target_app)
+    oracle = QemuOracle(timeout=600)
+    eval_result = oracle.evaluate(docker_cmd, required_pass_test=required_pass_test)
+    log_filter = LogFilter()
+
+    if eval_result["status"] == "missing_required_test":
+        compressed_log = log_filter.compress_log(eval_result["log"]) + (
+            f"\n\n[判定失敗：套件整體成功，但目標測試 '{required_pass_test}' 未見 PASS，"
+            f"patch 疑似繞過而非真正修復。]"
+        )
+        return {"status": "missing_required_test", "resolved": False, "log": compressed_log}
+
+    if eval_result["status"] == "success":
+        return {"status": "success", "resolved": True, "log": "Zephyr OS successfully booted."}
+
+    return {"status": eval_result["status"], "resolved": False,
+            "log": log_filter.compress_log(eval_result["log"])}
+
+
 def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     """
     ApplyPatch：把 Patch Expert 產生的 SEARCH/REPLACE 區塊套用到 workspace
@@ -214,30 +251,24 @@ def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
     target_app = state.get("target_app", ".")
     required_pass_test = state.get("required_pass_test")
 
-    # 見 build_devops_docker_cmd 的說明：掛載點必須是 /zephyrproject/zephyr。
-    # See build_devops_docker_cmd's docstring: the mount point must be
-    # /zephyrproject/zephyr.
-    docker_cmd = build_devops_docker_cmd(workspace_path, board, target_app)
-
     print(f"\n🔨 [Build] 第 {current_iter} 次迭代：開始在隔離容器中編譯並執行 QEMU...")
     # timeout=15 對一次真正的 west build (可能要編譯 Zephyr kernel + app)
     # 來說遠遠不夠，幾乎每次都會提早 timeout，把任何案例都誤判為建置卡住
     # ——FaultInjector 驗證資料集時本來就是用 600s (tools/fault_injector.py)，
-    # 這裡跟著對齊，而不是沿用 QemuOracle 建構子預設值 15。
+    # evaluate_repair_attempt 內部跟著對齊，而不是沿用 QemuOracle 建構子
+    # 預設值 15。
     # timeout=15 is far too short for an actual west build (which may need
     # to compile the Zephyr kernel plus the app) — nearly every run would
     # time out early and get misclassified as stuck. FaultInjector already
-    # uses 600s to verify this dataset (tools/fault_injector.py); align
-    # with that instead of QemuOracle's constructor default of 15.
-    oracle = QemuOracle(timeout=600)
-    eval_result = oracle.evaluate(docker_cmd, required_pass_test=required_pass_test)
+    # uses 600s to verify this dataset (tools/fault_injector.py);
+    # evaluate_repair_attempt aligns with that instead of QemuOracle's
+    # constructor default of 15.
+    eval_result = evaluate_repair_attempt(workspace_path, board, target_app, required_pass_test)
 
     if eval_result["status"] == "missing_required_test":
         print(f"   ⚠️ 套件回報成功，但目標測試 '{required_pass_test}' 沒有真的通過——patch 疑似投機取巧 (刪除/跳過該測試)，不算修復成功。")
-        log_filter = LogFilter()
         return {
-            "current_error_log": log_filter.compress_log(eval_result["log"])
-                + f"\n\n[判定失敗：套件整體成功，但目標測試 '{required_pass_test}' 未見 PASS，patch 疑似繞過而非真正修復。]",
+            "current_error_log": eval_result["log"],
             "error_type": "missing_required_test",
             "iterations": current_iter,
             "final_status": failure_final_status,
@@ -251,24 +282,22 @@ def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
     if eval_result["status"] == "success":
         print("   🎉 執行期驗證通過！")
         return {
-            "current_error_log": "Zephyr OS successfully booted.",
+            "current_error_log": eval_result["log"],
             "error_type": "success",
             "iterations": current_iter,
             "final_status": "resolved"
         }
 
     print(f"   💥 測試失敗 (狀態: {eval_result['status']})，正在過濾日誌...")
-    log_filter = LogFilter()
-    compressed_log = log_filter.compress_log(eval_result["log"])
     return {
-        "current_error_log": compressed_log,
+        "current_error_log": eval_result["log"],
         "error_type": eval_result["status"],
         "iterations": current_iter,
         "final_status": failure_final_status,
         **record_attempt_outcome(
             current_iter,
             f"修補已套用至 {applied_files}，通過靜態分析後完整建置，但建置/執行失敗 "
-            f"(狀態: {eval_result['status']})：{compressed_log}",
+            f"(狀態: {eval_result['status']})：{eval_result['log']}",
         ),
     }
 

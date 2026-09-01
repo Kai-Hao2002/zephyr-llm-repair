@@ -28,7 +28,14 @@ def analyzer_node(state: ZephyrAgentState) -> Dict[str, Any]:
     print(f"\n🧠 [LLM Analyzer] 正在分析第 {state['iterations']} 次迭代的日誌...")
 
     # 改用 Gemini 1.5 Flash (快速且便宜，適合分類任務)
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)
+    # timeout=120：實測 2026-09-01，Gemini API 呼叫偶爾會完全沒有回應，
+    # 沒設 timeout 的話呼叫端會無限期卡住 (曾讓一次 B3 baseline pilot 卡了
+    # 1 小時 44 分鐘才被手動砍掉)。120 秒對這裡的分類任務綽綽有餘。
+    # timeout=120: confirmed 2026-09-01 that Gemini API calls can hang with
+    # no response at all; without a timeout the caller blocks indefinitely
+    # (once left a B3 baseline pilot hung for 1h44m before being killed by
+    # hand). 120s is generous for this classification-sized task.
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1, timeout=120)
     structured_llm = llm.with_structured_output(AnalyzerOutput)
 
     prompt = ChatPromptTemplate.from_messages([

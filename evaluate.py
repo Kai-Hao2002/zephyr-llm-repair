@@ -42,8 +42,11 @@ from dotenv import load_dotenv
 
 from core.state import create_initial_state, ZephyrAgentState
 from core.workflow import build_zephyr_graph, build_devops_docker_cmd
+from core.baseline_pipelines import run_b1, run_b2, run_b3
 from tools.fault_injector import MUTATE_SCRIPT_HOST_PATH, MUTATE_SCRIPT_CONTAINER_PATH
 from tools.qemu_oracle import QemuOracle
+
+PIPELINE_CHOICES = ("proposed", "b1", "b2", "b3")
 
 load_dotenv()
 
@@ -142,7 +145,19 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
 
     logger.info(f"[{case_id}] 準備 broken workspace (checkout {broken_commit[:12]} + 套用 mutation)...")
     try:
-        result = subprocess.run(docker_run_cmd, capture_output=True, text=True, timeout=900)
+        # 實測 (2026-09-01)：光是 west update --narrow 這一步 (逐一從十幾個
+        # 不同的 GitHub repo 抓各家 HAL module) 就可能吃到 15 分鐘，加上
+        # 前面的 fetch/checkout 跟後面的 mutation，整體逼近甚至超過原本
+        # 900 秒的上限——這不是新案例才會遇到的問題，是這個步驟本身在
+        # 網路較慢時的真實耗時，調高到 1800 秒留出實際需要的緩衝。
+        # Measured (2026-09-01): west update --narrow alone (fetching each
+        # HAL module from a dozen-plus separate GitHub repos one by one)
+        # can take up to 15 minutes; combined with the fetch/checkout before
+        # it and the mutation after, the total routinely approaches or
+        # exceeds the previous 900s cap — not something specific to any one
+        # case, just this step's real duration when the network is slower.
+        # Raised to 1800s to give the headroom this step actually needs.
+        result = subprocess.run(docker_run_cmd, capture_output=True, text=True, timeout=1800)
         if result.returncode != 0:
             raise RuntimeError(
                 f"workspace prep failed for case '{case_id}' (container exit {result.returncode}):\n"
@@ -253,7 +268,8 @@ def verify_reproduces_initial_failure(case: Dict[str, Any], workspace_path: str)
     return result
 
 
-def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_check: bool) -> Dict[str, Any]:
+def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_check: bool,
+             pipeline: str = "proposed") -> Dict[str, Any]:
     case_id = case["id"]
     dest_dir = os.path.join(runs_dir, case_id)
 
@@ -272,21 +288,34 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
             )
 
     state = build_agent_initial_state(case, workspace_path, max_iters)
-    graph = build_zephyr_graph()
 
-    logger.info(f"[{case_id}] 開始 LangGraph 閉環修復...")
-    final_status = "in_progress"
-    total_iterations = 0
-    for step_event in graph.stream(state):
-        for node_name, updated_state in step_event.items():
-            logger.info(f"[{case_id}] 節點 [{node_name}] 執行完畢.")
-            total_iterations = updated_state.get("iterations", total_iterations)
-            if updated_state.get("final_status") in ("resolved", "failed_max_retries"):
-                final_status = updated_state["final_status"]
+    logger.info(f"[{case_id}] 開始 {pipeline} pipeline 修復...")
+    if pipeline == "proposed":
+        graph = build_zephyr_graph()
+        final_status = "in_progress"
+        total_iterations = 0
+        for step_event in graph.stream(state):
+            for node_name, updated_state in step_event.items():
+                logger.info(f"[{case_id}] 節點 [{node_name}] 執行完畢.")
+                total_iterations = updated_state.get("iterations", total_iterations)
+                if updated_state.get("final_status") in ("resolved", "failed_max_retries"):
+                    final_status = updated_state["final_status"]
+    elif pipeline == "b1":
+        result = run_b1(state)
+        final_status, total_iterations = result["final_status"], result["iterations"]
+    elif pipeline == "b2":
+        result = run_b2(state)
+        final_status, total_iterations = result["final_status"], result["iterations"]
+    elif pipeline == "b3":
+        result = run_b3(state, max_iters)
+        final_status, total_iterations = result["final_status"], result["iterations"]
+    else:
+        raise ValueError(f"unknown --pipeline '{pipeline}', expected one of {PIPELINE_CHOICES}")
 
     return {
         "case_id": case_id,
         "category": case.get("category"),
+        "pipeline": pipeline,
         "final_status": final_status,
         "iterations": total_iterations,
         "workspace_path": workspace_path,
@@ -314,6 +343,9 @@ def select_cases(dataset: List[Dict[str, Any]], args: argparse.Namespace) -> Lis
 def main():
     parser = argparse.ArgumentParser(description="Zephyr-Eval evaluation runner (Phase 1 prototype).")
     parser.add_argument("--dataset", default=DEFAULT_DATASET_PATH, help="Path to a cases JSON file (final_dataset.json schema).")
+    parser.add_argument("--pipeline", default="proposed", choices=PIPELINE_CHOICES,
+                         help="Which pipeline to run: 'proposed' (full multi-agent closed-loop), "
+                              "or one of the Table 2 ablation baselines b1/b2/b3.")
     parser.add_argument("--case-id", help="Run exactly one case by its 'id' field.")
     parser.add_argument("--limit", type=int, help="Run only the first N cases (for piloting).")
     parser.add_argument("--all", action="store_true", help="Run every case in the dataset. Requires explicit opt-in.")
@@ -333,10 +365,11 @@ def main():
     results = []
     for case in cases:
         try:
-            results.append(run_case(case, args.runs_dir, args.max_retries, args.skip_repro_check))
+            results.append(run_case(case, args.runs_dir, args.max_retries, args.skip_repro_check, args.pipeline))
         except Exception as e:
             logger.error(f"[{case['id']}] 執行失敗: {e}")
-            results.append({"case_id": case["id"], "category": case.get("category"), "final_status": "error", "error": str(e)})
+            results.append({"case_id": case["id"], "category": case.get("category"), "pipeline": args.pipeline,
+                             "final_status": "error", "error": str(e)})
 
     results_out = args.results_out or os.path.join(args.runs_dir, "results.json")
     os.makedirs(os.path.dirname(results_out) or ".", exist_ok=True)

@@ -58,7 +58,16 @@ def _compress_outcome_to_one_sentence(outcome_description: str) -> str:
     history entry beats failing the whole iteration over logging.
     """
     try:
-        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+        # timeout=120 (見 agents/analyzer.py 的說明)：這裡尤其重要——沒有
+        # timeout 的話，一次卡住的 API 呼叫不會被下面的 except 接住 (卡住
+        # 是無限期等待，不是拋例外)，這個函式本來設計成失敗時優雅退回
+        # 原始文字前 200 字，但沒有 timeout 就永遠等不到失敗發生。
+        # timeout=120 (see agents/analyzer.py): especially important here —
+        # without it, a hung API call is never caught by the except below
+        # (hanging is indefinite blocking, not an exception); this function
+        # is designed to gracefully fall back to the first 200 chars on
+        # failure, but with no timeout that "failure" never arrives.
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0, timeout=120)
         prompt = ChatPromptTemplate.from_messages([
             ("system", "把以下這次修補嘗試的內容與結果，壓縮成剛好一句話的繁體中文摘要，"
                        "保留關鍵資訊 (改了哪個檔案、為什麼還是失敗)。只輸出這一句話，"
