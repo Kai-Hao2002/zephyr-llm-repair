@@ -83,6 +83,58 @@ class ZephyrAgentState(TypedDict):
     # touched, not the whole tree).
     applied_files: List[str]
 
+    # === 4. 評分指標蒐集 (Metrics Collection，見 evaluate.py/analyze_results.py) ===
+
+    # 每次迭代結束時 (跟 attempt_history 完全同一組寫入點，見
+    # agents/supervisor.py 的 record_attempt_outcome/record_iteration_success)
+    # 附加一筆紀錄：這次迭代有沒有真的編譯出執行檔 (compiled)、有沒有修復
+    # 成功 (resolved)、patch 格式本身是否有效 (tool_invocation_error)，以及
+    # 這次迭代所有 LLM 呼叫的 token 用量。用 Annotated + operator.add，跟
+    # attempt_history 同一種「附加而非覆寫」機制。RQ1/RQ3 的 Pass@k /
+    # Functional Pass Rate / 迭代次數、RQ4 的 Token Efficiency，都從這裡
+    # 算，不在別處另外重算一次容易漂移的邏輯。
+    # One entry appended at the end of each iteration (exactly the same
+    # write points as attempt_history — see agents/supervisor.py's
+    # record_attempt_outcome/record_iteration_success): whether this
+    # iteration actually produced a compiled binary (compiled), whether it
+    # resolved the case (resolved), whether the patch itself was validly
+    # formatted (tool_invocation_error), and the token usage of every LLM
+    # call made during this iteration. Annotated + operator.add, the same
+    # "append, don't overwrite" mechanism as attempt_history. RQ1/RQ3's
+    # Pass@k / Functional Pass Rate / iteration count and RQ4's Token
+    # Efficiency are all computed from this, not re-derived elsewhere.
+    iteration_log: Annotated[List[dict], operator.add]
+
+    # 這次迭代目前已知、但還沒寫進 iteration_log 的 LLM token 用量——
+    # Analyzer/Patch/Supervisor 壓縮呼叫都各自把自己那次呼叫的用量附加進
+    # 這裡，等這次迭代結束時 (寫 iteration_log 那一刻) 一次讀出、歸零，
+    # 讓下一次迭代重新累積。不是 Annotated：讀出並整份覆寫回去是這個欄位
+    # 本來就設計成的用法 (跟 attempt_history/iteration_log 的「只附加」
+    # 語意不同)。
+    # Token usage known so far this iteration but not yet flushed into
+    # iteration_log — Analyzer/Patch/Supervisor's compression call each
+    # append their own call's usage here; read out and reset to [] exactly
+    # when this iteration's iteration_log entry gets written, so the next
+    # iteration starts accumulating fresh. Not Annotated: read-then-
+    # overwrite-in-full is the intended usage here (different "append-only"
+    # semantics from attempt_history/iteration_log).
+    pending_token_usage: List[dict]
+
+    # 只在 Knowledge Expert「第一次」真正執行檢索時寫入，之後永遠不再覆蓋
+    # (見 agents/knowledge_expert.py)。RQ2 的 MRR/Recall@k/Top-k Accuracy
+    # 依使用者確認的方法論，只看第一次診斷觸發的檢索結果，不算閉環重試
+    # 帶來的效果 (那是 RQ3 的事)——None 代表這次案例從頭到尾都沒有觸發過
+    # 檢索 (例如 B1/B3 完全沒有 RAG，或 Proposed/B2 從沒被 Analyzer 判定
+    # 需要檢索)。
+    # Written only the "first" time Knowledge Expert actually performs a
+    # retrieval, never overwritten after (see agents/knowledge_expert.py).
+    # Per the confirmed methodology, RQ2's MRR/Recall@k/Top-k Accuracy only
+    # look at the first diagnosis's retrieval result, not whatever benefit
+    # closed-loop retries add (that's RQ3's concern). None means retrieval
+    # never fired at all for this case (e.g. B1/B3 have no RAG at all, or
+    # Proposed/B2 never had Analyzer decide retrieval was needed).
+    first_retrieval_files: Optional[List[str]]
+
     # === 3. 系統控制與防呆機制 (System Control & Fail-safes) ===
     
     # 目標 Zephyr 專案的路徑
@@ -167,6 +219,9 @@ def create_initial_state(workspace_path: str, initial_log: str, max_iters: int =
         "patch_content": "",
         "attempt_history": [],
         "applied_files": [],
+        "iteration_log": [],
+        "pending_token_usage": [],
+        "first_retrieval_files": None,
         "workspace_path": workspace_path,
         "board": board,
         "target_app": target_app,

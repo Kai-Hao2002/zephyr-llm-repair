@@ -15,6 +15,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from core.state import ZephyrAgentState
+from core.llm_usage import extract_usage, append_usage
 
 _LOG_PATH_PREFIX = "/zephyrproject/zephyr/"
 _LOG_EXT_PATH_RE = re.compile(re.escape(_LOG_PATH_PREFIX) + r"([\w\-./]+\.(?:c|h|conf|dts|dtsi|overlay))\b")
@@ -215,8 +216,10 @@ SEARCH 區塊內的程式碼必須與原始檔案「一模一樣」（包含縮�
     })
 
     patch_text = response.content
+    usage_entry = extract_usage(response, node="patch_expert", model="gemini-2.5-pro")
     print("   ↳ 成功生成修補區塊！")
     return {
         "patch_content": patch_text,
-        "messages": [f"Patch Expert 已生成修補方案。"]
+        "messages": [f"Patch Expert 已生成修補方案。"],
+        "pending_token_usage": append_usage(state.get("pending_token_usage", []), usage_entry),
     }

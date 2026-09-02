@@ -13,6 +13,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from core.state import ZephyrAgentState
+from core.llm_usage import extract_usage, append_usage
 
 
 class AnalyzerOutput(BaseModel):
@@ -36,7 +37,14 @@ def analyzer_node(state: ZephyrAgentState) -> Dict[str, Any]:
     # (once left a B3 baseline pilot hung for 1h44m before being killed by
     # hand). 120s is generous for this classification-sized task.
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1, timeout=120)
-    structured_llm = llm.with_structured_output(AnalyzerOutput)
+    # include_raw=True：預設的 with_structured_output 只回傳解析好的
+    # pydantic 物件，拿不到底層 AIMessage 的 usage_metadata (RQ4 的 Token
+    # Efficiency 需要這個)。改成回傳 {"raw","parsed","parsing_error"}。
+    # include_raw=True: the default with_structured_output only returns the
+    # parsed pydantic object, losing access to the underlying AIMessage's
+    # usage_metadata (needed for RQ4's Token Efficiency). Switches the
+    # return shape to {"raw", "parsed", "parsing_error"}.
+    structured_llm = llm.with_structured_output(AnalyzerOutput, include_raw=True)
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", """你是一位資深的 Zephyr RTOS 除錯專家。
@@ -49,12 +57,15 @@ def analyzer_node(state: ZephyrAgentState) -> Dict[str, Any]:
     ])
 
     chain = prompt | structured_llm
-    result: AnalyzerOutput = chain.invoke({"error_log": state.get("current_error_log", "")})
+    raw_output = chain.invoke({"error_log": state.get("current_error_log", "")})
+    result: AnalyzerOutput = raw_output["parsed"]
+    usage_entry = extract_usage(raw_output["raw"], node="analyzer", model="gemini-2.5-flash")
 
     print(f"   ↳ 推論: {result.reasoning}")
     print(f"   ↳ 提取關鍵字: {result.search_keywords}")
 
     return {
         "search_keywords": result.search_keywords,
-        "messages": [f"Analyzer 診斷 ({result.error_category}): {result.reasoning}"]
+        "messages": [f"Analyzer 診斷 ({result.error_category}): {result.reasoning}"],
+        "pending_token_usage": append_usage(state.get("pending_token_usage", []), usage_entry),
     }

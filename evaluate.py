@@ -290,27 +290,58 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
     state = build_agent_initial_state(case, workspace_path, max_iters)
 
     logger.info(f"[{case_id}] 開始 {pipeline} pipeline 修復...")
+    # TTR (Time-to-Repair，見 analyze_results.py)：從這裡開始的牆鐘時間，
+    # 到修復迴圈真正結束為止——workspace 準備/repro-check 的時間不算在
+    # 內，那是評測環境的固定成本，不是 agent 修復本身的效率。
+    # TTR (Time-to-Repair, see analyze_results.py): wall-clock time from
+    # here to when the repair loop actually concludes — workspace prep and
+    # the repro-check aren't counted, that's a fixed evaluation-environment
+    # cost, not the agent's own repair efficiency.
+    start_time = time.time()
+
     if pipeline == "proposed":
         graph = build_zephyr_graph()
-        final_status = "in_progress"
-        total_iterations = 0
-        for step_event in graph.stream(state):
-            for node_name, updated_state in step_event.items():
-                logger.info(f"[{case_id}] 節點 [{node_name}] 執行完畢.")
-                total_iterations = updated_state.get("iterations", total_iterations)
-                if updated_state.get("final_status") in ("resolved", "failed_max_retries"):
-                    final_status = updated_state["final_status"]
+        # graph.invoke() 而不是 graph.stream()：iteration_log/attempt_history
+        # 這種 Annotated(operator.add) 欄位，stream() 逐節點拿到的只是那個
+        # 節點「這次回傳的增量」，不是合併後的完整列表——要拿到正確累積的
+        # iteration_log，要嘛在這裡手動重新實作一次 LangGraph 的 reducer
+        # 合併邏輯，要嘛直接用 invoke() 拿框架自己合併好的最終 state。
+        # 後者不容易出錯，副作用只是少了每個節點各自的即時 log 行 (節點
+        # 內部自己的 print() 不受影響，一樣會即時印出)。
+        # graph.invoke() instead of graph.stream(): for Annotated
+        # (operator.add) fields like iteration_log/attempt_history,
+        # streaming per-node only yields that node's own returned delta,
+        # not the merged running list — getting the true accumulated
+        # iteration_log would mean either hand-reimplementing LangGraph's
+        # reducer merge logic here, or just using invoke() to get the
+        # framework's own correctly-merged final state. The latter is far
+        # less error-prone; the only tradeoff is losing this loop's own
+        # per-node log line (each node's own print() calls are unaffected
+        # and still print live).
+        final_state = graph.invoke(state)
+        final_status = final_state.get("final_status", "in_progress")
+        total_iterations = final_state.get("iterations", 0)
+        iteration_log = final_state.get("iteration_log", [])
+        first_retrieval_files = final_state.get("first_retrieval_files")
     elif pipeline == "b1":
         result = run_b1(state)
         final_status, total_iterations = result["final_status"], result["iterations"]
+        iteration_log = result.get("iteration_log", [])
+        first_retrieval_files = result.get("first_retrieval_files")
     elif pipeline == "b2":
         result = run_b2(state)
         final_status, total_iterations = result["final_status"], result["iterations"]
+        iteration_log = result.get("iteration_log", [])
+        first_retrieval_files = result.get("first_retrieval_files")
     elif pipeline == "b3":
         result = run_b3(state, max_iters)
         final_status, total_iterations = result["final_status"], result["iterations"]
+        iteration_log = result.get("iteration_log", [])
+        first_retrieval_files = result.get("first_retrieval_files")
     else:
         raise ValueError(f"unknown --pipeline '{pipeline}', expected one of {PIPELINE_CHOICES}")
+
+    ttr_seconds = time.time() - start_time
 
     return {
         "case_id": case_id,
@@ -318,6 +349,9 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
         "pipeline": pipeline,
         "final_status": final_status,
         "iterations": total_iterations,
+        "ttr_seconds": ttr_seconds,
+        "iteration_log": iteration_log,
+        "first_retrieval_files": first_retrieval_files,
         "workspace_path": workspace_path,
     }
 

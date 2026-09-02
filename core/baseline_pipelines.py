@@ -61,31 +61,53 @@ def _read_context_files(workspace_path: str, target_app: str, error_log: str,
     return content
 
 
+def _iteration_log_entry(current_iter: int, compiled: bool, resolved: bool,
+                          tool_invocation_error: bool, usage_entries: list) -> Dict[str, Any]:
+    """跟 agents/supervisor.py 的 _build_iteration_log_entry 完全同一個
+    shape——results.json 的分析腳本 (analyze_results.py) 要能不分 pipeline
+    地讀同一種 iteration_log 結構，Proposed 跟 B1/B2/B3 的紀錄格式不能各自
+    長得不一樣。"""
+    return {
+        "iteration": current_iter,
+        "compiled": compiled,
+        "resolved": resolved,
+        "tool_invocation_error": tool_invocation_error,
+        "token_usage": usage_entries,
+    }
+
+
 def run_b1(state: ZephyrAgentState) -> Dict[str, Any]:
     """
     B1 Zero-Shot LLM：一次 LLM 呼叫、一次 apply、一次 build，不重試、
     不做 StaticCheck。"raw log as input, no tools, no RAG" 落實在
     agents.baselines.b1_generate_full_file_patch 裡只傳 error_log 一個
-    欄位，這裡不額外讀任何檔案內容餵給它。
+    欄位，這裡不額外讀任何檔案內容餵給它。B1 沒有 RAG，first_retrieval_files
+    永遠不設定 (代表這個案例的 RQ2 檢索指標對 B1 不適用)。
     """
     workspace_path = state["workspace_path"]
     error_log = state.get("current_error_log", "")
     print("\n🧪 [B1 Zero-Shot] 只憑錯誤日誌，猜測要修正的檔案與內容...")
 
-    patch = b1_generate_full_file_patch(error_log)
+    patch, usage_entry = b1_generate_full_file_patch(error_log)
     applier = PatchApplier(workspace_path=workspace_path)
     apply_result = applier.apply_full_file(patch["filepath"], patch["content"])
 
     if not apply_result["success"]:
         print(f"   ❌ 套用失敗：{apply_result['error']}")
-        return {"final_status": "failed_max_retries", "iterations": 1, "error_type": "patch_format_error"}
+        return {
+            "final_status": "failed_max_retries", "iterations": 1, "error_type": "patch_format_error",
+            "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry])],
+        }
 
     eval_result = evaluate_repair_attempt(
         workspace_path, state["board"], state["target_app"], state.get("required_pass_test")
     )
     final_status = "resolved" if eval_result["resolved"] else "failed_max_retries"
     print(f"   {'🎉' if eval_result['resolved'] else '💥'} 建置/執行結果：{eval_result['status']}")
-    return {"final_status": final_status, "iterations": 1, "error_type": eval_result["status"]}
+    return {
+        "final_status": final_status, "iterations": 1, "error_type": eval_result["status"],
+        "iteration_log": [_iteration_log_entry(1, eval_result["compiled"], eval_result["resolved"], False, [usage_entry])],
+    }
 
 
 def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
@@ -93,7 +115,8 @@ def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
     B2 Single Agent + Text RAG (BM25-only)：一次 LLM 呼叫、一次 apply、
     一次 build，不重試。檢索直接拿 current_error_log 全文當查詢字串
     (B2 沒有 Proposed 的 Analyzer 角色去提取 search_keywords，那本身就是
-    多代理人分工的一部分，B2 不該有)。
+    多代理人分工的一部分，B2 不該有)。單發、沒有閉環重試，這次檢索天生
+    就是「第一次也是唯一一次」，直接記進 first_retrieval_files。
     """
     workspace_path = state["workspace_path"]
     target_app = state["target_app"]
@@ -106,57 +129,75 @@ def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
         print(f"   ↳ BM25 檢索到候選檔案：{retrieved_files}")
 
     project_files_content = _read_context_files(workspace_path, target_app, error_log, retrieved_files)
-    patch_text = b2_generate_patch(error_log, project_files_content)
+    patch_text, usage_entry = b2_generate_patch(error_log, project_files_content)
 
     applier = PatchApplier(workspace_path=workspace_path)
     apply_result = applier.apply_patches(patch_text)
     if not apply_result["success"]:
         print(f"   ❌ 套用失敗：{apply_result['error']}")
-        return {"final_status": "failed_max_retries", "iterations": 1, "error_type": "patch_format_error"}
+        return {
+            "final_status": "failed_max_retries", "iterations": 1, "error_type": "patch_format_error",
+            "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry])],
+            "first_retrieval_files": retrieved_files,
+        }
 
     eval_result = evaluate_repair_attempt(
         workspace_path, state["board"], state["target_app"], state.get("required_pass_test")
     )
     final_status = "resolved" if eval_result["resolved"] else "failed_max_retries"
     print(f"   {'🎉' if eval_result['resolved'] else '💥'} 建置/執行結果：{eval_result['status']}")
-    return {"final_status": final_status, "iterations": 1, "error_type": eval_result["status"]}
+    return {
+        "final_status": final_status, "iterations": 1, "error_type": eval_result["status"],
+        "iteration_log": [_iteration_log_entry(1, eval_result["compiled"], eval_result["resolved"], False, [usage_entry])],
+        "first_retrieval_files": retrieved_files,
+    }
 
 
 def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
     """
     B3 Closed-Loop Single Agent：單一 LLM persona 身兼診斷+修補，重複
     apply→build 直到成功或用完 max_iters；不做 StaticCheck (DevOps Expert
-    的專門化分工)、不給 RAG、不給跨迭代記憶 (每次只帶最新 error_log，不是
-    完整歷史——見 agents/baselines.py 的 b3_generate_patch 說明)。
+    的專門化分工)、不給 RAG (first_retrieval_files 永遠不設定)、不給跨迭代
+    記憶 (每次只帶最新 error_log，不是完整歷史——見 agents/baselines.py 的
+    b3_generate_patch 說明)。
     """
     workspace_path = state["workspace_path"]
     target_app = state["target_app"]
     board = state["board"]
     required_pass_test = state.get("required_pass_test")
     error_log = state.get("current_error_log", "")
+    iteration_log = []
 
     for current_iter in range(1, max_iters + 1):
         print(f"\n🧪 [B3 Closed-Loop] 第 {current_iter}/{max_iters} 次迭代...")
         project_files_content = _read_context_files(workspace_path, target_app, error_log, [])
-        patch_text = b3_generate_patch(error_log, project_files_content)
+        patch_text, usage_entry = b3_generate_patch(error_log, project_files_content)
 
         applier = PatchApplier(workspace_path=workspace_path)
         apply_result = applier.apply_patches(patch_text)
         if not apply_result["success"]:
             print(f"   ❌ 套用失敗：{apply_result['error']}")
             error_log = f"Patch Application Failed:\n{apply_result['error']}"
+            iteration_log.append(_iteration_log_entry(current_iter, False, False, True, [usage_entry]))
             if current_iter >= max_iters:
-                return {"final_status": "failed_max_retries", "iterations": current_iter, "error_type": "patch_format_error"}
+                return {"final_status": "failed_max_retries", "iterations": current_iter,
+                        "error_type": "patch_format_error", "iteration_log": iteration_log}
             continue
 
         eval_result = evaluate_repair_attempt(workspace_path, board, target_app, required_pass_test)
+        iteration_log.append(_iteration_log_entry(
+            current_iter, eval_result["compiled"], eval_result["resolved"], False, [usage_entry]
+        ))
         if eval_result["resolved"]:
             print("   🎉 執行期驗證通過！")
-            return {"final_status": "resolved", "iterations": current_iter, "error_type": "success"}
+            return {"final_status": "resolved", "iterations": current_iter, "error_type": "success",
+                    "iteration_log": iteration_log}
 
         print(f"   💥 建置/執行失敗 (狀態: {eval_result['status']})")
         error_log = eval_result["log"]
         if current_iter >= max_iters:
-            return {"final_status": "failed_max_retries", "iterations": current_iter, "error_type": eval_result["status"]}
+            return {"final_status": "failed_max_retries", "iterations": current_iter,
+                    "error_type": eval_result["status"], "iteration_log": iteration_log}
 
-    return {"final_status": "failed_max_retries", "iterations": max_iters, "error_type": "unknown"}
+    return {"final_status": "failed_max_retries", "iterations": max_iters, "error_type": "unknown",
+            "iteration_log": iteration_log}

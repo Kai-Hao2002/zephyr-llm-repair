@@ -21,7 +21,8 @@ from agents.analyzer import analyzer_node
 from agents.knowledge_expert import knowledge_expert_node
 from agents.patch_expert import patch_node
 from agents.supervisor import (
-    route_after_apply_patch, route_after_static_check, route_after_build, record_attempt_outcome,
+    route_after_apply_patch, route_after_static_check, route_after_build,
+    record_attempt_outcome, record_iteration_success,
 )
 from tools.static_checker import StaticChecker
 
@@ -104,10 +105,31 @@ def _compute_failure_final_status(current_iter: int, max_iterations: int) -> str
     return "failed_max_retries" if current_iter >= max_iterations else "in_progress"
 
 
+# QemuOracle 的狀態字彙裡，這三種都代表「真的編譯出執行檔並跑到 QEMU/
+# native_sim 起來」(crash/missing_required_test 是跑起來後才失敗，success
+# 更不用說)；其餘 (eof_no_boot/timeout/docker_infra_error/
+# west_update_error/target_path_missing/unsupported_board/unknown) 代表
+# 從沒真正跑起來過——tools/qemu_oracle.py 自己的註解也是這樣定義
+# eof_no_boot 的 ("build-failed-before-QEMU-ever-started")。RQ1/RQ3 的
+# Bounded Compilation Success Rate (Pass@k) 用這個判斷，跟 Functional Pass
+# Rate (= resolved) 是兩個獨立的指標。
+# In QemuOracle's status vocabulary, these three all mean "a binary was
+# actually compiled and reached QEMU/native_sim boot" (crash/
+# missing_required_test fail only after booting; success obviously so); the
+# rest (eof_no_boot/timeout/docker_infra_error/west_update_error/
+# target_path_missing/unsupported_board/unknown) mean it never genuinely
+# ran — tools/qemu_oracle.py's own comments define eof_no_boot this way too
+# ("build-failed-before-QEMU-ever-started"). RQ1/RQ3's Bounded Compilation
+# Success Rate (Pass@k) is derived from this, a metric independent of
+# Functional Pass Rate (= resolved).
+_COMPILED_STATUSES = frozenset({"crash", "missing_required_test", "success"})
+
+
 def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
                              required_pass_test: str = None) -> Dict[str, Any]:
     """
-    執行一次 west build -t run 並判讀結果，回傳 {"status", "resolved", "log"}。
+    執行一次 west build -t run 並判讀結果，回傳
+    {"status", "resolved", "compiled", "log"}。
 
     「套件整體成功，但 required_pass_test 沒有真的通過 (投機取巧/繞過)」這個
     判讀屬於防呆邏輯的核心一環，被 Build (Proposed pipeline) 跟 B1/B2/B3
@@ -115,29 +137,31 @@ def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
     容易在某一處漏掉 (漏掉的後果是讓一個刪測試的投機 patch 被誤判為修復成功)。
 
     Runs one `west build -t run` and interprets the result, returning
-    {"status", "resolved", "log"}. The "suite as a whole reports success, but
-    required_pass_test never actually PASSed (a shortcut patch bypassing the
-    test)" judgment is core fail-safe logic, shared by Build (the Proposed
-    pipeline) and the B1/B2/B3 baselines — factored out so this check isn't
-    reimplemented at each call site (where forgetting it once would let a
-    test-deleting shortcut patch be misjudged as a successful repair).
+    {"status", "resolved", "compiled", "log"}. The "suite as a whole reports
+    success, but required_pass_test never actually PASSed (a shortcut patch
+    bypassing the test)" judgment is core fail-safe logic, shared by Build
+    (the Proposed pipeline) and the B1/B2/B3 baselines — factored out so
+    this check isn't reimplemented at each call site (where forgetting it
+    once would let a test-deleting shortcut patch be misjudged as a
+    successful repair).
     """
     docker_cmd = build_devops_docker_cmd(workspace_path, board, target_app)
     oracle = QemuOracle(timeout=600)
     eval_result = oracle.evaluate(docker_cmd, required_pass_test=required_pass_test)
     log_filter = LogFilter()
+    compiled = eval_result["status"] in _COMPILED_STATUSES
 
     if eval_result["status"] == "missing_required_test":
         compressed_log = log_filter.compress_log(eval_result["log"]) + (
             f"\n\n[判定失敗：套件整體成功，但目標測試 '{required_pass_test}' 未見 PASS，"
             f"patch 疑似繞過而非真正修復。]"
         )
-        return {"status": "missing_required_test", "resolved": False, "log": compressed_log}
+        return {"status": "missing_required_test", "resolved": False, "compiled": compiled, "log": compressed_log}
 
     if eval_result["status"] == "success":
-        return {"status": "success", "resolved": True, "log": "Zephyr OS successfully booted."}
+        return {"status": "success", "resolved": True, "compiled": compiled, "log": "Zephyr OS successfully booted."}
 
-    return {"status": eval_result["status"], "resolved": False,
+    return {"status": eval_result["status"], "resolved": False, "compiled": compiled,
             "log": log_filter.compress_log(eval_result["log"])}
 
 
@@ -174,7 +198,11 @@ def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
             "applied_files": [],
             "iterations": current_iter,
             "final_status": failure_final_status,
-            **record_attempt_outcome(current_iter, f"套用修補失敗 (格式錯誤/找不到匹配的原始碼)：{patch_result['error']}"),
+            **record_attempt_outcome(
+                current_iter, f"套用修補失敗 (格式錯誤/找不到匹配的原始碼)：{patch_result['error']}",
+                compiled=False, tool_invocation_error=True,
+                pending_token_usage=state.get("pending_token_usage", []),
+            ),
         }
 
     applied_files = patch_result.get("applied_files", [])
@@ -221,7 +249,11 @@ def static_check_node(state: ZephyrAgentState) -> Dict[str, Any]:
         "current_error_log": result["log"],
         "error_type": "static_check_failed",
         "final_status": failure_final_status,
-        **record_attempt_outcome(current_iter, f"修補已套用至 {applied_files}，但靜態分析發現問題：{result['log']}"),
+        **record_attempt_outcome(
+            current_iter, f"修補已套用至 {applied_files}，但靜態分析發現問題：{result['log']}",
+            compiled=False, tool_invocation_error=False,
+            pending_token_usage=state.get("pending_token_usage", []),
+        ),
     }
 
 
@@ -276,6 +308,8 @@ def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
                 current_iter,
                 f"修補已套用至 {applied_files}，套件整體回報成功，但目標測試 '{required_pass_test}' 未見 PASS，"
                 f"疑似投機取巧而非真正修復。",
+                compiled=eval_result["compiled"], tool_invocation_error=False,
+                pending_token_usage=state.get("pending_token_usage", []),
             ),
         }
 
@@ -285,7 +319,8 @@ def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
             "current_error_log": eval_result["log"],
             "error_type": "success",
             "iterations": current_iter,
-            "final_status": "resolved"
+            "final_status": "resolved",
+            **record_iteration_success(current_iter, state.get("pending_token_usage", [])),
         }
 
     print(f"   💥 測試失敗 (狀態: {eval_result['status']})，正在過濾日誌...")
@@ -298,6 +333,8 @@ def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
             current_iter,
             f"修補已套用至 {applied_files}，通過靜態分析後完整建置，但建置/執行失敗 "
             f"(狀態: {eval_result['status']})：{eval_result['log']}",
+            compiled=eval_result["compiled"], tool_invocation_error=False,
+            pending_token_usage=state.get("pending_token_usage", []),
         ),
     }
 

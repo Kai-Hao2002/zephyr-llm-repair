@@ -107,4 +107,20 @@ def knowledge_expert_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # Knowledge node; fall back to graph-retrieval-only results.
             logger.warning(f"Hybrid RAG 檢索失敗，略過 (不影響既有的圖譜檢索) (Hybrid RAG retrieval failed, skipping — doesn't affect existing graph retrieval): {e}")
 
-    return {"retrieved_context": yaml_context, "retrieved_files": retrieved_files}
+    result: Dict[str, Any] = {"retrieved_context": yaml_context, "retrieved_files": retrieved_files}
+
+    # first_retrieval_files：只在這是本次案例「第一次」真正執行檢索時寫入
+    # (None 代表從未觸發過；一旦被設成任何值，包含空列表 [] 本身，就永遠
+    # 不再覆蓋)。RQ2 的 MRR/Recall@k/Top-k Accuracy 依確認過的方法論，只
+    # 看第一次診斷觸發的檢索結果，不算閉環重試帶來的效果——見
+    # core/state.py 的欄位說明。
+    # first_retrieval_files: written only if this is the "first" time this
+    # case's run has actually performed a retrieval (None means never
+    # fired; once set to anything, including an empty list [] itself, it's
+    # never overwritten again). Per the confirmed methodology, RQ2's
+    # MRR/Recall@k/Top-k Accuracy only look at the first diagnosis's
+    # retrieval result — see core/state.py's field docstring.
+    if state.get("first_retrieval_files") is None:
+        result["first_retrieval_files"] = retrieved_files
+
+    return result
