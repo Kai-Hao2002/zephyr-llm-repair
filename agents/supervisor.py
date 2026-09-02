@@ -110,14 +110,14 @@ def record_attempt_outcome(current_iter: int, outcome_description: str, *, compi
     """
     建立這次迭代(失敗收場)要附加進 attempt_history/iteration_log 的一筆
     紀錄，回傳一個可以直接跟呼叫端節點 (apply_patch_node/static_check_node/
-    build_node) 自己的 return dict 用 `**` 合併的 dict——不需要各節點自己
-    重複判斷該不該壓縮、該怎麼組 iteration_log。
+    devops_node/qa_node) 自己的 return dict 用 `**` 合併的 dict——不需要
+    各節點自己重複判斷該不該壓縮、該怎麼組 iteration_log。
 
     current_iter 由呼叫端直接傳入這次迭代的編號，而不是從 state 讀取：
     apply_patch_node 自己就是遞增 iterations 的地方，呼叫當下傳進來的
     state 引數還是遞增「之前」的舊值，用 state.get("iterations") 讀會
     差一次；直接接受呼叫端已經算好的 current_iter 就不會有這個
-    off-by-one 風險，也讓三個呼叫點的行為完全一致。
+    off-by-one 風險，也讓四個呼叫點的行為完全一致。
 
     pending_token_usage 是這次迭代到目前為止 (Analyzer/Patch 等呼叫) 累積
     的 token 用量——見 core/state.py 的 pending_token_usage 說明。這裡讀出
@@ -126,16 +126,16 @@ def record_attempt_outcome(current_iter: int, outcome_description: str, *, compi
 
     Builds the entry to append to attempt_history/iteration_log for this
     (failed) iteration and returns a dict that can be merged into the
-    calling node's (apply_patch_node/static_check_node/build_node) own
-    return dict with `**` — no node has to re-implement the compress-or-not
-    decision or iteration_log assembly itself.
+    calling node's (apply_patch_node/static_check_node/devops_node/
+    qa_node) own return dict with `**` — no node has to re-implement the
+    compress-or-not decision or iteration_log assembly itself.
 
     current_iter is passed in directly by the caller rather than read from
     state: apply_patch_node is where iterations itself gets incremented,
     and the state argument available at that call site still holds the
     pre-increment value, so reading state.get("iterations") there would be
     off by one. Accepting an already-computed current_iter from the caller
-    avoids that risk entirely and keeps all three call sites consistent.
+    avoids that risk entirely and keeps all four call sites consistent.
 
     pending_token_usage is this iteration's token usage accumulated so far
     (Analyzer/Patch calls etc.) — see core/state.py's pending_token_usage
@@ -162,7 +162,7 @@ def record_attempt_outcome(current_iter: int, outcome_description: str, *, compi
 
 def record_iteration_success(current_iter: int, pending_token_usage: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    build_node 修復成功時的對應函式——成功不需要壓縮摘要 (Patch 不會再被
+    qa_node 修復成功時的對應函式——成功不需要壓縮摘要 (Patch 不會再被
     呼叫)，但仍然要寫一筆 iteration_log 條目 (RQ1/RQ3 的 Pass@k、迭代次數
     要用)，並歸零 pending_token_usage。
 
@@ -217,7 +217,31 @@ def route_after_static_check(state: ZephyrAgentState) -> str:
     return "goto_build"
 
 
-def route_after_build(state: ZephyrAgentState) -> str:
+def route_after_devops(state: ZephyrAgentState) -> str:
+    """
+    DevOps Expert (west build) 之後：建置成功一律進 QA Expert 執行驗證；
+    建置本身失敗 (不是 StaticCheck 攔到的，是真正 west build 才發現的
+    編譯/連結/依賴衝突) 維持退回 Analyzer 重新診斷——這是拆分 DevOps/QA
+    兩個節點時特意保留的既有行為，不是提案原文寫死的路由 (提案只明確講
+    StaticCheck 失敗會跳過 Analyzer)，跟使用者確認過不要在沒有依據的情況
+    下自己發明可能影響修復品質的新路由。
+
+    After DevOps Expert (west build): a successful build always proceeds
+    to QA Expert for execution; a build failure itself (not something
+    StaticCheck already caught — a genuine compile/link/dependency
+    conflict only a real west build reveals) still bounces back to
+    Analyzer for a fresh diagnosis — deliberately preserved from before
+    the DevOps/QA split, not a routing behavior the proposal text
+    mandates (it only explicitly states StaticCheck failures skip
+    Analyzer); confirmed with the user not to invent a new routing
+    behavior that could affect repair quality without that basis.
+    """
+    if state.get("error_type") == "devops_build_passed":
+        return "goto_qa"
+    return "finish" if state.get("final_status") == "failed_max_retries" else "retry_analyzer"
+
+
+def route_after_qa(state: ZephyrAgentState) -> str:
     if state.get("error_type") == "success" or state.get("iterations", 0) >= state.get("max_iterations", 5):
         return "finish"
     return "retry"

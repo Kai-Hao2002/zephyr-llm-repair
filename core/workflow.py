@@ -10,18 +10,29 @@ from core.state import ZephyrAgentState
 from tools.patch_applier import PatchApplier
 from tools.log_filter import LogFilter
 from tools.qemu_oracle import QemuOracle
+from tools.devops_analyzer import classify_build_failure, annotate_log_with_classification
 
-# 代理人節點的實作邏輯都搬到 agents/*.py 了 (跟 README 描述的架構對齊)，
-# workflow.py 現在只負責把它們接成圖，以及 DevOps/建置這個非「代理人」
-# 屬性的執行期節點。
-# Agent node logic has moved to agents/*.py (matching the architecture
-# README.md describes) — workflow.py now only wires them into the graph,
-# plus the DevOps/build execution node, which isn't an "agent" persona.
+# 需要呼叫 LLM 的代理人節點邏輯都搬到 agents/*.py 了 (跟 README 描述的架構
+# 對齊)；ApplyPatch/StaticCheck/DevOps/QA 這幾個節點雖然對應提案
+# Methodology 描述的具體階段/角色 (DevOps Expert、QA Expert)，但本身都是
+# 純粹呼叫工具/子行程 (PatchApplier、cppcheck、west build、QemuOracle)，
+# 不叫 LLM，所以維持跟 ApplyPatch/StaticCheck 一致的既有慣例，留在
+# workflow.py，不搬進 agents/*.py。workflow.py 因此負責把所有節點接成圖，
+# 加上這幾個不叫 LLM 的執行期節點本身。
+# Agent node logic that calls an LLM has moved to agents/*.py (matching
+# the architecture README.md describes); ApplyPatch/StaticCheck/DevOps/QA
+# correspond to concrete stages/roles the proposal's Methodology names
+# (DevOps Expert, QA Expert), but they're all pure tool/subprocess
+# execution (PatchApplier, cppcheck, west build, QemuOracle) with no LLM
+# call — so, consistent with ApplyPatch/StaticCheck's existing precedent,
+# they stay here rather than moving into agents/*.py. workflow.py wires
+# every node into the graph, plus owns these non-LLM execution nodes
+# themselves.
 from agents.analyzer import analyzer_node
 from agents.knowledge_expert import knowledge_expert_node
 from agents.patch_expert import patch_node
 from agents.supervisor import (
-    route_after_apply_patch, route_after_static_check, route_after_build,
+    route_after_apply_patch, route_after_static_check, route_after_devops, route_after_qa,
     record_attempt_outcome, record_iteration_success,
 )
 from tools.static_checker import StaticChecker
@@ -93,14 +104,15 @@ def build_devops_docker_cmd(workspace_path: str, board: str, target_app: str) ->
     )
 
 
-# route_after_apply_patch/route_after_static_check 都用這個值決定要不要
-# 直接結束——「已經用完迭代預算」這件事只該有一種算法，寫成共用函式，
-# 不要在 apply_patch_node/static_check_node/build_node 三個地方各自重算
-# 一次容易漂移的邏輯。
-# route_after_apply_patch/route_after_static_check both use this value to
-# decide whether to stop outright — "iteration budget exhausted" should
-# have exactly one formula, factored out instead of re-derived slightly
-# differently in each of apply_patch_node/static_check_node/build_node.
+# route_after_apply_patch/route_after_static_check/route_after_devops
+# 都用這個值決定要不要直接結束——「已經用完迭代預算」這件事只該有一種
+# 算法，寫成共用函式，不要在 apply_patch_node/static_check_node/
+# devops_node/qa_node 四個地方各自重算一次容易漂移的邏輯。
+# route_after_apply_patch/route_after_static_check/route_after_devops all
+# use this value to decide whether to stop outright — "iteration budget
+# exhausted" should have exactly one formula, factored out instead of
+# re-derived slightly differently in each of apply_patch_node/
+# static_check_node/devops_node/qa_node.
 def _compute_failure_final_status(current_iter: int, max_iterations: int) -> str:
     return "failed_max_retries" if current_iter >= max_iterations else "in_progress"
 
@@ -257,7 +269,45 @@ def static_check_node(state: ZephyrAgentState) -> Dict[str, Any]:
     }
 
 
-def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
+def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
+    """
+    DevOps Expert：跑 west build (提案 Methodology 說的 "Build (west)" 階段)，
+    失敗時對日誌做依賴/Kconfig 衝突分類 (tools/devops_analyzer.py)。跟
+    QA Expert (qa_node) 拆成兩個節點是為了對齊提案 Methodology 描述的
+    "Build (west) → Execute (QEMU) → ObserveRuntime" 兩個獨立階段，但底層
+    只實際跑一次 `west build -t run` (見 evaluate_repair_attempt / state.py
+    的 pending_eval_result 說明)，不是各自獨立呼叫兩次——沒必要為了架構
+    對齊多花一次完整編譯的時間，也不用新增讓兩個容器共用建置產物的掛載
+    機制。
+
+    失敗時的重試路由維持跟拆分前一致，退回 Analyzer 重新診斷——這是跟
+    使用者確認過的決定：提案原文只明確講 StaticCheck 失敗會跳過 Analyzer
+    直接回 Patch，對 Build/Execute 失敗要怎麼重試沒有寫死；在沒有提案
+    依據的情況下，不要自己發明一個可能影響修復品質的新路由行為，這次拆分
+    純粹是架構層面 (匹配提案圖) + 新增依賴/Kconfig 衝突分類這個加分項，
+    不改變既有的重試邏輯。
+
+    DevOps Expert: runs the west build (the proposal Methodology's
+    "Build (west)" stage), classifying the log for dependency/Kconfig
+    conflicts on failure (tools/devops_analyzer.py). Split from QA Expert
+    (qa_node) into two nodes to match the proposal Methodology's separate
+    "Build (west) → Execute (QEMU) → ObserveRuntime" stages, but only one
+    real `west build -t run` actually runs under the hood (see
+    evaluate_repair_attempt / state.py's pending_eval_result docstring),
+    not two independent invocations — no need to spend a second full
+    compile, or add machinery for two containers to share build artifacts,
+    just for architectural alignment.
+
+    Failure-path retry routing is unchanged from before the split — still
+    bounces back to Analyzer for a fresh diagnosis. Confirmed with the
+    user: the proposal only explicitly states StaticCheck failures skip
+    Analyzer and go straight back to Patch; it never specifies how
+    Build/Execute failures should route. Absent that basis, this split
+    doesn't invent a new routing behavior that could affect repair
+    quality — it's purely architectural (matching the proposal's diagram)
+    plus the new dependency/Kconfig-conflict classification as a value-add,
+    not a change to existing retry logic.
+    """
     current_iter = state.get("iterations", 0)
     max_iterations = state.get("max_iterations", 5)
     failure_final_status = _compute_failure_final_status(current_iter, max_iterations)
@@ -283,7 +333,7 @@ def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
     target_app = state.get("target_app", ".")
     required_pass_test = state.get("required_pass_test")
 
-    print(f"\n🔨 [Build] 第 {current_iter} 次迭代：開始在隔離容器中編譯並執行 QEMU...")
+    print(f"\n🔨 [DevOps] 第 {current_iter} 次迭代：開始在隔離容器中編譯 (west build)...")
     # timeout=15 對一次真正的 west build (可能要編譯 Zephyr kernel + app)
     # 來說遠遠不夠，幾乎每次都會提早 timeout，把任何案例都誤判為建置卡住
     # ——FaultInjector 驗證資料集時本來就是用 600s (tools/fault_injector.py)，
@@ -297,8 +347,54 @@ def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
     # constructor default of 15.
     eval_result = evaluate_repair_attempt(workspace_path, board, target_app, required_pass_test)
 
+    if not eval_result["compiled"]:
+        conflict_tag = classify_build_failure(eval_result["log"])
+        annotated_log = annotate_log_with_classification(eval_result["log"])
+        print(f"   💥 建置失敗 (狀態: {eval_result['status']})"
+              + (f"，日誌樣式疑似屬於「{conflict_tag}」類別" if conflict_tag else ""))
+        return {
+            "current_error_log": annotated_log,
+            "error_type": eval_result["status"],
+            "iterations": current_iter,
+            "final_status": failure_final_status,
+            **record_attempt_outcome(
+                current_iter,
+                f"修補已套用至 {applied_files}，通過靜態分析後 west build 仍然失敗 "
+                f"(狀態: {eval_result['status']}"
+                + (f"，疑似屬於「{conflict_tag}」類別" if conflict_tag else "")
+                + f")：{annotated_log}",
+                compiled=False, tool_invocation_error=False,
+                pending_token_usage=state.get("pending_token_usage", []),
+            ),
+        }
+
+    print("   ✅ 建置成功，交給 QA Expert 執行並觀察執行期結果。")
+    return {"error_type": "devops_build_passed", "pending_eval_result": eval_result}
+
+
+def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
+    """
+    QA Expert：解讀 DevOps Expert 已經跑完的執行結果 (提案 Methodology 說的
+    "Execute (QEMU) → ObserveRuntime" 階段)——west build -t run 本身已經
+    在 devops_node 執行完畢，這裡只讀 devops_node 存進
+    state["pending_eval_result"] 的結果，不再跑第二次 west build。
+
+    QA Expert: interprets the execution result DevOps Expert already
+    produced (the proposal Methodology's "Execute (QEMU) →
+    ObserveRuntime" stage) — `west build -t run` itself already ran inside
+    devops_node; this only reads the result DevOps Expert stashed in
+    state["pending_eval_result"], it doesn't run a second west build.
+    """
+    current_iter = state.get("iterations", 0)
+    max_iterations = state.get("max_iterations", 5)
+    failure_final_status = _compute_failure_final_status(current_iter, max_iterations)
+
+    applied_files = state.get("applied_files", [])
+    required_pass_test = state.get("required_pass_test")
+    eval_result = state["pending_eval_result"]
+
     if eval_result["status"] == "missing_required_test":
-        print(f"   ⚠️ 套件回報成功，但目標測試 '{required_pass_test}' 沒有真的通過——patch 疑似投機取巧 (刪除/跳過該測試)，不算修復成功。")
+        print(f"   ⚠️ [QA] 套件回報成功，但目標測試 '{required_pass_test}' 沒有真的通過——patch 疑似投機取巧 (刪除/跳過該測試)，不算修復成功。")
         return {
             "current_error_log": eval_result["log"],
             "error_type": "missing_required_test",
@@ -314,7 +410,7 @@ def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
         }
 
     if eval_result["status"] == "success":
-        print("   🎉 執行期驗證通過！")
+        print("   🎉 [QA] 執行期驗證通過！")
         return {
             "current_error_log": eval_result["log"],
             "error_type": "success",
@@ -323,7 +419,7 @@ def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
             **record_iteration_success(current_iter, state.get("pending_token_usage", [])),
         }
 
-    print(f"   💥 測試失敗 (狀態: {eval_result['status']})，正在過濾日誌...")
+    print(f"   💥 [QA] 執行期驗證失敗 (狀態: {eval_result['status']})，正在過濾日誌...")
     return {
         "current_error_log": eval_result["log"],
         "error_type": eval_result["status"],
@@ -331,7 +427,7 @@ def build_node(state: ZephyrAgentState) -> Dict[str, Any]:
         "final_status": failure_final_status,
         **record_attempt_outcome(
             current_iter,
-            f"修補已套用至 {applied_files}，通過靜態分析後完整建置，但建置/執行失敗 "
+            f"修補已套用至 {applied_files}，通過建置後執行，但執行期驗證失敗 "
             f"(狀態: {eval_result['status']})：{eval_result['log']}",
             compiled=eval_result["compiled"], tool_invocation_error=False,
             pending_token_usage=state.get("pending_token_usage", []),
@@ -351,7 +447,8 @@ def build_zephyr_graph() -> StateGraph:
     workflow.add_node("Patch", patch_node)
     workflow.add_node("ApplyPatch", apply_patch_node)
     workflow.add_node("StaticCheck", static_check_node)
-    workflow.add_node("Build", build_node)
+    workflow.add_node("DevOps", devops_node)
+    workflow.add_node("QA", qa_node)
 
     workflow.set_entry_point("Analyzer")
     workflow.add_conditional_edges("Analyzer", route_after_analyzer, {"goto_knowledge": "Knowledge", "goto_patch": "Patch"})
@@ -363,10 +460,25 @@ def build_zephyr_graph() -> StateGraph:
         "finish": END,
     })
     workflow.add_conditional_edges("StaticCheck", route_after_static_check, {
-        "goto_build": "Build",
+        "goto_build": "DevOps",
         "retry_patch": "Patch",
         "finish": END,
     })
-    workflow.add_conditional_edges("Build", route_after_build, {"finish": END, "retry": "Analyzer"})
+    # DevOps Expert (west build) → QA Expert (QEMU 執行/觀察)，對應提案
+    # Methodology 的 "Build (west) → Execute (QEMU) → ObserveRuntime" 兩個
+    # 階段；DevOps 失敗 (west build 本身失敗，不是 StaticCheck 攔到的) 維持
+    # 退回 Analyzer 重新診斷，跟拆分前的行為一致 (見 devops_node 說明)。
+    # DevOps Expert (west build) → QA Expert (QEMU execute/observe),
+    # matching the proposal Methodology's "Build (west) → Execute (QEMU) →
+    # ObserveRuntime" stages; a DevOps failure (the west build itself
+    # failing, not something StaticCheck already caught) still bounces back
+    # to Analyzer for a fresh diagnosis, unchanged from before the split
+    # (see devops_node's docstring).
+    workflow.add_conditional_edges("DevOps", route_after_devops, {
+        "goto_qa": "QA",
+        "retry_analyzer": "Analyzer",
+        "finish": END,
+    })
+    workflow.add_conditional_edges("QA", route_after_qa, {"finish": END, "retry": "Analyzer"})
 
     return workflow.compile()

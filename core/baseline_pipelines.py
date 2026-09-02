@@ -5,13 +5,16 @@ B1/B2/B3 對照組 (見碩論提案 Table 2) 的執行迴圈——evaluate.py �
 
 跟 Proposed pipeline (core/workflow.py) 共用底層工具 (PatchApplier/
 QemuOracle/LogFilter/build_devops_docker_cmd/evaluate_repair_attempt)，但
-刻意不重用 apply_patch_node/build_node 這兩個 LangGraph 節點：那兩個節點會
-呼叫 agents/supervisor.py 的 record_attempt_outcome，把結果寫進
-attempt_history (Proposed 的跨迭代記憶機制)。B1/B2 是單發、用不到；B3 依
-Table 2 定義 ("no specialized multi-agent split") 刻意不給跨迭代記憶——
-Context Compression 明確歸屬 Supervisor Node，屬於多代理人分工的一部分。
-重用那兩個節點會產生用不到的壓縮 LLM 呼叫成本，還會讓「B3 沒有記憶」這個
-實驗設計在程式碼裡沒有真的做到。
+刻意不重用 apply_patch_node/devops_node/qa_node 這幾個 LangGraph 節點：
+那幾個節點會呼叫 agents/supervisor.py 的 record_attempt_outcome，把結果
+寫進 attempt_history (Proposed 的跨迭代記憶機制)。B1/B2 是單發、用不到；
+B3 依 Table 2 定義 ("no specialized multi-agent split") 刻意不給跨迭代
+記憶——Context Compression 明確歸屬 Supervisor Node，屬於多代理人分工的
+一部分。重用那幾個節點會產生用不到的壓縮 LLM 呼叫成本，還會讓「B3 沒有
+記憶」這個實驗設計在程式碼裡沒有真的做到。B1/B2/B3 也同樣沒有 DevOps
+Expert/QA Expert 這種角色分工 (跟 Proposed 相比，這正是 Table 2 要對照的
+變因之一)，所以繼續共用同一個 evaluate_repair_attempt() 呼叫拿到「編譯+
+執行」合併後的單一結果，不像 Proposed 拆成 devops_node/qa_node 兩個階段。
 
 The execution loops for the B1/B2/B3 ablation baselines (see the thesis
 proposal's Table 2) — evaluate.py's --pipeline flag picks which one runs;
@@ -20,7 +23,7 @@ the LLM-calling logic lives in agents/baselines.py.
 Shares the underlying tools with the Proposed pipeline (core/workflow.py):
 PatchApplier/QemuOracle/LogFilter/build_devops_docker_cmd/
 evaluate_repair_attempt — but deliberately doesn't reuse the
-apply_patch_node/build_node LangGraph nodes. Those nodes call
+apply_patch_node/devops_node/qa_node LangGraph nodes. Those nodes call
 agents/supervisor.py's record_attempt_outcome, writing into attempt_history
 (Proposed's cross-iteration memory). B1/B2 are single-shot and never read
 it; B3, per Table 2's definition ("no specialized multi-agent split"),
@@ -28,6 +31,10 @@ deliberately gets no cross-iteration memory — Context Compression is
 explicitly attributed to the Supervisor Node, part of the multi-agent split.
 Reusing those nodes would incur an unused compression-LLM cost and would
 leave "B3 has no memory" as a claim the code doesn't actually enforce.
+B1/B2/B3 also have no DevOps Expert/QA Expert role split at all (exactly
+the variable Table 2 measures relative to Proposed), so they keep sharing
+one evaluate_repair_attempt() call that returns the combined build+execute
+result in one shot, rather than Proposed's two-stage devops_node/qa_node.
 """
 import os
 from typing import Any, Dict

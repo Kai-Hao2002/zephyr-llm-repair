@@ -1,5 +1,5 @@
 # core/state.py
-from typing import TypedDict, Annotated, List, Optional
+from typing import TypedDict, Annotated, Any, Dict, List, Optional
 import operator
 from langchain_core.messages import AnyMessage
 
@@ -135,6 +135,27 @@ class ZephyrAgentState(TypedDict):
     # Proposed/B2 never had Analyzer decide retrieval was needed).
     first_retrieval_files: Optional[List[str]]
 
+    # DevOps Expert (devops_node) 建置成功時，把完整的 evaluate_repair_attempt()
+    # 回傳結果暫存在這裡，交給下一個節點 QA Expert (qa_node) 解讀——兩個
+    # 節點對應提案 Methodology 描述的 "Build (west)" 跟 "Execute (QEMU) /
+    # ObserveRuntime" 兩個分開的階段，但底層只實際跑一次 west build -t run
+    # (同一個 docker 呼叫)，不是各自獨立再跑一次，避免多花一次完整編譯的
+    # 時間、也不必新增讓兩個容器共用建置產物的額外掛載機制。qa_node 讀完
+    # 就不再需要，下一次迭代 devops_node 一定會先跑過、覆寫掉舊值，不需要
+    # 額外清空。
+    # When DevOps Expert (devops_node) 's build succeeds, the full
+    # evaluate_repair_attempt() result is stashed here for the next node,
+    # QA Expert (qa_node), to interpret — the two nodes correspond to the
+    # proposal's Methodology description of separate "Build (west)" and
+    # "Execute (QEMU) / ObserveRuntime" stages, but under the hood only one
+    # real `west build -t run` (one docker invocation) actually runs, not
+    # two independent ones — avoiding both a second full compile and the
+    # extra machinery two separate containers would need to share build
+    # artifacts. Once qa_node reads it, it's no longer needed; the next
+    # iteration's devops_node always runs first and overwrites it, so no
+    # explicit reset is needed.
+    pending_eval_result: Optional[Dict[str, Any]]
+
     # === 3. 系統控制與防呆機制 (System Control & Fail-safes) ===
     
     # 目標 Zephyr 專案的路徑
@@ -222,6 +243,7 @@ def create_initial_state(workspace_path: str, initial_log: str, max_iters: int =
         "iteration_log": [],
         "pending_token_usage": [],
         "first_retrieval_files": None,
+        "pending_eval_result": None,
         "workspace_path": workspace_path,
         "board": board,
         "target_app": target_app,
