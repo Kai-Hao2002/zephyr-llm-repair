@@ -27,11 +27,19 @@ from typing import Any, Dict, Tuple
 
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from core.llm_usage import extract_usage
+from core.llm_provider import get_chat_model, get_model_name
 
-_PATCH_MODEL = "gemini-2.5-pro"
+# 三個 baseline 的修補生成都用 "pro" 角色 (見 core/llm_provider.py)——跟
+# Proposed pipeline 的 Patch Expert 用同一個角色定位，維持公平比較 (三個
+# baseline 跟 Proposed 的差異只該落在架構本身，不該連底層模型強弱都不同)。
+# All three baselines' patch generation uses the "pro" role (see
+# core/llm_provider.py) — the same role Proposed's Patch Expert uses, to
+# keep the comparison fair (the difference between the baselines and
+# Proposed should be architectural only, not also confounded by using a
+# weaker/stronger underlying model).
+_PATCH_ROLE = "pro"
 
 _PATCH_FORMAT_SYSTEM_PROMPT = """你是一位嵌入式軟體工程師，專精於修復 Zephyr RTOS 的程式碼。
 請根據錯誤日誌與提供的專案原始碼，輸出修復程式碼。
@@ -75,7 +83,7 @@ def b1_generate_full_file_patch(error_log: str) -> Tuple[Dict[str, str], Dict[st
     # without a timeout, one hung API call blocks an entire --pipeline
     # b1/b2/b3 run indefinitely (confirmed 2026-09-01: a B3 pilot hung for
     # 1h44m).
-    llm = ChatGoogleGenerativeAI(model=_PATCH_MODEL, temperature=0, timeout=300)
+    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=300)
     # include_raw=True：見 agents/analyzer.py 的同款說明，需要底層 AIMessage
     # 才拿得到 usage_metadata。
     # include_raw=True: see agents/analyzer.py — needs the underlying
@@ -92,7 +100,7 @@ def b1_generate_full_file_patch(error_log: str) -> Tuple[Dict[str, str], Dict[st
     chain = prompt | structured_llm
     raw_output = chain.invoke({"error_log": error_log})
     result: B1FullFilePatch = raw_output["parsed"]
-    usage_entry = extract_usage(raw_output["raw"], node="b1_zero_shot", model=_PATCH_MODEL)
+    usage_entry = extract_usage(raw_output["raw"], node="b1_zero_shot", model=get_model_name(_PATCH_ROLE))
     return {"filepath": result.filepath.strip(), "content": result.content}, usage_entry
 
 
@@ -119,7 +127,7 @@ def b2_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
     # without a timeout, one hung API call blocks an entire --pipeline
     # b1/b2/b3 run indefinitely (confirmed 2026-09-01: a B3 pilot hung for
     # 1h44m).
-    llm = ChatGoogleGenerativeAI(model=_PATCH_MODEL, temperature=0, timeout=300)
+    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=300)
     prompt = ChatPromptTemplate.from_messages([
         ("system", _PATCH_FORMAT_SYSTEM_PROMPT),
         ("human", "[目前專案原始碼與設定檔內容 (含關鍵字檢索額外找到的候選檔案)]\n{project_files}\n\n"
@@ -127,7 +135,7 @@ def b2_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
     ])
     chain = prompt | llm
     response = chain.invoke({"error_log": error_log, "project_files": project_files_content})
-    usage_entry = extract_usage(response, node="b2_single_agent_rag", model=_PATCH_MODEL)
+    usage_entry = extract_usage(response, node="b2_single_agent_rag", model=get_model_name(_PATCH_ROLE))
     return response.content, usage_entry
 
 
@@ -155,7 +163,7 @@ def b3_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
     # without a timeout, one hung API call blocks an entire --pipeline
     # b1/b2/b3 run indefinitely (confirmed 2026-09-01: a B3 pilot hung for
     # 1h44m).
-    llm = ChatGoogleGenerativeAI(model=_PATCH_MODEL, temperature=0, timeout=300)
+    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=300)
     prompt = ChatPromptTemplate.from_messages([
         ("system", _PATCH_FORMAT_SYSTEM_PROMPT),
         ("human", "[目前專案原始碼與設定檔內容]\n{project_files}\n\n"
@@ -163,5 +171,5 @@ def b3_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
     ])
     chain = prompt | llm
     response = chain.invoke({"error_log": error_log, "project_files": project_files_content})
-    usage_entry = extract_usage(response, node="b3_closed_loop", model=_PATCH_MODEL)
+    usage_entry = extract_usage(response, node="b3_closed_loop", model=get_model_name(_PATCH_ROLE))
     return response.content, usage_entry

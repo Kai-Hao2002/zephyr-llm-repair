@@ -10,10 +10,10 @@ from typing import Dict, Any, List
 
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from core.state import ZephyrAgentState
 from core.llm_usage import extract_usage, append_usage
+from core.llm_provider import get_chat_model, get_model_name
 
 
 class AnalyzerOutput(BaseModel):
@@ -28,15 +28,17 @@ class AnalyzerOutput(BaseModel):
 def analyzer_node(state: ZephyrAgentState) -> Dict[str, Any]:
     print(f"\n🧠 [LLM Analyzer] 正在分析第 {state['iterations']} 次迭代的日誌...")
 
-    # 改用 Gemini 1.5 Flash (快速且便宜，適合分類任務)
+    # role="fast"：便宜快速的模型，適合分類任務 (見 core/llm_provider.py)。
     # timeout=120：實測 2026-09-01，Gemini API 呼叫偶爾會完全沒有回應，
     # 沒設 timeout 的話呼叫端會無限期卡住 (曾讓一次 B3 baseline pilot 卡了
     # 1 小時 44 分鐘才被手動砍掉)。120 秒對這裡的分類任務綽綽有餘。
-    # timeout=120: confirmed 2026-09-01 that Gemini API calls can hang with
-    # no response at all; without a timeout the caller blocks indefinitely
-    # (once left a B3 baseline pilot hung for 1h44m before being killed by
-    # hand). 120s is generous for this classification-sized task.
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1, timeout=120)
+    # role="fast": a cheap, fast model suited to classification (see
+    # core/llm_provider.py). timeout=120: confirmed 2026-09-01 that Gemini
+    # API calls can hang with no response at all; without a timeout the
+    # caller blocks indefinitely (once left a B3 baseline pilot hung for
+    # 1h44m before being killed by hand). 120s is generous for this
+    # classification-sized task.
+    llm = get_chat_model(role="fast", temperature=0.1, timeout=120)
     # include_raw=True：預設的 with_structured_output 只回傳解析好的
     # pydantic 物件，拿不到底層 AIMessage 的 usage_metadata (RQ4 的 Token
     # Efficiency 需要這個)。改成回傳 {"raw","parsed","parsing_error"}。
@@ -59,7 +61,7 @@ def analyzer_node(state: ZephyrAgentState) -> Dict[str, Any]:
     chain = prompt | structured_llm
     raw_output = chain.invoke({"error_log": state.get("current_error_log", "")})
     result: AnalyzerOutput = raw_output["parsed"]
-    usage_entry = extract_usage(raw_output["raw"], node="analyzer", model="gemini-2.5-flash")
+    usage_entry = extract_usage(raw_output["raw"], node="analyzer", model=get_model_name("fast"))
 
     print(f"   ↳ 推論: {result.reasoning}")
     print(f"   ↳ 提取關鍵字: {result.search_keywords}")

@@ -190,13 +190,28 @@ def compute_cost_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def summarize(records: List[Dict[str, Any]], ground_truth: Dict[str, List[str]], max_k: int) -> Dict[str, Any]:
-    by_pipeline = defaultdict(list)
+    # 分組鍵是 (pipeline, model_provider) 而不是只有 pipeline：RQ4 的跨模型
+    # 比較需要「同一個 pipeline、不同供應商」分開統計，不然混在一起算會
+    # 把 Gemini 版 Proposed 跟 Claude 版 Proposed 的數字加在一起，兩邊都
+    # 失真。model_provider 舊資料 (這次改動之前跑的 results.json) 可能沒有
+    # 這個欄位，預設回退成 "gemini" (那些跑分全部都是 Gemini 跑的)。
+    # The grouping key is (pipeline, model_provider), not just pipeline:
+    # RQ4's cross-model comparison needs "same pipeline, different
+    # provider" kept separate — mixing them would average a Gemini-backed
+    # Proposed run together with a Claude-backed one, distorting both.
+    # model_provider may be absent on older results.json files (from before
+    # this field existed) — defaults to "gemini" since those were all run
+    # against Gemini.
+    by_group = defaultdict(list)
     for r in records:
-        by_pipeline[r.get("pipeline", "unknown")].append(r)
+        by_group[(r.get("pipeline", "unknown"), r.get("model_provider", "gemini"))].append(r)
 
     summary = {}
-    for pipeline, recs in sorted(by_pipeline.items()):
-        summary[pipeline] = {
+    for (pipeline, model_provider), recs in sorted(by_group.items()):
+        key = f"{pipeline}[{model_provider}]"
+        summary[key] = {
+            "pipeline": pipeline,
+            "model_provider": model_provider,
             "loop_metrics": compute_loop_metrics(recs, max_k),
             "retrieval_metrics": compute_retrieval_metrics(recs, ground_truth),
             "cost_metrics": compute_cost_metrics(recs),
@@ -213,11 +228,11 @@ def _fmt_num(x: Optional[float], digits: int = 1) -> str:
 
 
 def print_summary(summary: Dict[str, Any], max_k: int) -> None:
-    for pipeline, metrics in summary.items():
+    for group_key, metrics in summary.items():
         loop = metrics["loop_metrics"]
         retrieval = metrics["retrieval_metrics"]
         cost = metrics["cost_metrics"]
-        print(f"\n=== {pipeline} (n={loop['n_cases']}, errors={loop.get('n_errors', 0)}) ===")
+        print(f"\n=== {group_key} (n={loop['n_cases']}, errors={loop.get('n_errors', 0)}) ===")
         print("[RQ1/RQ3] Bounded Compilation Success Rate (Pass@k):")
         for k in range(1, max_k + 1):
             if k in loop["pass_at_k"]:

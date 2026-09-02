@@ -43,10 +43,12 @@ from dotenv import load_dotenv
 from core.state import create_initial_state, ZephyrAgentState
 from core.workflow import build_zephyr_graph, build_devops_docker_cmd
 from core.baseline_pipelines import run_b1, run_b2, run_b3
+from core.llm_provider import set_provider, get_provider
 from tools.fault_injector import MUTATE_SCRIPT_HOST_PATH, MUTATE_SCRIPT_CONTAINER_PATH
 from tools.qemu_oracle import QemuOracle
 
 PIPELINE_CHOICES = ("proposed", "b1", "b2", "b3")
+MODEL_PROVIDER_CHOICES = ("gemini", "anthropic", "openai")
 
 load_dotenv()
 
@@ -347,6 +349,7 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
         "case_id": case_id,
         "category": case.get("category"),
         "pipeline": pipeline,
+        "model_provider": get_provider(),
         "final_status": final_status,
         "iterations": total_iterations,
         "ttr_seconds": ttr_seconds,
@@ -380,6 +383,10 @@ def main():
     parser.add_argument("--pipeline", default="proposed", choices=PIPELINE_CHOICES,
                          help="Which pipeline to run: 'proposed' (full multi-agent closed-loop), "
                               "or one of the Table 2 ablation baselines b1/b2/b3.")
+    parser.add_argument("--model-provider", default="gemini", choices=MODEL_PROVIDER_CHOICES,
+                         help="Which LLM provider backs every generative call in this run (RQ4 cross-model "
+                              "comparison, see core/llm_provider.py). The Hybrid RAG semantic layer's "
+                              "embedding model is unaffected — Anthropic has no embeddings API of its own.")
     parser.add_argument("--case-id", help="Run exactly one case by its 'id' field.")
     parser.add_argument("--limit", type=int, help="Run only the first N cases (for piloting).")
     parser.add_argument("--all", action="store_true", help="Run every case in the dataset. Requires explicit opt-in.")
@@ -391,10 +398,11 @@ def main():
                               "expected failure' build (saves one build, but loses the environment-drift guard).")
     parser.add_argument("--results-out", help="Where to write the JSON results summary (default: <runs-dir>/results.json).")
     args = parser.parse_args()
+    set_provider(args.model_provider)
 
     dataset = load_dataset(args.dataset)
     cases = select_cases(dataset, args)
-    logger.info(f"選定 {len(cases)} / {len(dataset)} 筆案例，workspace 將準備於 {args.runs_dir}")
+    logger.info(f"選定 {len(cases)} / {len(dataset)} 筆案例，workspace 將準備於 {args.runs_dir}，LLM 供應商={get_provider()}")
 
     results = []
     for case in cases:
@@ -403,7 +411,7 @@ def main():
         except Exception as e:
             logger.error(f"[{case['id']}] 執行失敗: {e}")
             results.append({"case_id": case["id"], "category": case.get("category"), "pipeline": args.pipeline,
-                             "final_status": "error", "error": str(e)})
+                             "model_provider": get_provider(), "final_status": "error", "error": str(e)})
 
     results_out = args.results_out or os.path.join(args.runs_dir, "results.json")
     os.makedirs(os.path.dirname(results_out) or ".", exist_ok=True)

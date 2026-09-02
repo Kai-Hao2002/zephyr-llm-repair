@@ -12,10 +12,10 @@ import re
 from typing import Dict, Any, List
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from core.state import ZephyrAgentState
 from core.llm_usage import extract_usage, append_usage
+from core.llm_provider import get_chat_model, get_model_name
 
 _LOG_PATH_PREFIX = "/zephyrproject/zephyr/"
 _LOG_EXT_PATH_RE = re.compile(re.escape(_LOG_PATH_PREFIX) + r"([\w\-./]+\.(?:c|h|conf|dts|dtsi|overlay))\b")
@@ -138,7 +138,7 @@ def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     # sent in can be up to 300k chars — genuine generation legitimately
     # takes longer than a classification task, and 120s risked cutting off
     # requests that weren't actually hung).
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0, timeout=300)
+    llm = get_chat_model(role="pro", temperature=0, timeout=300)
 
     # 動態讀取專案內的原始碼檔案，提供給 LLM 作為上下文——範圍限縮邏輯見
     # collect_relevant_context_paths。
@@ -216,7 +216,7 @@ SEARCH 區塊內的程式碼必須與原始檔案「一模一樣」（包含縮�
     })
 
     patch_text = response.content
-    usage_entry = extract_usage(response, node="patch_expert", model="gemini-2.5-pro")
+    usage_entry = extract_usage(response, node="patch_expert", model=get_model_name("pro"))
     print("   ↳ 成功生成修補區塊！")
     return {
         "patch_content": patch_text,

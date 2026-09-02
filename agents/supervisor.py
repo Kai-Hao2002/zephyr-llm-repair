@@ -17,10 +17,10 @@ not to work.
 from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from core.state import ZephyrAgentState
 from core.llm_usage import extract_usage
+from core.llm_provider import get_chat_model, get_model_name
 
 # 從第幾次迭代開始，把每次嘗試的結果壓成一句話再放進 attempt_history，
 # 而不是繼續帶著較完整的錯誤日誌片段——迭代次數愈往後，愈需要控制
@@ -75,7 +75,7 @@ def _compress_outcome_to_one_sentence(outcome_description: str) -> Tuple[str, Op
         # (hanging is indefinite blocking, not an exception); this function
         # is designed to gracefully fall back to the first 200 chars on
         # failure, but with no timeout that "failure" never arrives.
-        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0, timeout=120)
+        llm = get_chat_model(role="fast", temperature=0, timeout=120)
         prompt = ChatPromptTemplate.from_messages([
             ("system", "把以下這次修補嘗試的內容與結果，壓縮成剛好一句話的繁體中文摘要，"
                        "保留關鍵資訊 (改了哪個檔案、為什麼還是失敗)。只輸出這一句話，"
@@ -84,7 +84,7 @@ def _compress_outcome_to_one_sentence(outcome_description: str) -> Tuple[str, Op
         ])
         chain = prompt | llm
         response = chain.invoke({"outcome": outcome_description})
-        usage_entry = extract_usage(response, node="supervisor_compression", model="gemini-2.5-flash")
+        usage_entry = extract_usage(response, node="supervisor_compression", model=get_model_name("fast"))
         first_line = response.content.strip().splitlines()[0] if response.content.strip() else ""
         return (first_line or outcome_description[:200], usage_entry)
     except Exception:
