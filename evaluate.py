@@ -194,6 +194,34 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
 
     _assert_no_git_residue(dest_dir, case_id)
 
+    # 硬性要求(README「禁止把 mutate_inject.py 留下的 .orig 備份暴露給
+    # 待測 agent」)：tools/mutate_inject.py 每次做 mutation 之前都會把
+    # 原始 (修復前正確版本) 內容備份成 <檔案>.orig，供它自己的 --revert
+    # 用——這個備份從沒被清過，而且 2026-09-03 實測證實它真的會被
+    # Hybrid RAG 檢索到、內容真的會被讀進 Patch Expert 的 context (見
+    # README 該節)：collect_relevant_context_paths()/_is_indexable_file()
+    # 都用 filename.startswith("Kconfig.") 判斷「看起來像 Kconfig 相關」，
+    # Kconfig.orig 剛好符合。跟 .git 同一等級的答案外洩，必須在這裡清掉，
+    # 不能留給下游各自的「看起來相關就收進來」邏輯自己去踩雷。
+    # Hard requirement (README "never expose mutate_inject.py's .orig
+    # backup files to the agent under evaluation"): tools/mutate_inject.py
+    # backs up the original (correct, pre-injection) content to
+    # <file>.orig before every mutation, for its own --revert mode — this
+    # backup was never cleaned up, and confirmed empirically 2026-09-03 to
+    # actually get retrieved by Hybrid RAG and actually read into Patch
+    # Expert's context (see the README section):
+    # collect_relevant_context_paths()/_is_indexable_file() both use
+    # filename.startswith("Kconfig.") to recognize "looks Kconfig-related",
+    # which Kconfig.orig happens to match. Same severity as the .git leak
+    # — must be stripped here, not left for each downstream "looks
+    # relevant, include it" heuristic to independently step on.
+    for root, _dirs, files in os.walk(dest_dir):
+        for filename in files:
+            if filename.endswith(".orig"):
+                os.remove(os.path.join(root, filename))
+
+    _assert_no_orig_residue(dest_dir, case_id)
+
     return os.path.abspath(dest_dir)
 
 
@@ -209,6 +237,23 @@ def _assert_no_git_residue(workspace_dir: str, case_id: str) -> None:
                 f"[{case_id}] workspace still contains .git residue at {root} — "
                 "refusing to hand this workspace to an agent"
             )
+
+
+def _assert_no_orig_residue(workspace_dir: str, case_id: str) -> None:
+    """README「禁止把 .orig 備份暴露給待測 agent」該節硬性要求第 2 點：
+    把「workspace 底下確實沒有任何 *.orig 殘留」寫成程式碼自己的驗收測試，
+    不能只靠人工檢查——跟 _assert_no_git_residue 同一種紀律。
+    README's ".orig backup" hard-requirement point 2: turn "the workspace
+    genuinely has no *.orig residue" into the script's own assertion, not
+    something checked only by hand — same discipline as
+    _assert_no_git_residue."""
+    for root, _dirs, files in os.walk(workspace_dir):
+        for filename in files:
+            if filename.endswith(".orig"):
+                raise AssertionError(
+                    f"[{case_id}] workspace still contains a .orig backup residue at "
+                    f"{os.path.join(root, filename)} — refusing to hand this workspace to an agent"
+                )
 
 
 def build_agent_initial_state(case: Dict[str, Any], workspace_path: str, max_iters: int,

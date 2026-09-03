@@ -134,6 +134,22 @@ When building `evaluate.py`, this is a hard requirement:
 2. If the agent's sandbox has outbound network access, also consider the residual risk of it `git clone`/`git fetch`-ing the real upstream Zephyr repo directly (the `broken_commit` SHA is a public, fetchable commit) to diff against — decide whether to sandbox network access as part of `evaluate.py`'s design, not after a real evaluation run reveals the gap.
 3. Turn "the agent's workspace genuinely has no version-control residue to diff the original source from" into one of `evaluate.py`'s own pre-flight assertions (e.g. assert no `.git` directory exists before releasing the workspace to the agent), not something only checked by hand.
 
+### ⚠️ `evaluate.py` 設計要求：禁止把 `mutate_inject.py` 留下的 `.orig` 備份暴露給待測 agent / Design requirement: never expose `mutate_inject.py`'s `.orig` backup files to the agent under evaluation
+
+**[中]** `tools/mutate_inject.py` 每次執行 mutation 之前，都會先用 `shutil.copyfile` 把原始檔案備份成 `<檔案>.orig`（供它自己的 `--revert` 模式使用）——**這個備份檔案的內容，就是這個案例被注入 bug 之前的正確版本**。這個備份從來不會被自動清除，`evaluate.py` 的 `prepare_broken_workspace()` 過去只清除 `.git`，完全沒意識到這第二種殘留管道：`agents/patch_expert.py`/`core/baseline_pipelines.py` 的 `collect_relevant_context_paths()` 跟 `graph_rag/hybrid_retriever.py` 的 `_is_indexable_file()`，都用 `filename.startswith("Kconfig.")` 判斷「看起來像 Kconfig 相關的檔案」，`Kconfig.orig` 剛好符合這個條件——2026-09-03 實測（`inject_kconfig_fcb_depends` pilot）證實 `Kconfig.orig` 真的被 Hybrid RAG 檢索到、內容真的被讀進 `project_files_content`、餵給了 Patch Expert 的 LLM 呼叫，不是純理論風險。跟上面 `.git` 那條同樣性質：**agent 完全不需要理解問題，直接照抄 `.orig` 裡的內容就能通過修復**，讓分數失去意義。
+
+`evaluate.py` 動工時，硬性要求：
+1. 準備好要交給 agent 的 broken workspace 之後、把控制權交還給 agent 之前，**必須先移除所有 `*.orig` 檔案**（`mutate_inject.py` 每次呼叫都會產生一個，compound 案例的每個 injection 各自對應一個）。
+2. 把「移除 `.orig` 之後，agent 的工作目錄裡確實沒有任何 `*.orig` 殘留」這件事，寫成 `evaluate.py` 自己的一個驗收測試，不要只靠人工檢查——跟 `.git` 那條的第 3 點是同一種紀律。
+3. 任何未來新增的、用檔名前綴/副檔名判斷「這個檔案看起來相關」的邏輯（例如 Knowledge Expert 的檢索範圍、Patch Expert 的 context 蒐集範圍），都要意識到這類寬鬆比對可能意外撈進非原始碼的殘留檔案，不是只有 `.orig` 這一種——加新的檔案類型判斷時，一併確認 workspace 準備階段有沒有可能留下同類殘留。
+
+**[EN]** Every time `tools/mutate_inject.py` runs a mutation, it first backs up the original file to `<file>.orig` via `shutil.copyfile` (for its own `--revert` mode) — **that backup's content is the case's correct, pre-injection version**. This backup was never cleaned up automatically; `evaluate.py`'s `prepare_broken_workspace()` previously only stripped `.git`, unaware of this second leak channel: both `agents/patch_expert.py`/`core/baseline_pipelines.py`'s `collect_relevant_context_paths()` and `graph_rag/hybrid_retriever.py`'s `_is_indexable_file()` use `filename.startswith("Kconfig.")` to recognize "looks like a Kconfig-related file", which `Kconfig.orig` happens to match — confirmed empirically (2026-09-03, `inject_kconfig_fcb_depends` pilot) that `Kconfig.orig` was actually retrieved by Hybrid RAG, its content actually read into `project_files_content`, and actually fed to the Patch Expert's LLM call — not a hypothetical risk. Same category as the `.git` issue above: **the agent needs zero understanding of the problem, just copy `.orig`'s content, to "resolve" the case**, making the score meaningless.
+
+When building `evaluate.py`, this is a hard requirement:
+1. **Strip every `*.orig` file before handing control to the agent** — `mutate_inject.py` produces one per invocation, so a compound case's multiple injections each leave their own.
+2. Turn "the agent's workspace genuinely has no `*.orig` residue after stripping it" into one of `evaluate.py`'s own pre-flight assertions, not something only checked by hand — the same discipline as point 3 of the `.git` rule.
+3. Any future filename-prefix/extension-based "this file looks relevant" logic (e.g. Knowledge Expert's retrieval scope, Patch Expert's context-collection scope) should account for this class of loose matching potentially sweeping in non-source residue files, not just `.orig` specifically — when adding a new file-type check, also confirm workspace prep can't leave behind a similar residue matching it.
+
 ### ⚠️ `evaluate.py` 設計要求：`injection`/`injections` 欄位絕不能交給待測 agent / Design requirement: never expose the `injection`/`injections` field to the agent under evaluation
 
 **[中]** `verified_zephyr_bugs.json` 每一筆案例的 `injection`（或 compound 案例的 `injections`）欄位，其 `operator` 字串**直接、逐字寫死了這個案例的完整 mutation 手法**，包括被改動的確切原始文字（例如

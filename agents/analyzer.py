@@ -54,7 +54,7 @@ def analyzer_node(state: ZephyrAgentState) -> Dict[str, Any]:
 
 決策規則：
 1. 若錯誤涉及硬體、周邊、未定義的巨集 (如 DT_NODELABEL)，代表需要檢索圖譜。請提取精確元件名稱作為 search_keywords。
-2. 若錯誤是「未宣告 (undeclared)」或「未定義參照 (undefined reference)」的符號/函式，先不要預設是單純打錯字——這通常代表該符號原本應該由某個 Kconfig 選項或 Devicetree 設定條件式地啟用/宣告，但條件被破壞了 (例如某個 CONFIG_ 符號被關掉、或 DTS 節點被移除)，導致依賴它的程式碼被排除在編譯之外。這種情況代表需要檢索圖譜，請把該未宣告/未定義的符號名稱本身列為 search_keywords，讓後續步驟能查出它原本掛在哪個 Kconfig/DTS 設定底下。
+2. 若錯誤是「未宣告 (undeclared)」或「未定義參照 (undefined reference)」的符號/函式，先不要預設是單純打錯字——這通常代表該符號原本應該由某個 Kconfig 選項或 Devicetree 設定條件式地啟用/宣告，但條件被破壞了 (例如某個 CONFIG_ 符號被關掉、或 DTS 節點被移除)，導致依賴它的程式碼被排除在編譯之外。這種情況代表需要檢索圖譜，但 search_keywords **不要只給這個未宣告符號的完整字面名稱**——它通常是測試專屬的函式名 (例如 `test_fcb_crc_disabled`)，Kconfig/DTS 設定檔裡幾乎不會出現這個完整字串，只給它會讓檢索找到「提到這個函式名的檔案」(通常是呼叫它的測試檔案本身)，而不是真正該查的設定檔。請額外推斷它所屬的「子系統/模組名稱」一併列入 search_keywords——通常可以從錯誤訊息裡提到的檔案路徑推斷 (例如 `.../subsys/fs/fcb/src/xxx.c` 裡的 `fcb`)，或從符號名稱本身拆解出核心字根 (例如 `test_fcb_crc_disabled` 的核心是 `fcb`)。Kconfig 符號通常是用子系統/功能名稱命名 (例如 `config FCB`)，不是用個別函式或測試名稱命名。
 3. 若錯誤是單純的 C 語言語法錯誤 (如漏掉分號、括號、明顯的拼字錯誤)，才不需要檢索圖譜，search_keywords 必須回傳空列表 []。"""),
         ("human", "這是我專案目前的錯誤日誌：\n{error_log}")
     ])
