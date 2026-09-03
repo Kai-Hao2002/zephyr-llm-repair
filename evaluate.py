@@ -46,6 +46,7 @@ from core.baseline_pipelines import run_b1, run_b2, run_b3
 from core.llm_provider import set_provider, get_provider
 from tools.fault_injector import MUTATE_SCRIPT_HOST_PATH, MUTATE_SCRIPT_CONTAINER_PATH
 from tools.qemu_oracle import QemuOracle
+from tools.log_filter import LogFilter
 
 PIPELINE_CHOICES = ("proposed", "b1", "b2", "b3")
 MODEL_PROVIDER_CHOICES = ("gemini", "anthropic", "openai")
@@ -210,7 +211,8 @@ def _assert_no_git_residue(workspace_dir: str, case_id: str) -> None:
             )
 
 
-def build_agent_initial_state(case: Dict[str, Any], workspace_path: str, max_iters: int) -> ZephyrAgentState:
+def build_agent_initial_state(case: Dict[str, Any], workspace_path: str, max_iters: int,
+                               initial_log_override: Optional[str] = None) -> ZephyrAgentState:
     """
     只從 case 裡挑出 _AGENT_VISIBLE_CASE_FIELDS 白名單裡的欄位餵給
     create_initial_state()。硬性要求 2 的驗收測試：明確斷言白名單本身
@@ -218,21 +220,47 @@ def build_agent_initial_state(case: Dict[str, Any], workspace_path: str, max_ite
     injection 之類的欄位也加進去」這種未來才會發生的錯誤，而不是現在的
     case dict。
 
+    initial_log_override 有給值時優先用它，取代資料集裡凍結的
+    case["initial_error_log"]——見 run_case 的說明：repro-check
+    (verify_reproduces_initial_failure) 本來就會真的重新 build 一次，把
+    那次「即時、真正重現當下」的日誌交給 Analyzer 做第一次診斷，理論上
+    比資料集建置當下記錄的靜態字串更完整、更即時 (某些案例的
+    initial_error_log 本身記得就很精簡，見 2026-09-03 stress test 對
+    inject_kconfig_fcb_select 的分析)。只有 --skip-repro-check 時 (沒有
+    repro-check 結果可用) 才會退回資料集記錄的值。這個 override 不會讓
+    injection 相關資訊外洩：repro-check 本身也是在「什麼都還沒修」的
+    workspace 上跑，agent 從沒看過 fixed_commit 之後的樣子。
+
     Only fields in _AGENT_VISIBLE_CASE_FIELDS are ever read from `case` and
     passed to create_initial_state(). Hard requirement 2's acceptance
     check: assert the allowlist itself never contains a field that must
     never leak — guards against someone later editing the allowlist to
     accidentally include `injection` or similar, not against today's case
     dict.
+
+    When given, initial_log_override takes priority over the dataset's
+    frozen case["initial_error_log"] — see run_case's docstring: the
+    repro-check (verify_reproduces_initial_failure) already runs a genuine
+    fresh build, so handing that live, just-reproduced log to Analyzer for
+    the first diagnosis is, in principle, more complete and current than
+    the static string recorded at dataset-build time (some cases'
+    initial_error_log is itself quite sparse — see the 2026-09-03 stress
+    test's analysis of inject_kconfig_fcb_select). Only falls back to the
+    dataset's recorded value when --skip-repro-check was passed (no
+    repro-check result exists to use). This override doesn't leak any
+    injection-related info: the repro-check itself also runs against the
+    "nothing patched yet" workspace — the agent still never sees anything
+    from beyond fixed_commit.
     """
     assert not (_AGENT_VISIBLE_CASE_FIELDS & _NEVER_AGENT_VISIBLE_FIELDS), (
         "_AGENT_VISIBLE_CASE_FIELDS allowlist has been edited to include a field "
         "that must never reach the agent"
     )
 
+    initial_log = initial_log_override if initial_log_override is not None else case.get("initial_error_log", "")
     return create_initial_state(
         workspace_path=workspace_path,
-        initial_log=case.get("initial_error_log", ""),
+        initial_log=initial_log,
         max_iters=max_iters,
         board=case.get("board", "qemu_x86"),
         target_app=case.get("target_app", "."),
@@ -277,6 +305,16 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
 
     workspace_path = prepare_broken_workspace(case, dest_dir)
 
+    # repro-check 真的重新 build 一次時順便拿到的即時日誌，優先於資料集
+    # 凍結的 initial_error_log 交給 agent 做第一次診斷——見
+    # build_agent_initial_state 的說明。--skip-repro-check 時沒有這個值
+    # 可用，維持 None，讓 build_agent_initial_state 退回資料集記錄的值。
+    # The live log the repro-check's real rebuild happens to produce,
+    # preferred over the dataset's frozen initial_error_log for the
+    # agent's first diagnosis — see build_agent_initial_state's docstring.
+    # Stays None with --skip-repro-check (no such value exists), so
+    # build_agent_initial_state falls back to the dataset's recorded value.
+    initial_log_override = None
     if not skip_repro_check:
         repro_result = verify_reproduces_initial_failure(case, workspace_path)
         logger.info(
@@ -288,8 +326,9 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
                 f"[{case_id}] workspace 準備完成後直接建置成功，沒有重現預期的失敗——"
                 "案例可能已經因環境漂移失效，拒絕交給 agent 修復一個其實沒壞的專案。"
             )
+        initial_log_override = LogFilter().compress_log(repro_result["log"])
 
-    state = build_agent_initial_state(case, workspace_path, max_iters)
+    state = build_agent_initial_state(case, workspace_path, max_iters, initial_log_override)
 
     logger.info(f"[{case_id}] 開始 {pipeline} pipeline 修復...")
     # TTR (Time-to-Repair，見 analyze_results.py)：從這裡開始的牆鐘時間，
