@@ -119,6 +119,48 @@ class PatchApplier:
             "error": ""
         }
 
+    def apply_full_file(self, filepath: str, content: str) -> Dict[str, Any]:
+        """
+        B1 (Zero-Shot LLM) baseline 專用：整檔覆寫，不是 SEARCH/REPLACE——
+        B1 依 Table 2 定義完全看不到原始檔案內容，沒辦法產生需要逐字元比對
+        SEARCH 區塊的 patch，只能整檔輸出它猜測修正後的樣子。
+
+        只允許覆寫這次 workspace 裡真的存在的檔案，不接受用這個管道新建
+        檔案：檔案是否存在本身不洩漏 injection 資訊 (Zephyr 原始碼樹的檔案
+        清單是公開資訊，B1 沒被告知的是內容跟哪個檔案真的壞了)，但接受
+        任意路徑新建檔案會讓模型亂猜路徑寫出垃圾檔案，汙染 workspace。
+
+        For the B1 (Zero-Shot LLM) baseline: overwrites the whole file
+        rather than SEARCH/REPLACE — per Table 2's definition B1 never sees
+        the original file content, so it can't produce a patch requiring an
+        exact-text SEARCH match; it can only output its guess at the fixed
+        file in full.
+
+        Only overwrites a file that genuinely already exists in this
+        workspace; refuses to create new files through this path — a
+        file's mere existence doesn't leak injection info (Zephyr's file
+        listing is public; what B1 isn't told is which file's content is
+        actually broken), but allowing arbitrary new paths would let the
+        model write junk files at made-up locations.
+        """
+        filepath = filepath.strip().strip("`").strip()
+        full_path = os.path.join(self.workspace_path, filepath)
+
+        if not os.path.exists(full_path):
+            err_msg = f"TargetFileNotFound: 找不到目標檔案 '{filepath}' (Target file not found)."
+            self.logger.error(err_msg)
+            return {"success": False, "applied_files": [], "error": err_msg}
+
+        try:
+            with open(full_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(content)
+            self.logger.info(f"成功整檔覆寫 (Successfully overwrote full file): {filepath}")
+            return {"success": True, "applied_files": [filepath], "error": ""}
+        except Exception as e:
+            err_msg = f"FileWriteError: 無法讀寫檔案 '{filepath}'. 錯誤: {str(e)}"
+            self.logger.error(err_msg)
+            return {"success": False, "applied_files": [], "error": err_msg}
+
 # ==========================================
 # 測試區塊 (Testing Block)
 # ==========================================

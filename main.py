@@ -85,10 +85,20 @@ def main():
 
     # 3. 初始化 LangGraph 狀態 (Initialize LangGraph State)
     logger.info("\n🧠 [System] 初始化全域狀態與 LangGraph...")
+    # 這個 demo 場景是把整個 hello_world app 直接放在 workspace 根目錄，
+    # board/target_app 明確帶入舊有的預設值，行為與修改前完全相同——只是
+    # 現在這兩個值是外部傳入而不是深藏在 devops_node 裡。
+    # This demo scenario puts the whole hello_world app right at the
+    # workspace root; board/target_app are passed explicitly with the old
+    # defaults so behavior is unchanged from before — the difference is
+    # these values are now supplied from the caller instead of buried
+    # inside devops_node.
     state = create_initial_state(
         workspace_path=test_workspace,
         initial_log=initial_log,
-        max_iters=3
+        max_iters=3,
+        board="qemu_x86",
+        target_app="."
     )
 
     graph = build_zephyr_graph()

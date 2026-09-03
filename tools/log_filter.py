@@ -26,7 +26,16 @@ class LogFilter:
         self.cmake_error_re = re.compile(r"^CMake Error.*:")
         
         # 3. Device Tree (DTC) 錯誤 (e.g., Error: zzz.dts:45.1-10 syntax error)
-        self.dts_error_re = re.compile(r"(?i)^(?:Error|devicetree error).*")
+        # 舊版只要求開頭是 "Error"，會誤判任何以 error: 開頭的無關訊息
+        # (例如 git/curl 網路錯誤 "error: RPC failed; curl 56 ...")。
+        # 現在要求明確是 "devicetree error"，或是 dtc 編譯器標準格式
+        # "error: xxx.dts(i):行號..."，才算真正的 DTS 錯誤。
+        # The old pattern only required a line starting with "Error", which
+        # false-matched unrelated messages (e.g. git/curl network errors like
+        # "error: RPC failed; curl 56 ..."). Now requires an explicit
+        # "devicetree error" or the dtc compiler's standard
+        # "error: xxx.dts(i):line..." format.
+        self.dts_error_re = re.compile(r"(?i)^(?:devicetree error|error:\s*\S+\.dtsi?:\d+)")
         
         # 4. Kconfig 設定衝突錯誤 (e.g., warning: <symbol> (defined at Kconfig:15) ...)
         # 注意：在 Kconfig 中，嚴重衝突有時會以 warning 顯示，但導致後續失敗，因此特定 warning 也要抓取
