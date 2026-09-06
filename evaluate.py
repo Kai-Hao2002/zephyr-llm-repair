@@ -450,7 +450,8 @@ def select_cases(dataset: List[Dict[str, Any]], args: argparse.Namespace) -> Lis
             raise SystemExit(f"case id '{args.case_id}' not found in {args.dataset}")
         return matches
     if args.limit is not None:
-        return dataset[: args.limit]
+        offset = args.offset or 0
+        return dataset[offset: offset + args.limit]
     if args.all:
         return dataset
     raise SystemExit(
@@ -472,7 +473,8 @@ def main():
                               "comparison, see core/llm_provider.py). The Hybrid RAG semantic layer's "
                               "embedding model is unaffected — Anthropic has no embeddings API of its own.")
     parser.add_argument("--case-id", help="Run exactly one case by its 'id' field.")
-    parser.add_argument("--limit", type=int, help="Run only the first N cases (for piloting).")
+    parser.add_argument("--limit", type=int, help="Run only N cases starting at --offset (default offset 0), for piloting or batching.")
+    parser.add_argument("--offset", type=int, default=0, help="Skip the first N cases before applying --limit (for slicing the dataset into batches).")
     parser.add_argument("--all", action="store_true", help="Run every case in the dataset. Requires explicit opt-in.")
     parser.add_argument("--runs-dir", default=os.path.join("eval_runs", time.strftime("%Y%m%d_%H%M%S")),
                          help="Directory to prepare per-case workspaces under.")
