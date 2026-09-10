@@ -1,7 +1,8 @@
 # core/workflow.py
 import os
+import time
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 from langgraph.graph import StateGraph, END
 
@@ -41,7 +42,7 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 
-def build_devops_docker_cmd(workspace_path: str, board: str, target_app: str) -> str:
+def build_devops_docker_cmd(workspace_path: str, board: str, target_app: str) -> Tuple[str, str]:
     """
     組出 DevOps Expert 用來建置/執行一個案例的 docker 指令。抽成獨立函式，
     讓 evaluate.py 準備好 workspace 之後，可以用完全相同的指令先做一次
@@ -96,12 +97,32 @@ def build_devops_docker_cmd(workspace_path: str, board: str, target_app: str) ->
     providing real isolation — only breaking CMake's own cache writes;
     dropping it matches the writable, native container filesystem
     FaultInjector actually verified this dataset against.
+
+    回傳 (docker_cmd, container_name)：這裡的容器沒有 --name 就是隨機命名
+    (docker 自己配的形容詞_人名組合)，QemuOracle.evaluate() 的 container_name
+    安全網 (finally 區塊裡的 `docker kill`) 因此永遠沒東西可傳、形同虛設——
+    這正是孤兒容器一再出現的根因 (2026-09 發現：happy_elion/xenodochial_euclid/
+    epic_chatterjee 這些孤兒容器名稱，就是隨機命名的產物)。呼叫端必須把回傳的
+    container_name 傳進 oracle.evaluate(container_name=...)，安全網才真正有效。
+
+    Returns (docker_cmd, container_name): without --name the container gets
+    a random Docker-assigned name (an adjective_surname pair), so
+    QemuOracle.evaluate()'s container_name safety net (the `docker kill` in
+    its finally block) never has anything to target — this is the actual
+    root cause of the recurring orphaned-container bug (found 2026-09: the
+    orphans' names — happy_elion/xenodochial_euclid/epic_chatterjee — are
+    exactly Docker's random-name pattern). Callers must pass the returned
+    container_name into oracle.evaluate(container_name=...) for the safety
+    net to do anything.
     """
-    return (
-        f"docker run --rm -i -v {os.path.abspath(workspace_path)}:/zephyrproject/zephyr "
+    container_name = f"devops_run_{int(time.time() * 1000)}"
+    docker_cmd = (
+        f"docker run --rm -i --name {container_name} "
+        f"-v {os.path.abspath(workspace_path)}:/zephyrproject/zephyr "
         f"-w /zephyrproject/zephyr/{target_app} zephyr-sandbox "
         f"bash -c 'west build -b {board} -d /tmp/build -p always -t run .'"
     )
+    return docker_cmd, container_name
 
 
 # route_after_apply_patch/route_after_static_check/route_after_devops
@@ -157,9 +178,9 @@ def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
     once would let a test-deleting shortcut patch be misjudged as a
     successful repair).
     """
-    docker_cmd = build_devops_docker_cmd(workspace_path, board, target_app)
+    docker_cmd, container_name = build_devops_docker_cmd(workspace_path, board, target_app)
     oracle = QemuOracle(timeout=600)
-    eval_result = oracle.evaluate(docker_cmd, required_pass_test=required_pass_test)
+    eval_result = oracle.evaluate(docker_cmd, container_name=container_name, required_pass_test=required_pass_test)
     log_filter = LogFilter()
     compiled = eval_result["status"] in _COMPILED_STATUSES
 

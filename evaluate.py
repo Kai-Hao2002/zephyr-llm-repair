@@ -337,9 +337,9 @@ def verify_reproduces_initial_failure(case: Dict[str, Any], workspace_path: str)
     """
     category = case.get("category", "")
     wait_for_completion = category in ("runtime_crash", "compound")
-    docker_cmd = build_devops_docker_cmd(workspace_path, case.get("board", "qemu_x86"), case.get("target_app", "."))
+    docker_cmd, container_name = build_devops_docker_cmd(workspace_path, case.get("board", "qemu_x86"), case.get("target_app", "."))
     oracle = QemuOracle(timeout=600)
-    result = oracle.evaluate(docker_cmd, wait_for_completion=wait_for_completion)
+    result = oracle.evaluate(docker_cmd, container_name=container_name, wait_for_completion=wait_for_completion)
     return result
 
 

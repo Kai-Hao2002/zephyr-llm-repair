@@ -610,17 +610,44 @@ class QemuOracle:
 
             # 保險機制：直接對 Docker daemon 下達 kill，不管本地子進程有沒有
             # 成功終止容器都確保清乾淨 (--rm 容器被 kill 後會自動移除)。
+            # 過去這裡的例外被靜默吞掉 (bare except: pass)，加上呼叫端長期
+            # 沒傳 container_name (見 build_devops_docker_cmd 的說明)，導致
+            # 孤兒容器一再出現卻完全沒有任何紀錄——2026-09 修好 container_name
+            # 沒傳的問題後，這裡也一併補上：kill 失敗時印警告 (不再無聲吞掉)，
+            # 並加一道 `docker rm -f` 作為 kill 之外的保底，防止容器卡在某種
+            # kill 訊號沒生效的狀態。
             # Safety net: kill the container directly via the Docker daemon
-            # regardless of whether the local child process managed to stop it
-            # (a `--rm` container is auto-removed once killed).
+            # regardless of whether the local child process managed to stop
+            # it (a `--rm` container is auto-removed once killed). This used
+            # to silently swallow failures (bare except: pass), and combined
+            # with every caller forgetting to pass container_name (see
+            # build_devops_docker_cmd), orphaned containers kept recurring
+            # with zero visibility — fixed 2026-09 alongside the
+            # container_name wiring: log a warning on failure instead of
+            # swallowing it, and follow up with `docker rm -f` as a second
+            # safety net in case `kill` alone doesn't fully tear the
+            # container down.
             if container_name:
                 try:
-                    subprocess.run(
+                    kill_result = subprocess.run(
                         ["docker", "kill", container_name],
-                        capture_output=True, timeout=10
+                        capture_output=True, timeout=10, text=True
                     )
-                except Exception:
-                    pass
+                    if kill_result.returncode != 0 and "No such container" not in kill_result.stderr:
+                        self.logger.warning(
+                            f"docker kill {container_name} 失敗，改用 docker rm -f 保底清理 "
+                            f"(docker kill failed, falling back to docker rm -f): {kill_result.stderr.strip()}"
+                        )
+                        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=15)
+                except Exception as e:
+                    self.logger.warning(
+                        f"清理容器 {container_name} 時發生例外，改用 docker rm -f 保底清理 "
+                        f"(exception while cleaning up container, falling back to docker rm -f): {e}"
+                    )
+                    try:
+                        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=15)
+                    except Exception:
+                        pass
 
             result["log"] = captured_log
 
