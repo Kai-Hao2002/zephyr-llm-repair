@@ -84,6 +84,53 @@ def _escape_operator(operator: str) -> str:
     return _ESCAPE_OPERATOR_RE.sub(r"\\\1", operator)
 
 
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_INJECTION_ASSETS_MARKER = os.path.join("dataset", "scripts", "injection_assets")
+
+
+def _resolve_extra_file_host_path(host_path: str) -> str:
+    """資料集裡 extra_files 的 host 路徑是當初在舊 OneDrive 位置
+    (~/Library/CloudStorage/OneDrive-TUM/zephyr-llm-repair/...) 建構資料集
+    時寫死的絕對路徑；repo 已搬到本地路徑 (見 memory 的搬遷記錄)，這些
+    絕對路徑本身沒有一併更新，該舊路徑早已不存在。若照原樣直接
+    bind-mount，Docker 對不存在的 host 來源會自動建立一個空目錄去掛載，
+    容器內收到的就是空目錄而非檔案，cp 会因此失敗 (症狀：
+    "cp: -r not specified; omitting directory")。這裡在真正使用前，把任何
+    不存在的路徑改成以目前 repo 根目錄重新定位 (兩者的
+    dataset/scripts/injection_assets/ 之後的相對路徑是一致的，資產檔案本身
+    有跟著 git 搬過來)。
+    Dataset extra_files host paths were hardcoded absolute paths pointing at
+    the dataset's original OneDrive-synced location; the repo has since
+    moved to a local path (see memory's relocation note) without those
+    absolute paths being updated, and the old location no longer exists.
+    Bind-mounting a nonexistent host source makes Docker silently create an
+    empty directory there to mount instead, so the container gets an empty
+    directory rather than the asset file, and cp fails (symptom: "cp: -r
+    not specified; omitting directory"). Re-root any path that doesn't exist
+    on disk under the current repo root instead — the portion after
+    dataset/scripts/injection_assets/ is identical either way, since the
+    asset files themselves moved with the git history.
+
+    使用 isfile() 而非 exists()：先前對舊路徑的失敗嘗試，Docker 已經在
+    該路徑自動生出空目錄 (bind-mount 不存在來源的副作用)——exists() 對
+    目錄也會回傳 True，會誤判空目錄為「檔案存在」，必須用 isfile() 排除。
+    isfile() rather than exists(): earlier failed attempts against the old
+    path already left Docker-created empty directories there (a side effect
+    of bind-mounting a nonexistent source) — exists() returns True for a
+    directory too and would misidentify that empty directory as "the file
+    is there", so isfile() is required to rule that out."""
+    if os.path.isfile(host_path):
+        return host_path
+    marker_idx = host_path.find(_INJECTION_ASSETS_MARKER)
+    if marker_idx != -1:
+        candidate = os.path.join(_REPO_ROOT, host_path[marker_idx:])
+        if os.path.isfile(candidate):
+            return candidate
+    raise FileNotFoundError(
+        f"extra_files host path not found (checked original and repo-relative): {host_path}"
+    )
+
+
 def _normalize_injections(case: Dict[str, Any]) -> List[Dict[str, str]]:
     if "injections" in case:
         return case["injections"]
@@ -131,18 +178,48 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
         for inj in injections
     ]
 
+    # extra_files 支援「把既有測試移植到新板子」這類需要新增/覆寫 mutation
+    # 目標檔以外之檔案的案例 (例如新增一個原本沒有的 boards/<board>.overlay)。
+    # 跟 tools/fault_injector.py._run() 用同一套機制：host 路徑各自 bind-mount
+    # 到一個獨立的 staging 路徑 (不能直接掛到最終路徑——如果那個路徑是既有
+    # git 追蹤檔案，唯讀 mount 會讓 git checkout 覆寫時得到 Permission
+    # denied，整條 checkout 失敗)，等 checkout + west update 都做完、目標
+    # 路徑回到一般檔案狀態後，再用 cp 複製過去，且必須發生在 mutation 指令
+    # 之前 (mutation 目標檔本身可能就是這裡新增的檔案，如本案例)。
+    # extra_files supports "port an existing test to a new board" cases that
+    # need files beyond the single mutation target_file (e.g. adding a
+    # boards/<board>.overlay the test didn't originally have). Same mechanism
+    # as tools/fault_injector.py._run(): each host path is bind-mounted at an
+    # independent staging path (not directly at its final path — if that path
+    # is an existing git-tracked file, a read-only mount would make git
+    # checkout's overwrite fail with Permission denied), then cp'd into place
+    # once checkout + west update have finished, before the mutation commands
+    # run (the mutation's own target_file may be one of these newly-added
+    # files, as in this case).
+    extra_files = case.get("extra_files") or injections[0].get("extra_files")
+    extra_mounts = []
+    copy_steps = []
+    if extra_files:
+        for idx, (container_rel_path, host_path) in enumerate(extra_files.items()):
+            resolved_host_path = _resolve_extra_file_host_path(host_path)
+            staging_path = f"/tmp/extra_files/{idx}"
+            extra_mounts += ["-v", f"{resolved_host_path}:{staging_path}:ro"]
+            dest = f"/zephyrproject/zephyr/{container_rel_path}"
+            copy_steps.append(f"mkdir -p $(dirname {dest}) && cp {staging_path} {dest}")
+
     inner_script = (
         "cd /zephyrproject/zephyr && "
         f"git fetch origin {broken_commit} && "
         f"git checkout {broken_commit} && "
         "west update --narrow && "
-        + " && ".join(mutate_cmds)
+        + " && ".join(copy_steps + mutate_cmds)
     )
 
     docker_run_cmd = [
         "docker", "run", "-i", "--name", container_name,
         "--cpus=2", "--memory=2400m",
         "-v", f"{MUTATE_SCRIPT_HOST_PATH}:{MUTATE_SCRIPT_CONTAINER_PATH}:ro",
+        *extra_mounts,
         "zephyr-sandbox", "bash", "-c", inner_script,
     ]
 
