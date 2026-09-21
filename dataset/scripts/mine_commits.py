@@ -4646,6 +4646,128 @@ INJECTION_CATALOG = [
         "target_app": "tests/kernel/mutex/mutex_api",
         "board": "native_sim",
     },
+    # kconfig 類別擴充 (2026-09-21)：既有 12 筆裡有 6 筆是 `*_EMUL` 驅動模擬器
+    # 樣板 (dac/bbram/biometrics/gpio/gnss_emul)，curate_final_dataset.py
+    # 已經把這個樣板從 10 筆刻意砍到 6 筆做多樣性平衡 (見該檔案開頭的稽核
+    # 說明)。這批全部改用非 *_EMUL 的真實 subsys/driver 功能 Kconfig
+    # (跟既有的 FCB/MCUBOOT_IMG_MANAGER/MODEM_PPP 同一路數)，維持
+    # 多樣性而不是重新收編那 6 筆已被排除的 *_EMUL 重複案例。全部明確
+    # pin 住跟其餘 kconfig 案例相同的 baseline commit
+    # (bc460feabe7038dc876782557e39be791d6c24e9)，而不是讓
+    # generate_injection_candidates() 解析出新的 main tip。
+    #
+    # Kconfig category expansion (2026-09-21): 6 of the existing 12 cases
+    # are the `*_EMUL` driver-emulator template, already deliberately capped
+    # from 10 down to 6 for diversity (see curate_final_dataset.py's audit
+    # notes). This batch instead uses non-`*_EMUL` real subsys/driver
+    # feature Kconfig options (same style as the existing FCB/
+    # MCUBOOT_IMG_MANAGER/MODEM_PPP cases), preserving diversity rather than
+    # re-admitting the 6 already-excluded `*_EMUL` duplicates. All entries
+    # explicitly pin the same baseline commit used by the rest of the
+    # kconfig category (bc460feabe7038dc876782557e39be791d6c24e9) instead of
+    # letting generate_injection_candidates() resolve a fresh main tip.
+    {
+        "id_suffix": "kconfig_fat_filesystem_elm_depends",
+        "category": "kconfig",
+        "target_file": "subsys/fs/Kconfig.fatfs",
+        "operator": "kconfig_invert_depends:FAT_FILESYSTEM_ELM",
+        "target_app": "tests/subsys/fs/fat_fs_api",
+        "board": "native_sim",
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
+    {
+        "id_suffix": "kconfig_flash_map_depends",
+        "category": "kconfig",
+        "target_file": "subsys/storage/flash_map/Kconfig",
+        "operator": "kconfig_invert_depends:FLASH_MAP",
+        "target_app": "tests/subsys/storage/flash_map",
+        "board": "native_sim",
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
+    {
+        "id_suffix": "kconfig_zbus_depends",
+        "category": "kconfig",
+        "target_file": "subsys/zbus/Kconfig",
+        "operator": "kconfig_invert_depends:ZBUS",
+        "target_app": "tests/subsys/zbus/hlp_priority_boost",
+        "board": "native_sim",
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
+    {
+        "id_suffix": "kconfig_settings_fcb_depends",
+        "category": "kconfig",
+        "target_file": "subsys/settings/Kconfig",
+        "operator": "kconfig_invert_depends:SETTINGS_FCB",
+        "target_app": "tests/subsys/settings/fcb",
+        "board": "native_sim",
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
+    {
+        "id_suffix": "kconfig_settings_file_depends",
+        "category": "kconfig",
+        "target_file": "subsys/settings/Kconfig",
+        "operator": "kconfig_invert_depends:SETTINGS_FILE",
+        "target_app": "tests/subsys/settings/file",
+        "board": "native_sim",
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
+    {
+        "id_suffix": "kconfig_isotp_depends",
+        "category": "kconfig",
+        "target_file": "subsys/canbus/isotp/Kconfig",
+        "operator": "kconfig_invert_depends:ISOTP",
+        "target_app": "tests/subsys/canbus/isotp/implementation",
+        "board": "native_sim",
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
+    {
+        "id_suffix": "kconfig_rtp_depends",
+        "category": "kconfig",
+        "target_file": "subsys/net/lib/rtp/Kconfig",
+        "operator": "kconfig_invert_depends:RTP",
+        "target_app": "tests/net/rtp/loopback",
+        "board": "native_sim",
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
+    {
+        "id_suffix": "kconfig_wireguard_depends",
+        "category": "kconfig",
+        "target_file": "subsys/net/lib/wireguard/Kconfig",
+        "operator": "kconfig_invert_depends:WIREGUARD",
+        "target_app": "tests/net/lib/wireguard",
+        "board": "native_sim",
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
+    # 中信心候選：EEPROM_SIMULATOR 檔名不是 Kconfig.*emul*，符合字面上的排除
+    # 規則，但概念上仍是「模擬硬體驅動」——保留做驗證緩衝池，多樣性判斷交給
+    # curate 階段再決定是否納入 final_dataset.json。
+    # Medium-confidence: EEPROM_SIMULATOR's filename isn't Kconfig.*emul*
+    # (passes the literal exclusion rule) but is still conceptually a
+    # simulated-hardware driver — kept as verification-pool buffer; whether
+    # it's admitted into final_dataset.json is a curation-stage call.
+    {
+        "id_suffix": "kconfig_eeprom_simulator_depends",
+        "category": "kconfig",
+        "target_file": "drivers/eeprom/Kconfig",
+        "operator": "kconfig_invert_depends:EEPROM_SIMULATOR",
+        "target_app": "tests/drivers/eeprom/api",
+        "board": "native_sim",
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
+    # 低信心候選：testcase.yaml 沒有明確的 native_sim 空白 extra_configs
+    # scenario 佐證，留作驗證池深度緩衝。
+    # Lower-confidence: no scenario with an explicitly empty extra_configs
+    # block was directly confirmed for native_sim — kept only for
+    # verification-pool depth.
+    {
+        "id_suffix": "kconfig_net_l2_ipip_depends",
+        "category": "kconfig",
+        "target_file": "subsys/net/l2/virtual/ipip/Kconfig",
+        "operator": "kconfig_invert_depends:NET_L2_IPIP",
+        "target_app": "tests/net/virtual",
+        "board": "native_sim",
+        "baseline_commit": "bc460feabe7038dc876782557e39be791d6c24e9",
+    },
 ]
 
 

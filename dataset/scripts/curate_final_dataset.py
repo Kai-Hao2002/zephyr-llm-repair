@@ -49,6 +49,23 @@ EXCLUDE_IDS = {
     'inject_kconfig_espi_emul_depends',
     'inject_kconfig_dma_emul_depends',
     'inject_kconfig_adc_emul_depends',
+    # kconfig 擴充 (2026-09-21)：10 筆新挖的非 *_EMUL 候選全數通過雙向驗證，
+    # 但使用者決定只收編 8 筆高信心案例、維持原訂 n=20 目標與「非 EMUL」的
+    # 精神。排除這 2 筆：EEPROM_SIMULATOR 雖然檔名不是 Kconfig.*emul*，但
+    # 概念上仍是模擬硬體驅動；NET_L2_IPIP 找不到明確的空白 extra_configs
+    # native_sim scenario 佐證，信心較低。兩者仍完整保留在
+    # verified_zephyr_bugs.json 供未來需要更多樣本時使用。
+    # Kconfig expansion (2026-09-21): all 10 newly-mined non-*_EMUL
+    # candidates passed the two-sided verification gate, but the user chose
+    # to admit only the 8 high-confidence ones, keeping the originally
+    # agreed n=20 target and the "non-EMUL" intent. Excluding these 2:
+    # EEPROM_SIMULATOR's filename isn't Kconfig.*emul* but is still
+    # conceptually a simulated-hardware driver; NET_L2_IPIP's native_sim
+    # buildability couldn't be confirmed against an explicit empty-
+    # extra_configs scenario, lower confidence. Both remain intact in
+    # verified_zephyr_bugs.json if more samples are wanted later.
+    'inject_kconfig_eeprom_simulator_depends',
+    'inject_kconfig_net_l2_ipip_depends',
 }
 
 
