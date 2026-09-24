@@ -20,7 +20,8 @@ class LogFilter:
         # 定義核心錯誤特徵的正規表示式 (Regex patterns for core errors)
         
         # 1. C 語言 / GCC / Clang 編譯錯誤 (e.g., src/main.c:12:3: error: undefined reference)
-        self.c_error_re = re.compile(r"(?i)^.*:\d+:\d+:\s+error:\s+.*")
+        # "fatal error:" (e.g. missing header) must match too, not only plain "error:".
+        self.c_error_re = re.compile(r"(?i)^.*:\d+:\d+:\s+(?:fatal\s+)?error:\s+.*")
         
         # 2. CMake 配置錯誤 (e.g., CMake Error at CMakeLists.txt:10)
         self.cmake_error_re = re.compile(r"^CMake Error.*:")
@@ -44,6 +45,30 @@ class LogFilter:
         # 5. Ninja 建置中斷提示
         self.ninja_fatal_re = re.compile(r"^ninja: build stopped:.*")
 
+        # 6. Zephyr 自己的 Kconfig 警告格式：不帶 "檔名:行號:" 前綴，而是
+        # "warning: SYM (defined at 檔案:行號) was assigned the value 'y' but got 'n'..."，
+        # 且說明文字會折成多行。舊的 kconfig_error_re 要求 "檔名:行號: warning:"，
+        # 完全對不上這個格式，導致真正的 Kconfig 依賴錯誤被整段丟掉。
+        # Zephyr's own Kconfig warning format has no "file:line:" prefix and wraps
+        # onto several lines; kconfig_error_re never matched it.
+        self.kconfig_warning_start_re = re.compile(r"^warning:\s+\S+.*")
+        self.kconfig_warning_end_re = re.compile(
+            r"^(?:warning:|error:|--\s|Parsing |Loaded |Merged |Configuration saved|"
+            r"Kconfig header|CMake |ninja:|\[\d+/\d+\])"
+        )
+        self.kconfig_abort_re = re.compile(r"^error:\s+Aborting due to Kconfig warnings")
+        self.kconfig_warning_max_lines = 8
+
+        # 7. 連結期錯誤 (e.g., undefined reference to `foo')。同一個符號常被重複上百次，
+        # 依符號去重並設上限，避免洗掉真正的線索。
+        # Link-time errors; one symbol is often repeated hundreds of times, so
+        # dedupe by symbol and cap the total.
+        self.link_error_re = re.compile(
+            r"(?i)(?:undefined reference to|multiple definition of|cannot find -l|collect2: error)"
+        )
+        self.link_symbol_re = re.compile(r"(?:undefined reference to|multiple definition of)\s+[`'\"]?([^'`\"\s]+)")
+        self.link_error_max_symbols = 15
+
     def compress_log(self, raw_log: str) -> str:
         """
         輸入原始編譯日誌字串，回傳高密度的錯誤摘要。
@@ -57,14 +82,28 @@ class LogFilter:
         
         lines = raw_log.splitlines()
         extracted_lines: List[str] = []
-        capturing_cmake_stack = False 
+        capturing_cmake_stack = False
+        kconfig_warning_lines_left = 0
+        seen_dedupe = set()
+        link_symbols = set()
+        link_omitted = 0
+        dup_omitted = 0
 
         for line in lines:
             # 清除顏色代碼並去除前後空白
             clean_line = ansi_escape.sub('', line).strip()
-            
+
             if not clean_line:
+                kconfig_warning_lines_left = 0
                 continue
+
+            # --- Kconfig 警告的多行延續 ---
+            if kconfig_warning_lines_left > 0:
+                if not self.kconfig_warning_end_re.match(clean_line):
+                    extracted_lines.append(clean_line)
+                    kconfig_warning_lines_left -= 1
+                    continue
+                kconfig_warning_lines_left = 0
 
             # --- 處理 CMake 的連續 Call Stack ---
             if capturing_cmake_stack:
@@ -84,6 +123,12 @@ class LogFilter:
                 capturing_cmake_stack = True
             
             elif self.c_error_re.match(clean_line):
+                # 同一個缺標頭錯誤會隨每個編譯單元重複出現，只留第一次
+                if "fatal error" in clean_line.lower():
+                    if clean_line in seen_dedupe:
+                        dup_omitted += 1
+                        continue
+                    seen_dedupe.add(clean_line)
                 extracted_lines.append("\n[C/C++ Compilation Error Detected]")
                 extracted_lines.append(clean_line)
             
@@ -94,10 +139,37 @@ class LogFilter:
             elif self.kconfig_error_re.match(clean_line):
                 extracted_lines.append("\n[Kconfig/Configuration Error Detected]")
                 extracted_lines.append(clean_line)
+
+            elif self.kconfig_warning_start_re.match(clean_line):
+                extracted_lines.append("\n[Kconfig/Configuration Error Detected]")
+                extracted_lines.append(clean_line)
+                kconfig_warning_lines_left = self.kconfig_warning_max_lines
+
+            elif self.kconfig_abort_re.match(clean_line):
+                extracted_lines.append("\n[Kconfig/Configuration Error Detected]")
+                extracted_lines.append(clean_line)
+
+            elif self.link_error_re.search(clean_line):
+                m = self.link_symbol_re.search(clean_line)
+                key = m.group(1) if m else clean_line
+                if key in link_symbols:
+                    continue
+                if len(link_symbols) >= self.link_error_max_symbols:
+                    link_omitted += 1
+                    continue
+                if not link_symbols:
+                    extracted_lines.append("\n[Linker Error Detected]")
+                link_symbols.add(key)
+                extracted_lines.append(clean_line)
                 
             elif self.ninja_fatal_re.match(clean_line):
                 extracted_lines.append("\n[Ninja Build Stopped]")
                 extracted_lines.append(clean_line)
+
+        if link_omitted:
+            extracted_lines.append(f"[... {link_omitted} more distinct link errors omitted]")
+        if dup_omitted:
+            extracted_lines.append(f"[... {dup_omitted} duplicate 'fatal error' lines omitted]")
 
         compressed_output = "\n".join(extracted_lines).strip()
         
