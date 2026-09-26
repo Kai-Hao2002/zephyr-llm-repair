@@ -36,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -191,7 +192,9 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
     case_id = case["id"]
     injections = _normalize_injections(case)
     broken_commit = case["broken_commit"]
-    container_name = f"evalprep_{case_id}_{int(time.time() * 1000)}"
+    # 加隨機後綴：多條 pipeline 並行跑同一案例時，只用毫秒時間戳會撞名。
+    # Random suffix: a millisecond timestamp alone collides when pipelines run the same case in parallel.
+    container_name = f"evalprep_{case_id}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
 
     mutate_cmds = [
         f"python3 {MUTATE_SCRIPT_CONTAINER_PATH} /zephyrproject/zephyr/{inj['target_file']} "

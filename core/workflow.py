@@ -1,6 +1,7 @@
 # core/workflow.py
 import os
 import time
+import uuid
 import logging
 from typing import Dict, Any, Tuple
 
@@ -116,7 +117,12 @@ def build_devops_docker_cmd(workspace_path: str, board: str, target_app: str) ->
     container_name into oracle.evaluate(container_name=...) for the safety
     net to do anything.
     """
-    container_name = f"devops_run_{int(time.time() * 1000)}"
+    # 加隨機後綴：多條 pipeline 並行建置時，只用毫秒時間戳可能撞名，撞名的建置
+    # 會以 Docker 錯誤收場、被誤判成修復失敗。
+    # Random suffix: parallel pipelines could collide on a millisecond timestamp
+    # alone, and a colliding build would fail with a Docker error and be
+    # misjudged as a failed repair.
+    container_name = f"devops_run_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
     docker_cmd = (
         f"docker run --rm -i --name {container_name} "
         f"-v {os.path.abspath(workspace_path)}:/zephyrproject/zephyr "
