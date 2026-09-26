@@ -79,7 +79,7 @@ class StaticChecker:
             return {"passed": True, "log": ""}
         return {
             "passed": False,
-            "log": f"[StaticCheck: cppcheck 在剛修補的檔案中發現問題]\n{result.stdout}\n{result.stderr}",
+            "log": f"[StaticCheck: cppcheck found problems in the files that were just patched]\n{result.stdout}\n{result.stderr}",
         }
 
     def _run_cmake_only(self, workspace_path: str, target_app: str, board: str) -> Dict[str, Any]:
@@ -110,6 +110,6 @@ class StaticChecker:
             return {"passed": True, "log": ""}
         return {
             "passed": False,
-            "log": f"[StaticCheck: west build --cmake-only (Kconfig/DTS 結構檢查) 失敗]\n"
+            "log": f"[StaticCheck: west build --cmake-only (Kconfig/DTS structure check) failed]\n"
                    f"{result.stdout[-4000:]}\n{result.stderr[-2000:]}",
         }

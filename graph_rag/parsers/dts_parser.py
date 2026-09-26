@@ -36,7 +36,7 @@ class DTSParser:
         Parses the specified DTS file and returns a dict with nodes and edges.
         """
         if not os.path.exists(dts_path):
-            self.logger.error(f"找不到 DTS 檔案 (DTS file not found): {dts_path}")
+            self.logger.error(f"DTS file not found: {dts_path}")
             return {"nodes": {}, "edges": []}
 
         # 1. 呼叫 dtc 將 DTS 轉換為 YAML (Call dtc to convert DTS to YAML)
@@ -48,7 +48,7 @@ class DTSParser:
         try:
             dts_tree = yaml.load(yaml_content, Loader=_TagIgnoringLoader)
         except yaml.YAMLError as e:
-            self.logger.error(f"YAML 解析失敗 (YAML parsing failed): {e}")
+            self.logger.error(f"YAML parsing failed: {e}")
             return {"nodes": {}, "edges": []}
 
         graph_data = {
@@ -62,11 +62,11 @@ class DTSParser:
         for root_item in dts_tree:
             self._traverse_dts_node(root_item, parent_id="ROOT", graph_data=graph_data)
 
-        self.logger.info(f"DTS 解析完成！共提取 {len(graph_data['nodes'])} 個硬體節點。")
+        self.logger.info(f"DTS parsing complete! Extracted {len(graph_data['nodes'])} hardware nodes.")
         return graph_data
 
     def _run_dtc_to_yaml(self, dts_path: str) -> str:
-        """執行 dtc 指令 (Executes the dtc command)"""
+        """Executes the dtc command"""
         try:
             # dtc -I dts -O yaml <file>
             result = subprocess.run(
@@ -77,10 +77,10 @@ class DTSParser:
             )
             return result.stdout
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"dtc 編譯失敗 (dtc compilation failed):\n{e.stderr}")
+            self.logger.error(f"dtc compilation failed:\n{e.stderr}")
             return ""
         except FileNotFoundError:
-            self.logger.error("系統找不到 'dtc' 指令。請確保 Device Tree Compiler 已安裝。 (dtc command not found.)")
+            self.logger.error("dtc command not found.")
             return ""
 
     def _traverse_dts_node(self, node: Any, parent_id: str, graph_data: Dict[str, Any]):
@@ -162,9 +162,9 @@ if __name__ == "__main__":
     # 這裡塞一個假的檔名，因為我們覆蓋了 _run_dtc_to_yaml
     result = parser.parse("dummy.dts") 
 
-    print("\n=== DTS 圖譜邊界 (DTS Graph Edges) ===")
+    print("\n=== DTS Graph Edges ===")
     for edge in result["edges"]:
         print(f"{edge[0]} --[{edge[2]}]--> {edge[1]}")
 
-    print("\n=== DTS 節點詳細資訊 (Node Details - DTS_i2c@40005400) ===")
+    print("\n=== DTS Node Details - DTS_i2c@40005400 ===")
     print(json.dumps(result["nodes"].get("DTS_i2c@40005400", {}), indent=2))

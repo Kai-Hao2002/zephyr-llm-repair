@@ -259,20 +259,20 @@ def create_initial_state(workspace_path: str, initial_log: str, max_iters: int =
 if __name__ == "__main__":
     from langchain_core.messages import HumanMessage, AIMessage
     
-    print("=== 初始化狀態 (Initializing State) ===")
+    print("=== Initializing State ===")
     state = create_initial_state(
         workspace_path="/test/zephyr_project",
         initial_log="CMake Error at CMakeLists.txt:10",
         max_iters=3
     )
-    print(f"專案路徑 (Workspace): {state['workspace_path']}")
-    print(f"初始錯誤 (Initial Error): {state['current_error_log']}")
-    print(f"目前迭代/最大上限 (Iterations): {state['iterations']} / {state['max_iterations']}")
+    print(f"Workspace: {state['workspace_path']}")
+    print(f"Initial Error: {state['current_error_log']}")
+    print(f"Iterations: {state['iterations']} / {state['max_iterations']}")
     
     # 模擬 LangGraph 框架自動附加訊息的行為
-    print("\n=== 模擬訊息附加 (Simulating Message Appending) ===")
-    state["messages"] = operator.add(state["messages"], [HumanMessage(content="分析這個日誌")])
-    state["messages"] = operator.add(state["messages"], [AIMessage(content="發現 CMake 錯誤，需要檢索 Kconfig。")])
+    print("\n=== Simulating Message Appending ===")
+    state["messages"] = operator.add(state["messages"], [HumanMessage(content="Analyze this log")])
+    state["messages"] = operator.add(state["messages"], [AIMessage(content="Found a CMake error; Kconfig needs to be retrieved.")])
     
     for msg in state["messages"]:
         print(f"[{type(msg).__name__}]: {msg.content}")

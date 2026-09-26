@@ -17,16 +17,16 @@ from core.llm_provider import get_chat_model, get_model_name
 
 
 class AnalyzerOutput(BaseModel):
-    """分析建置錯誤並決定後續動作"""
-    reasoning: str = Field(description="簡短解釋你認為錯誤的原因，以及為何需要或不需要檢索圖譜。")
+    """Analyze a build error and decide the next action."""
+    reasoning: str = Field(description="Briefly explain what you think caused the error, and why graph retrieval is or is not needed.")
     search_keywords: List[str] = Field(
-        description="如果要檢索 Kconfig 符號或 DTS 節點，列出精確的關鍵字 (例如 ['I2C', 'bme280'])。如果只是一般 C 語法錯誤，請回傳空列表 []。"
+        description="If Kconfig symbols or DTS nodes should be retrieved, list the exact keywords (e.g. ['I2C', 'bme280']). For a plain C syntax error, return an empty list []."
     )
-    error_category: str = Field(description="將錯誤分類為: 'kconfig', 'dts', 'c_syntax', 'cmake', 'other'")
+    error_category: str = Field(description="Classify the error as one of: 'kconfig', 'dts', 'c_syntax', 'cmake', 'other'")
 
 
 def analyzer_node(state: ZephyrAgentState) -> Dict[str, Any]:
-    print(f"\n🧠 [LLM Analyzer] 正在分析第 {state['iterations']} 次迭代的日誌...")
+    print(f"\n🧠 [LLM Analyzer] Analyzing the log of iteration {state['iterations']}...")
 
     # role="fast"：便宜快速的模型，適合分類任務 (見 core/llm_provider.py)。
     # timeout=120：實測 2026-09-01，Gemini API 呼叫偶爾會完全沒有回應，
@@ -49,14 +49,14 @@ def analyzer_node(state: ZephyrAgentState) -> Dict[str, Any]:
     structured_llm = llm.with_structured_output(AnalyzerOutput, include_raw=True)
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """你是一位資深的 Zephyr RTOS 除錯專家。
-你的任務是分析經過壓縮的編譯或執行期錯誤日誌。
+        ("system", """You are a senior Zephyr RTOS debugging expert.
+Your task is to analyze a compressed build or runtime error log.
 
-決策規則：
-1. 若錯誤涉及硬體、周邊、未定義的巨集 (如 DT_NODELABEL)，代表需要檢索圖譜。請提取精確元件名稱作為 search_keywords。
-2. 若錯誤是「未宣告 (undeclared)」或「未定義參照 (undefined reference)」的符號/函式，先不要預設是單純打錯字——這通常代表該符號原本應該由某個 Kconfig 選項或 Devicetree 設定條件式地啟用/宣告，但條件被破壞了 (例如某個 CONFIG_ 符號被關掉、或 DTS 節點被移除)，導致依賴它的程式碼被排除在編譯之外。這種情況代表需要檢索圖譜，但 search_keywords **不要只給這個未宣告符號的完整字面名稱**——它通常是測試專屬的函式名 (例如 `test_fcb_crc_disabled`)，Kconfig/DTS 設定檔裡幾乎不會出現這個完整字串，只給它會讓檢索找到「提到這個函式名的檔案」(通常是呼叫它的測試檔案本身)，而不是真正該查的設定檔。請額外推斷它所屬的「子系統/模組名稱」一併列入 search_keywords——通常可以從錯誤訊息裡提到的檔案路徑推斷 (例如 `.../subsys/fs/fcb/src/xxx.c` 裡的 `fcb`)，或從符號名稱本身拆解出核心字根 (例如 `test_fcb_crc_disabled` 的核心是 `fcb`)。Kconfig 符號通常是用子系統/功能名稱命名 (例如 `config FCB`)，不是用個別函式或測試名稱命名。
-3. 若錯誤是單純的 C 語言語法錯誤 (如漏掉分號、括號、明顯的拼字錯誤)，才不需要檢索圖譜，search_keywords 必須回傳空列表 []。"""),
-        ("human", "這是我專案目前的錯誤日誌：\n{error_log}")
+Decision rules:
+1. If the error involves hardware, peripherals, or undefined macros (such as DT_NODELABEL), graph retrieval is needed. Extract the exact component names as search_keywords.
+2. If the error is an "undeclared" or "undefined reference" symbol/function, do not assume it is a simple typo. It usually means the symbol was supposed to be enabled/declared conditionally by some Kconfig option or Devicetree setting, but that condition was broken (for example a CONFIG_ symbol was turned off, or a DTS node was removed), so the code that depends on it was excluded from compilation. This case also needs graph retrieval, but for search_keywords **do not give only the full literal name of the undeclared symbol**: it is usually a test-specific function name (for example `test_fcb_crc_disabled`) that almost never appears in Kconfig/DTS files, so searching for it would find "files that mention this function name" (usually the test file that calls it) instead of the configuration files that should actually be inspected. Additionally infer the "subsystem/module name" it belongs to and include it in search_keywords: it can usually be inferred from the file paths mentioned in the error message (for example `fcb` in `.../subsys/fs/fcb/src/xxx.c`), or by extracting the core word root from the symbol name itself (for example the core of `test_fcb_crc_disabled` is `fcb`). Kconfig symbols are usually named after a subsystem/feature (for example `config FCB`), not after an individual function or test name.
+3. Only if the error is a plain C syntax error (such as a missing semicolon or bracket, or an obvious misspelling) is graph retrieval unnecessary; in that case search_keywords must be the empty list []."""),
+        ("human", "Here is the current error log of my project:\n{error_log}")
     ])
 
     chain = prompt | structured_llm
@@ -64,11 +64,11 @@ def analyzer_node(state: ZephyrAgentState) -> Dict[str, Any]:
     result: AnalyzerOutput = raw_output["parsed"]
     usage_entry = extract_usage(raw_output["raw"], node="analyzer", model=get_model_name("fast"))
 
-    print(f"   ↳ 推論: {result.reasoning}")
-    print(f"   ↳ 提取關鍵字: {result.search_keywords}")
+    print(f"   ↳ Reasoning: {result.reasoning}")
+    print(f"   ↳ Extracted keywords: {result.search_keywords}")
 
     return {
         "search_keywords": result.search_keywords,
-        "messages": [f"Analyzer 診斷 ({result.error_category}): {result.reasoning}"],
+        "messages": [f"Analyzer diagnosis ({result.error_category}): {result.reasoning}"],
         "pending_token_usage": append_usage(state.get("pending_token_usage", []), usage_entry),
     }

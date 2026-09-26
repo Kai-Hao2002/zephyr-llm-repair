@@ -41,28 +41,29 @@ from core.llm_provider import get_chat_model, get_model_name
 # weaker/stronger underlying model).
 _PATCH_ROLE = "pro"
 
-_PATCH_FORMAT_SYSTEM_PROMPT = """你是一位嵌入式軟體工程師，專精於修復 Zephyr RTOS 的程式碼。
-請根據錯誤日誌與提供的專案原始碼，輸出修復程式碼。
+_PATCH_FORMAT_SYSTEM_PROMPT = """You are an embedded software engineer specializing in fixing Zephyr RTOS code.
+Based on the error log and the provided project source code, output the fix.
 
-【嚴格格式要求】
-你必須使用以下的 SEARCH/REPLACE 區塊格式來修改檔案。
-絕對不要在區塊外加上 ``` 程式碼區塊符號。
-SEARCH 區塊內的程式碼必須與原始檔案「一模一樣」（包含縮排）。
+[STRICT FORMAT REQUIREMENTS]
+You must modify files using the following SEARCH/REPLACE block format.
+Never wrap the blocks in ``` code fences.
+The code inside the SEARCH block must match the original file EXACTLY (including indentation).
 
-<檔案的相對路徑>
+<relative path of the file>
 <<<<<<<< SEARCH
-<要被替換的原始程式碼>
+<original code to be replaced>
 ========
-<修復後的新程式碼>
+<new code after the fix>
 >>>>>>>> REPLACE"""
 
 
 class B1FullFilePatch(BaseModel):
-    """B1 沒有工具、沒有 RAG，只憑訓練時記得的 Zephyr 知識猜測要改哪個檔案、
-    改成什麼樣子——它從沒看過這次 workspace 裡的實際檔案內容，沒辦法產生
-    需要逐字元比對原文的 SEARCH/REPLACE，只能整檔輸出。"""
-    filepath: str = Field(description="你認為需要修正的檔案，相對於 Zephyr 專案根目錄的路徑 (例如 'samples/hello_world/src/main.c')。")
-    content: str = Field(description="該檔案修正後的完整內容 (整個檔案，不是片段)。")
+    """B1 has no tools and no RAG: it guesses which file to change, and how, purely from
+    the Zephyr knowledge it memorized during training. It has never seen the actual file
+    contents in this workspace, so it cannot produce a SEARCH/REPLACE block that needs a
+    character-exact match of the original text and can only output whole files."""
+    filepath: str = Field(description="The file you think needs to be fixed, as a path relative to the Zephyr project root (e.g. 'samples/hello_world/src/main.c').")
+    content: str = Field(description="The complete content of that file after the fix (the whole file, not a fragment).")
 
 
 def b1_generate_full_file_patch(error_log: str) -> Tuple[Dict[str, str], Dict[str, Any]]:
@@ -91,11 +92,12 @@ def b1_generate_full_file_patch(error_log: str) -> Tuple[Dict[str, str], Dict[st
     structured_llm = llm.with_structured_output(B1FullFilePatch, include_raw=True)
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "你是一位 Zephyr RTOS 專家。你只會看到一段編譯或執行期錯誤日誌，"
-                    "完全看不到這個專案任何檔案的實際內容、任何檢索資料，也沒有任何工具可用。"
-                    "請完全憑你既有的 Zephyr 原始碼知識，判斷最可能出錯的檔案，"
-                    "直接輸出你認為修正後的完整檔案內容。"),
-        ("human", "錯誤日誌：\n{error_log}"),
+        ("system", "You are a Zephyr RTOS expert. You will only see a compile-time or runtime error log. "
+                    "You cannot see the actual content of any file in this project, you get no retrieval data, "
+                    "and you have no tools available. "
+                    "Relying purely on your existing knowledge of the Zephyr source code, work out the file that is most likely at fault, "
+                    "and directly output the complete content of that file as you believe it should be after the fix."),
+        ("human", "Error log:\n{error_log}"),
     ])
     chain = prompt | structured_llm
     raw_output = chain.invoke({"error_log": error_log})
@@ -130,8 +132,8 @@ def b2_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
     llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=300)
     prompt = ChatPromptTemplate.from_messages([
         ("system", _PATCH_FORMAT_SYSTEM_PROMPT),
-        ("human", "[目前專案原始碼與設定檔內容 (含關鍵字檢索額外找到的候選檔案)]\n{project_files}\n\n"
-                  "[目前的錯誤日誌]\n{error_log}\n\n請開始生成修補區塊："),
+        ("human", "[Current project source and configuration file contents (including candidate files additionally found by keyword retrieval)]\n{project_files}\n\n"
+                  "[Current error log]\n{error_log}\n\nPlease start generating the patch blocks:"),
     ])
     chain = prompt | llm
     response = chain.invoke({"error_log": error_log, "project_files": project_files_content})
@@ -166,8 +168,8 @@ def b3_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
     llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=300)
     prompt = ChatPromptTemplate.from_messages([
         ("system", _PATCH_FORMAT_SYSTEM_PROMPT),
-        ("human", "[目前專案原始碼與設定檔內容]\n{project_files}\n\n"
-                  "[目前的錯誤日誌]\n{error_log}\n\n請開始生成修補區塊："),
+        ("human", "[Current project source and configuration file contents]\n{project_files}\n\n"
+                  "[Current error log]\n{error_log}\n\nPlease start generating the patch blocks:"),
     ])
     chain = prompt | llm
     response = chain.invoke({"error_log": error_log, "project_files": project_files_content})

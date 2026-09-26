@@ -43,7 +43,7 @@ from dotenv import load_dotenv
 from core.state import create_initial_state, ZephyrAgentState
 from core.workflow import build_zephyr_graph, build_devops_docker_cmd
 from core.baseline_pipelines import run_b1, run_b2, run_b3
-from core.llm_provider import set_provider, get_provider
+from core.llm_provider import set_provider, get_provider, set_single_model, is_single_model
 from tools.fault_injector import MUTATE_SCRIPT_HOST_PATH, MUTATE_SCRIPT_CONTAINER_PATH
 from tools.qemu_oracle import QemuOracle
 from tools.log_filter import LogFilter
@@ -223,7 +223,7 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
         "zephyr-sandbox", "bash", "-c", inner_script,
     ]
 
-    logger.info(f"[{case_id}] 準備 broken workspace (checkout {broken_commit[:12]} + 套用 mutation)...")
+    logger.info(f"[{case_id}] Preparing the broken workspace (checkout {broken_commit[:12]} + applying the mutation)...")
     try:
         # 實測 (2026-09-01)：光是 west update --narrow 這一步 (逐一從十幾個
         # 不同的 GitHub repo 抓各家 HAL module) 就可能吃到 15 分鐘，加上
@@ -249,7 +249,7 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
             shutil.rmtree(dest_dir)
         os.makedirs(os.path.dirname(os.path.abspath(dest_dir)), exist_ok=True)
 
-        logger.info(f"[{case_id}] 從容器複製 /zephyrproject/zephyr -> {dest_dir} ...")
+        logger.info(f"[{case_id}] Copying /zephyrproject/zephyr from the container -> {dest_dir} ...")
         cp_result = subprocess.run(
             ["docker", "cp", f"{container_name}:/zephyrproject/zephyr", dest_dir],
             capture_output=True, text=True, timeout=300,
@@ -440,19 +440,19 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
     if not skip_repro_check:
         repro_result = verify_reproduces_initial_failure(case, workspace_path)
         logger.info(
-            f"[{case_id}] 初始重現檢查: status={repro_result['status']} "
-            f"(資料集記錄的預期 error_type={case.get('error_type')})"
+            f"[{case_id}] Initial reproduction check: status={repro_result['status']} "
+            f"(expected error_type recorded in the dataset={case.get('error_type')})"
         )
         if repro_result["status"] == "success":
             raise RuntimeError(
-                f"[{case_id}] workspace 準備完成後直接建置成功，沒有重現預期的失敗——"
-                "案例可能已經因環境漂移失效，拒絕交給 agent 修復一個其實沒壞的專案。"
+                f"[{case_id}] The build succeeded right after the workspace was prepared, so the expected failure was not reproduced. "
+                "The case may have been invalidated by environment drift; refusing to hand the agent a project that is not actually broken."
             )
         initial_log_override = LogFilter().compress_log(repro_result["log"])
 
     state = build_agent_initial_state(case, workspace_path, max_iters, initial_log_override)
 
-    logger.info(f"[{case_id}] 開始 {pipeline} pipeline 修復...")
+    logger.info(f"[{case_id}] Starting {pipeline} pipeline repair...")
     # TTR (Time-to-Repair，見 analyze_results.py)：從這裡開始的牆鐘時間，
     # 到修復迴圈真正結束為止——workspace 準備/repro-check 的時間不算在
     # 內，那是評測環境的固定成本，不是 agent 修復本身的效率。
@@ -511,6 +511,7 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
         "category": case.get("category"),
         "pipeline": pipeline,
         "model_provider": get_provider(),
+        "single_model": is_single_model(),
         "final_status": final_status,
         "iterations": total_iterations,
         "ttr_seconds": ttr_seconds,
@@ -532,8 +533,6 @@ def select_cases(dataset: List[Dict[str, Any]], args: argparse.Namespace) -> Lis
     if args.all:
         return dataset
     raise SystemExit(
-        "拒絕預設跑全部案例：請指定 --case-id <id>、--limit N (先跑一小批)，"
-        "或明確加上 --all (真的要跑全部 143 筆時)。\n"
         "Refusing to default to running every case: pass --case-id <id>, "
         "--limit N (pilot a small batch first), or explicitly pass --all."
     )
@@ -549,6 +548,10 @@ def main():
                          help="Which LLM provider backs every generative call in this run (RQ4 cross-model "
                               "comparison, see core/llm_provider.py). The Hybrid RAG semantic layer's "
                               "embedding model is unaffected — Anthropic has no embeddings API of its own.")
+    parser.add_argument("--single-model", action="store_true",
+                         help="Use the provider's 'pro' model for every role, including the Analyzer and the "
+                              "Supervisor's compression (which normally use the cheaper 'fast' model). Gives a "
+                              "one-model-per-provider setup for cross-provider comparison (see core/llm_provider.py).")
     parser.add_argument("--case-id", help="Run exactly one case by its 'id' field.")
     parser.add_argument("--limit", type=int, help="Run only N cases starting at --offset (default offset 0), for piloting or batching.")
     parser.add_argument("--offset", type=int, default=0, help="Skip the first N cases before applying --limit (for slicing the dataset into batches).")
@@ -562,19 +565,22 @@ def main():
     parser.add_argument("--results-out", help="Where to write the JSON results summary (default: <runs-dir>/results.json).")
     args = parser.parse_args()
     set_provider(args.model_provider)
+    if args.single_model:
+        set_single_model(True)
 
     dataset = load_dataset(args.dataset)
     cases = select_cases(dataset, args)
-    logger.info(f"選定 {len(cases)} / {len(dataset)} 筆案例，workspace 將準備於 {args.runs_dir}，LLM 供應商={get_provider()}")
+    logger.info(f"Selected {len(cases)} / {len(dataset)} cases; workspaces will be prepared under {args.runs_dir}; LLM provider={get_provider()}, single-model={is_single_model()}")
 
     results = []
     for case in cases:
         try:
             results.append(run_case(case, args.runs_dir, args.max_retries, args.skip_repro_check, args.pipeline))
         except Exception as e:
-            logger.error(f"[{case['id']}] 執行失敗: {e}")
+            logger.error(f"[{case['id']}] Run failed: {e}")
             results.append({"case_id": case["id"], "category": case.get("category"), "pipeline": args.pipeline,
-                             "model_provider": get_provider(), "final_status": "error", "error": str(e)})
+                             "model_provider": get_provider(), "single_model": is_single_model(),
+                             "final_status": "error", "error": str(e)})
 
     results_out = args.results_out or os.path.join(args.runs_dir, "results.json")
     os.makedirs(os.path.dirname(results_out) or ".", exist_ok=True)
@@ -582,7 +588,7 @@ def main():
         json.dump(results, f, indent=2, ensure_ascii=False)
 
     resolved = sum(1 for r in results if r.get("final_status") == "resolved")
-    logger.info(f"完成：{resolved}/{len(results)} 案例修復成功。結果寫入 {results_out}")
+    logger.info(f"Done: {resolved}/{len(results)} cases repaired successfully. Results written to {results_out}")
 
 
 if __name__ == "__main__":

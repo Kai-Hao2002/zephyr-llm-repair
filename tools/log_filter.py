@@ -174,7 +174,7 @@ class LogFilter:
         compressed_output = "\n".join(extracted_lines).strip()
         
         if not compressed_output:
-            self.logger.warning("未匹配到標準錯誤特徵，回傳日誌尾端作為備用 (No standard patterns matched, returning tail).")
+            self.logger.warning("No standard patterns matched, returning tail.")
             fallback_lines = [ansi_escape.sub('', l).strip() for l in lines[-20:]]
             return "[Fallback Raw Tail]\n" + "\n".join(fallback_lines)
 
@@ -214,10 +214,10 @@ ninja: build stopped: subcommand failed.
 
     log_filter = LogFilter()
     
-    print("=== 原始日誌長度 (Raw Log Length): {} 字元 ===".format(len(dummy_raw_log)))
+    print("=== Raw Log Length: {} characters ===".format(len(dummy_raw_log)))
     
     compressed = log_filter.compress_log(dummy_raw_log)
     
-    print("\n=== 過濾後的最小重現日誌 (Compressed Minimal Repro Log) ===")
+    print("\n=== Compressed Minimal Repro Log ===")
     print(compressed)
-    print("\n=== 壓縮後長度 (Compressed Length): {} 字元 ===".format(len(compressed)))
+    print("\n=== Compressed Length: {} characters ===".format(len(compressed)))

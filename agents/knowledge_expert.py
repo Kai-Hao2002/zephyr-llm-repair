@@ -33,9 +33,9 @@ def get_retriever() -> GraphRetriever:
         builder = ZephyrGraphBuilder()
         try:
             builder.load(GRAPH_CACHE_PATH)
-            logger.info("成功載入圖譜快取 (Successfully loaded graph cache).")
+            logger.info("Successfully loaded graph cache.")
         except FileNotFoundError:
-            logger.warning("找不到圖譜快取，請先執行 build_graph.py 進行建構 (Graph cache not found, please run build_graph.py to construct it first).")
+            logger.warning("Graph cache not found, please run build_graph.py to construct it first.")
             # 這裡可以加入動態建置邏輯，或直接拋出例外
             # dynamic build logic can be added here, or raise an exception
         _global_retriever = GraphRetriever(builder.graph)
@@ -66,14 +66,14 @@ def knowledge_expert_node(state: Dict[str, Any]) -> Dict[str, Any]:
     implements this subsystem's logic" (see graph_rag/hybrid_retriever.py's
     module docstring).
     """
-    logger.info("--- 啟動 Knowledge Expert (Starting Knowledge Expert) ---")
+    logger.info("--- Starting Knowledge Expert ---")
 
     keywords = state.get("search_keywords", [])
     if not keywords:
-        logger.info("沒有收到關鍵字，跳過圖譜檢索 (No keywords received, skipping graph retrieval).")
+        logger.info("No keywords received, skipping graph retrieval.")
         return {"retrieved_context": "No keywords provided for graph retrieval.", "retrieved_files": []}
 
-    logger.info(f"正在檢索以下關鍵字的圖譜上下文 (Retrieving graph context for keywords): {keywords}")
+    logger.info(f"Retrieving graph context for keywords: {keywords}")
 
     retriever = get_retriever()
 
@@ -98,14 +98,14 @@ def knowledge_expert_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # rank 8, which a top_k=5 would miss.
             retrieved_files = hybrid.retrieve(" ".join(keywords), top_k=8)
             if retrieved_files:
-                logger.info(f"Hybrid RAG (BM25+語意) 額外檢索到候選檔案 (Hybrid RAG additionally retrieved candidate files): {retrieved_files}")
+                logger.info(f"Hybrid RAG (BM25 + semantic) additionally retrieved candidate files: {retrieved_files}")
         except Exception as e:
             # Hybrid RAG 是既有圖譜檢索之外「額外」的輔助訊號，失敗時不該
             # 讓整個 Knowledge 節點掛掉——退回只用圖譜檢索的結果。
             # Hybrid RAG is an additional signal on top of existing graph
             # retrieval — a failure here shouldn't take down the whole
             # Knowledge node; fall back to graph-retrieval-only results.
-            logger.warning(f"Hybrid RAG 檢索失敗，略過 (不影響既有的圖譜檢索) (Hybrid RAG retrieval failed, skipping — doesn't affect existing graph retrieval): {e}")
+            logger.warning(f"Hybrid RAG retrieval failed, skipping (does not affect the existing graph retrieval): {e}")
 
     result: Dict[str, Any] = {"retrieved_context": yaml_context, "retrieved_files": retrieved_files}
 

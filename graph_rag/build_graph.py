@@ -79,4 +79,4 @@ if __name__ == "__main__":
     builder = ZephyrGraphBuilder()
     builder.build_graph(args.kconfig, args.dts, zephyr_base=args.zephyr_base)
     builder.save(args.output)
-    print(f"✅ 圖譜已快取至 {args.output}: {builder.graph.number_of_nodes()} 個節點, {builder.graph.number_of_edges()} 條邊界。")
+    print(f"✅ Graph cached at {args.output}: {builder.graph.number_of_nodes()} nodes, {builder.graph.number_of_edges()} edges.")

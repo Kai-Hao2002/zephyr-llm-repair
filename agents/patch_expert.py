@@ -129,7 +129,7 @@ def collect_relevant_context_paths(workspace_path: str, target_app: str, error_l
 
 
 def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
-    print("\n🛠️ [LLM Patch] 正在生成精確修補區塊...")
+    print("\n🛠️ [LLM Patch] Generating precise patch blocks...")
 
     # timeout=300 (見 agents/analyzer.py 的說明，這裡的上限拉長是因為送進去
     # 的上下文可能到 300k 字元，真正生成花的時間本來就比分類任務長，
@@ -157,7 +157,7 @@ def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
             except Exception:
                 continue
             if total_chars + len(content) > MAX_PATCH_CONTEXT_CHARS:
-                print(f"   ⚠️ 上下文已達 {MAX_PATCH_CONTEXT_CHARS} 字元上限，略過 {rel_path} 及其後續檔案。")
+                print(f"   ⚠️ Context reached the {MAX_PATCH_CONTEXT_CHARS}-character limit; skipping {rel_path} and all following files.")
                 break
             project_files_content += f"\n--- {rel_path} ---\n{content}\n"
             total_chars += len(content)
@@ -174,52 +174,52 @@ def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     # circle between the same visible files. Listed in the prompt so it at
     # least knows which directions are already shown not to work.
     attempt_history = state.get("attempt_history", [])
-    attempt_history_text = "\n".join(attempt_history) if attempt_history else "（這是第一次嘗試，尚無歷史紀錄）"
+    attempt_history_text = "\n".join(attempt_history) if attempt_history else "(This is the first attempt; there is no history yet.)"
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """你是一位頂尖的嵌入式軟體工程師，專精於修復 Zephyr RTOS 的程式碼。
-請根據錯誤日誌與提供的專案原始碼，輸出修復程式碼。
+        ("system", """You are a top-tier embedded software engineer specializing in fixing Zephyr RTOS code.
+Based on the error log and the provided project source code, output the fix.
 
-【嚴格格式要求】
-你必須使用以下的 SEARCH/REPLACE 區塊格式來修改檔案。
-絕對不要在區塊外加上 ``` 程式碼區塊符號。
-SEARCH 區塊內的程式碼必須與原始檔案「一模一樣」（包含縮排）。
+[STRICT FORMAT REQUIREMENTS]
+You must modify files using the following SEARCH/REPLACE block format.
+Never wrap the blocks in ``` code fences.
+The code inside the SEARCH block must match the original file EXACTLY (including indentation).
 
-<檔案的相對路徑>
+<relative path of the file>
 <<<<<<<< SEARCH
-<要被替換的原始程式碼>
+<original code to be replaced>
 ========
-<修復後的新程式碼>
+<new code after the fix>
 >>>>>>>> REPLACE"""),
-        ("human", """[之前已經嘗試過的修補與結果]
+        ("human", """[Patches attempted earlier and their outcomes]
 {attempt_history}
-（判讀原則：若某筆紀錄是「套用失敗」，代表 SEARCH 區塊的文字沒有跟檔案內容逐字元比對成功——原始碼完全沒有被改動，請對照下方最新的原始碼內容重新逐字元、含縮排確認，修改方向本身不一定有錯，不需要因此更換方向；若某筆紀錄是「套用成功但建置/執行仍失敗」，代表這個修改方向已經證明無效，請換一個不同的方式或檔案。）
+(How to read this: if a record says the patch application failed, the text of the SEARCH block did not match the file content character for character, so the source code was not modified at all. Re-check character by character, including indentation, against the latest source code below; the direction of the change is not necessarily wrong, so there is no need to switch direction because of it. If a record says the patch was applied but the build/run still failed, that direction has been shown not to work; please try a different approach or a different file.)
 
-[目前專案原始碼與設定檔內容]
+[Current project source and configuration file contents]
 {project_files}
 
-[檢索到的知識圖譜上下文]
+[Retrieved knowledge graph context]
 {context}
 
-[目前的錯誤日誌]
+[Current error log]
 {error_log}
 
-請開始生成修補區塊：""")
+Please start generating the patch blocks:""")
     ])
 
     chain = prompt | llm
     response = chain.invoke({
         "attempt_history": attempt_history_text,
         "project_files": project_files_content,
-        "context": state.get("retrieved_context", "無"),
+        "context": state.get("retrieved_context", "None"),
         "error_log": state.get("current_error_log", "")
     })
 
     patch_text = response.content
     usage_entry = extract_usage(response, node="patch_expert", model=get_model_name("pro"))
-    print("   ↳ 成功生成修補區塊！")
+    print("   ↳ Patch blocks generated successfully!")
     return {
         "patch_content": patch_text,
-        "messages": [f"Patch Expert 已生成修補方案。"],
+        "messages": ["Patch Expert generated a patch."],
         "pending_token_usage": append_usage(state.get("pending_token_usage", []), usage_entry),
     }

@@ -93,14 +93,14 @@ def run_b1(state: ZephyrAgentState) -> Dict[str, Any]:
     """
     workspace_path = state["workspace_path"]
     error_log = state.get("current_error_log", "")
-    print("\n🧪 [B1 Zero-Shot] 只憑錯誤日誌，猜測要修正的檔案與內容...")
+    print("\n🧪 [B1 Zero-Shot] Guessing the file and content to fix from the error log alone...")
 
     patch, usage_entry = b1_generate_full_file_patch(error_log)
     applier = PatchApplier(workspace_path=workspace_path)
     apply_result = applier.apply_full_file(patch["filepath"], patch["content"])
 
     if not apply_result["success"]:
-        print(f"   ❌ 套用失敗：{apply_result['error']}")
+        print(f"   ❌ Patch application failed: {apply_result['error']}")
         return {
             "final_status": "failed_max_retries", "iterations": 1, "error_type": "patch_format_error",
             "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry])],
@@ -110,7 +110,7 @@ def run_b1(state: ZephyrAgentState) -> Dict[str, Any]:
         workspace_path, state["board"], state["target_app"], state.get("required_pass_test")
     )
     final_status = "resolved" if eval_result["resolved"] else "failed_max_retries"
-    print(f"   {'🎉' if eval_result['resolved'] else '💥'} 建置/執行結果：{eval_result['status']}")
+    print(f"   {'🎉' if eval_result['resolved'] else '💥'} Build/run result: {eval_result['status']}")
     return {
         "final_status": final_status, "iterations": 1, "error_type": eval_result["status"],
         "iteration_log": [_iteration_log_entry(1, eval_result["compiled"], eval_result["resolved"], False, [usage_entry])],
@@ -128,12 +128,12 @@ def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
     workspace_path = state["workspace_path"]
     target_app = state["target_app"]
     error_log = state.get("current_error_log", "")
-    print("\n🧪 [B2 Single-Agent+RAG] BM25-only 檢索候選檔案，生成修補...")
+    print("\n🧪 [B2 Single-Agent+RAG] Retrieving candidate files with BM25 only, generating the patch...")
 
     retriever = HybridRetriever(workspace_path)
     retrieved_files = retriever.retrieve(error_log, top_k=8, bm25_only=True)
     if retrieved_files:
-        print(f"   ↳ BM25 檢索到候選檔案：{retrieved_files}")
+        print(f"   ↳ BM25 retrieved candidate files: {retrieved_files}")
 
     project_files_content = _read_context_files(workspace_path, target_app, error_log, retrieved_files)
     patch_text, usage_entry = b2_generate_patch(error_log, project_files_content)
@@ -141,7 +141,7 @@ def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
     applier = PatchApplier(workspace_path=workspace_path)
     apply_result = applier.apply_patches(patch_text)
     if not apply_result["success"]:
-        print(f"   ❌ 套用失敗：{apply_result['error']}")
+        print(f"   ❌ Patch application failed: {apply_result['error']}")
         return {
             "final_status": "failed_max_retries", "iterations": 1, "error_type": "patch_format_error",
             "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry])],
@@ -152,7 +152,7 @@ def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
         workspace_path, state["board"], state["target_app"], state.get("required_pass_test")
     )
     final_status = "resolved" if eval_result["resolved"] else "failed_max_retries"
-    print(f"   {'🎉' if eval_result['resolved'] else '💥'} 建置/執行結果：{eval_result['status']}")
+    print(f"   {'🎉' if eval_result['resolved'] else '💥'} Build/run result: {eval_result['status']}")
     return {
         "final_status": final_status, "iterations": 1, "error_type": eval_result["status"],
         "iteration_log": [_iteration_log_entry(1, eval_result["compiled"], eval_result["resolved"], False, [usage_entry])],
@@ -176,14 +176,14 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
     iteration_log = []
 
     for current_iter in range(1, max_iters + 1):
-        print(f"\n🧪 [B3 Closed-Loop] 第 {current_iter}/{max_iters} 次迭代...")
+        print(f"\n🧪 [B3 Closed-Loop] Iteration {current_iter}/{max_iters}...")
         project_files_content = _read_context_files(workspace_path, target_app, error_log, [])
         patch_text, usage_entry = b3_generate_patch(error_log, project_files_content)
 
         applier = PatchApplier(workspace_path=workspace_path)
         apply_result = applier.apply_patches(patch_text)
         if not apply_result["success"]:
-            print(f"   ❌ 套用失敗：{apply_result['error']}")
+            print(f"   ❌ Patch application failed: {apply_result['error']}")
             error_log = f"Patch Application Failed:\n{apply_result['error']}"
             iteration_log.append(_iteration_log_entry(current_iter, False, False, True, [usage_entry]))
             if current_iter >= max_iters:
@@ -196,11 +196,11 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
             current_iter, eval_result["compiled"], eval_result["resolved"], False, [usage_entry]
         ))
         if eval_result["resolved"]:
-            print("   🎉 執行期驗證通過！")
+            print("   🎉 Runtime verification passed!")
             return {"final_status": "resolved", "iterations": current_iter, "error_type": "success",
                     "iteration_log": iteration_log}
 
-        print(f"   💥 建置/執行失敗 (狀態: {eval_result['status']})")
+        print(f"   💥 Build/run failed (status: {eval_result['status']})")
         error_log = eval_result["log"]
         if current_iter >= max_iters:
             return {"final_status": "failed_max_retries", "iterations": current_iter,

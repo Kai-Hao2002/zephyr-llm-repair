@@ -4782,7 +4782,7 @@ class ZephyrBugMiner:
             "Authorization": f"token {GITHUB_TOKEN}" if GITHUB_TOKEN else ""
         }
         if not GITHUB_TOKEN:
-            logger.warning("未偵測到 GITHUB_TOKEN，API 請求將受到嚴格的速率限制 (60次/小時)。")
+            logger.warning("GITHUB_TOKEN not detected; API requests will be strictly rate-limited (60 requests/hour).")
         # 快取 GitHub contents API 查詢結果，避免對同一路徑重複發送請求
         self._path_exists_cache = {}
         self._dir_listing_cache = {}
@@ -4804,7 +4804,7 @@ class ZephyrBugMiner:
             will fail at CMake configure in our fixed-SDK-version sandbox — an
             environment-version false positive, not a real bug repro.
         """
-        logger.info(f"🔍 開始搜尋 {self.repo} 中的 Bug 案例 (目標: {max_results} 筆，merged>={merged_after})...")
+        logger.info(f"🔍 Searching {self.repo} for bug cases (target: {max_results}, merged>={merged_after})...")
 
         query = f"repo:{self.repo} is:pr is:merged label:bug merged:>={merged_after}"
         items = []
@@ -4818,7 +4818,7 @@ class ZephyrBugMiner:
             )
             response = requests.get(url, headers=self.headers)
             if response.status_code != 200:
-                logger.error(f"搜尋失敗 (page {page}): {response.text}")
+                logger.error(f"Search failed (page {page}): {response.text}")
                 break
 
             page_items = response.json().get("items", [])
@@ -4826,13 +4826,13 @@ class ZephyrBugMiner:
                 break
 
             items.extend(page_items)
-            logger.info(f"   ↳ 第 {page} 頁: 累計 {len(items)} 個潛在的 PR。")
+            logger.info(f"   ↳ Page {page}: {len(items)} candidate PRs so far.")
             page += 1
 
             # GitHub Search API 的速率限制較嚴格 (30/分鐘)，稍作停頓
             time.sleep(2)
 
-        logger.info(f"✅ 共找到 {len(items)} 個潛在的 PR。")
+        logger.info(f"✅ Found {len(items)} candidate PRs in total.")
         return items[:max_results]
 
     def filter_and_extract_pr_details(self, pr_items: list, max_modified_files: int = 3) -> list:
@@ -4850,7 +4850,7 @@ class ZephyrBugMiner:
 
         for item in pr_items:
             pr_number = item["number"]
-            logger.info(f"⏳ 正在分析 PR #{pr_number}: {item['title']}")
+            logger.info(f"⏳ Analyzing PR #{pr_number}: {item['title']}")
 
             pr_url = f"https://api.github.com/repos/{self.repo}/pulls/{pr_number}"
             pr_resp = requests.get(pr_url, headers=self.headers)
@@ -4875,12 +4875,12 @@ class ZephyrBugMiner:
             )
 
             if not has_relevant_files:
-                logger.info("   ⏭️ 無相關檔案，跳過此 PR。")
+                logger.info("   ⏭️ No relevant files, skipping this PR.")
                 time.sleep(0.5)
                 continue
 
             if len(modified_files) > max_modified_files:
-                logger.info(f"   ⏭️ 修改檔案數過多 ({len(modified_files)} > {max_modified_files})，跳過以確保修補聚焦。")
+                logger.info(f"   ⏭️ Too many modified files ({len(modified_files)} > {max_modified_files}); skipping to keep the patch focused.")
                 time.sleep(0.5)
                 continue
 
@@ -4888,7 +4888,7 @@ class ZephyrBugMiner:
             board = self._guess_board(modified_files)
             target_app = self._guess_target_app(modified_files, ref=broken_commit)
 
-            logger.info(f"   🎯 找到相關檔案！分類: {category} | 開發板: {board} | 目標 App: {target_app}")
+            logger.info(f"   🎯 Found relevant files! Category: {category} | Board: {board} | Target app: {target_app}")
             valid_cases.append({
                 "id": f"bug_{pr_number}",
                 "title": item["title"],
@@ -5163,7 +5163,7 @@ class ZephyrBugMiner:
             catalog = INJECTION_CATALOG
 
         baseline_commit = self._resolve_main_commit()
-        logger.info(f"📌 使用 baseline commit: {baseline_commit}")
+        logger.info(f"📌 Using baseline commit: {baseline_commit}")
 
         cases = []
         for entry in catalog:
@@ -5204,7 +5204,7 @@ class ZephyrBugMiner:
 
             cases.append(case)
 
-        logger.info(f"🧬 產生了 {len(cases)} 筆合成注入候選案例 (尚未驗證)。")
+        logger.info(f"🧬 Generated {len(cases)} synthetic injection candidate cases (not yet verified).")
         return cases
 
     def save_dataset(self, cases: list, output_path: str):
@@ -5212,7 +5212,7 @@ class ZephyrBugMiner:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(cases, f, indent=4, ensure_ascii=False)
-        logger.info(f"💾 資料集已儲存至: {output_path} (共 {len(cases)} 筆)")
+        logger.info(f"💾 Dataset saved to: {output_path} ({len(cases)} cases in total)")
 
 
 if __name__ == "__main__":
@@ -5235,8 +5235,8 @@ if __name__ == "__main__":
         output_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "cases", args.output or "zephyr_injected_candidates.json"))
         miner.save_dataset(valid_cases, output_file)
         counts = Counter(c["category"] for c in valid_cases)
-        logger.info(f"📊 分類統計: {dict(counts)}")
-        logger.info("⚠️ 這些是尚未驗證的候選案例，請接著執行 verify_cases.py 跑雙向驗證閘。")
+        logger.info(f"📊 Category statistics: {dict(counts)}")
+        logger.info("⚠️ These are unverified candidate cases; next run verify_cases.py to put them through the two-sided verification gate.")
     else:
         exclude_ids = set()
         if args.exclude_existing:
@@ -5244,13 +5244,13 @@ if __name__ == "__main__":
             if os.path.exists(exclude_path):
                 with open(exclude_path, "r", encoding="utf-8") as f:
                     exclude_ids = {c["id"] for c in json.load(f)}
-                logger.info(f"🚫 將排除 {len(exclude_ids)} 個已存在於 {args.exclude_existing} 的候選 PR。")
+                logger.info(f"🚫 Excluding {len(exclude_ids)} candidate PRs that already exist in {args.exclude_existing}.")
 
         raw_prs = miner.search_merged_bug_prs(max_results=args.max_results)
         if exclude_ids:
             before = len(raw_prs)
             raw_prs = [item for item in raw_prs if f"bug_{item['number']}" not in exclude_ids]
-            logger.info(f"   ↳ 排除後剩 {len(raw_prs)}/{before} 個待分析的 PR。")
+            logger.info(f"   ↳ {len(raw_prs)}/{before} PRs left to analyze after exclusion.")
 
         valid_cases = miner.filter_and_extract_pr_details(raw_prs, max_modified_files=args.max_modified_files)
 
@@ -5259,4 +5259,4 @@ if __name__ == "__main__":
 
         # 分類統計 (Category breakdown)
         counts = Counter(c["category"] for c in valid_cases)
-        logger.info(f"📊 分類統計: {dict(counts)}")
+        logger.info(f"📊 Category statistics: {dict(counts)}")

@@ -21,7 +21,7 @@ class WestExecutor:
         self.target_project_path = os.path.abspath(target_project_path)
         
         if not os.path.exists(self.target_project_path):
-            raise FileNotFoundError(f"找不到目標專案路徑 (Project path not found): {self.target_project_path}")
+            raise FileNotFoundError(f"Project path not found: {self.target_project_path}")
             
         logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
         self.logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ class WestExecutor:
         Executes west build. 
         For determinism, the build directory is forced to /tmp/build inside the container.
         """
-        self.logger.info(f"開始在 {board} 上建置專案... (Starting build on {board}...)")
+        self.logger.info(f"Starting build on {board}...")
         
         # 組裝指令：在 /workspace (掛載的唯讀原始碼) 下執行編譯，但產出放到 /tmp/build
         # 使用 -p always 強制每次都執行 pristine build (徹底清理)
@@ -79,12 +79,12 @@ class WestExecutor:
             if exit_status == 0:
                 return {"success": True, "output": full_log, "error": ""}
 
-            self.logger.error("指令執行失敗 (Command execution failed).")
+            self.logger.error("Command execution failed.")
             return {"success": False, "output": full_log, "error": ""}
 
         except Exception as e:
             # 其他 Docker 相關錯誤
-            self.logger.critical(f"Docker 環境錯誤 (Docker environment error): {str(e)}")
+            self.logger.critical(f"Docker environment error: {str(e)}")
             return {
                 "success": False,
                 "output": "",
@@ -108,17 +108,17 @@ if __name__ == "__main__":
     if os.path.exists(test_project_path):
         executor = WestExecutor(target_project_path=test_project_path)
         
-        print("=== 執行純淨建置測試 (Testing Pristine Build) ===")
+        print("=== Testing Pristine Build ===")
         result = executor.build_project(board="qemu_cortex_m3")
         
         if result["success"]:
-            print("✅ 建置成功! (Build Successful!)")
+            print("✅ Build Successful!")
             # 通常輸出太長，我們只印出最後 500 個字元
             print(result["output"][-500:]) 
         else:
-            print("❌ 建置失敗! (Build Failed!)")
-            print("=== 錯誤日誌 (Error Log) ===")
+            print("❌ Build Failed!")
+            print("=== Error Log ===")
             print(result["output"])
             print(result["error"])
     else:
-        print(f"請先建立一個測試用的 Zephyr 專案路徑於 {test_project_path}")
+        print(f"Please create a test Zephyr project first at {test_project_path}")

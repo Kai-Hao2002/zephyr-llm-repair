@@ -77,9 +77,9 @@ def _compress_outcome_to_one_sentence(outcome_description: str) -> Tuple[str, Op
         # failure, but with no timeout that "failure" never arrives.
         llm = get_chat_model(role="fast", temperature=0, timeout=120)
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "把以下這次修補嘗試的內容與結果，壓縮成剛好一句話的繁體中文摘要，"
-                       "保留關鍵資訊 (改了哪個檔案、為什麼還是失敗)。只輸出這一句話，"
-                       "不要加任何前綴、編號或其他說明文字。"),
+            ("system", "Compress the content and outcome of the following patch attempt into exactly one sentence of English summary, "
+                       "keeping the key information (which file was changed, and why it still failed). Output only this one sentence, "
+                       "with no prefix, numbering, or other explanatory text."),
             ("human", "{outcome}")
         ])
         chain = prompt | llm
@@ -151,7 +151,7 @@ def record_attempt_outcome(current_iter: int, outcome_description: str, *, compi
     else:
         body = outcome_description[:_RAW_LOG_EXCERPT_CHARS]
     return {
-        "attempt_history": [f"[第 {current_iter} 次迭代] {body}"],
+        "attempt_history": [f"[Iteration {current_iter}] {body}"],
         "iteration_log": [_build_iteration_log_entry(
             current_iter, compiled=compiled, resolved=False,
             tool_invocation_error=tool_invocation_error, token_usage=token_usage,

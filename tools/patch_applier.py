@@ -44,7 +44,7 @@ class PatchApplier:
         matches = self.block_pattern.findall(llm_output)
         
         if not matches:
-            self.logger.warning("在 LLM 輸出中找不到有效的 SEARCH/REPLACE 區塊。(No valid SEARCH/REPLACE blocks found in LLM output.)")
+            self.logger.warning("No valid SEARCH/REPLACE blocks found in LLM output.")
             return {
                 "success": False,
                 "error": "FormatError: LLM output did not contain valid <<<<<<<< SEARCH / ======== / >>>>>>>> REPLACE blocks."
@@ -65,7 +65,7 @@ class PatchApplier:
 
             # 驗證檔案是否存在 (Verify file exists)
             if not os.path.exists(full_path):
-                err_msg = f"TargetFileNotFound: 找不到目標檔案 '{filepath}' (Target file not found)."
+                err_msg = f"TargetFileNotFound: Target file '{filepath}' not found."
                 self.logger.error(err_msg)
                 errors.append(err_msg)
                 continue
@@ -83,8 +83,8 @@ class PatchApplier:
                 # 嚴格匹配檢查 (Strict match check)
                 if normalized_search not in normalized_content:
                     err_msg = (
-                        f"SearchMatchFailed: 在 '{filepath}' 中找不到完全匹配的 SEARCH 區塊。\n"
-                        f"請確保 SEARCH 區塊的內容與檔案中的原始碼 100% 相同 (包含縮排)。"
+                        f"SearchMatchFailed: No exactly matching SEARCH block was found in '{filepath}'.\n"
+                        f"Make sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation)."
                     )
                     self.logger.error(err_msg)
                     errors.append(err_msg)
@@ -97,11 +97,11 @@ class PatchApplier:
                 with open(full_path, 'w', encoding='utf-8', newline='\n') as f:
                     f.write(new_content)
 
-                self.logger.info(f"成功修補檔案 (Successfully patched): {filepath}")
+                self.logger.info(f"Successfully patched: {filepath}")
                 applied_files.append(filepath)
 
             except Exception as e:
-                err_msg = f"FileWriteError: 無法讀寫檔案 '{filepath}'. 錯誤: {str(e)}"
+                err_msg = f"FileWriteError: Cannot read/write file '{filepath}'. Error: {str(e)}"
                 self.logger.error(err_msg)
                 errors.append(err_msg)
 
@@ -147,17 +147,17 @@ class PatchApplier:
         full_path = os.path.join(self.workspace_path, filepath)
 
         if not os.path.exists(full_path):
-            err_msg = f"TargetFileNotFound: 找不到目標檔案 '{filepath}' (Target file not found)."
+            err_msg = f"TargetFileNotFound: Target file '{filepath}' not found."
             self.logger.error(err_msg)
             return {"success": False, "applied_files": [], "error": err_msg}
 
         try:
             with open(full_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(content)
-            self.logger.info(f"成功整檔覆寫 (Successfully overwrote full file): {filepath}")
+            self.logger.info(f"Successfully overwrote full file: {filepath}")
             return {"success": True, "applied_files": [filepath], "error": ""}
         except Exception as e:
-            err_msg = f"FileWriteError: 無法讀寫檔案 '{filepath}'. 錯誤: {str(e)}"
+            err_msg = f"FileWriteError: Cannot read/write file '{filepath}'. Error: {str(e)}"
             self.logger.error(err_msg)
             return {"success": False, "applied_files": [], "error": err_msg}
 
@@ -177,7 +177,7 @@ if __name__ == "__main__":
 
     # 模擬 LLM 輸出的修補指令 (Simulate LLM patch output)
     dummy_llm_output = """
-我找到了錯誤。你需要補上正確的引號與分號。請套用以下修改：
+I found the error. You need to add the correct quotes and semicolon. Please apply the following change:
 
 src/main.c
 <<<<<<<< SEARCH
@@ -190,24 +190,24 @@ void main(void) {
 }
 >>>>>>>> REPLACE
 
-修改完畢後請重新編譯。
+Please recompile after making the change.
     """
 
-    print("=== 原始檔案內容 (Original File Content) ===")
+    print("=== Original File Content ===")
     with open(test_file_path, "r") as f:
         print(f.read())
 
-    print("=== 執行修補 (Executing Patch) ===")
+    print("=== Executing Patch ===")
     applier = PatchApplier(workspace_path=test_dir)
     result = applier.apply_patches(dummy_llm_output)
 
     if result["success"]:
-        print("\n✅ 修補成功！ (Patch Successful!)")
-        print("=== 新檔案內容 (New File Content) ===")
+        print("\n✅ Patch Successful!")
+        print("=== New File Content ===")
         with open(test_file_path, "r") as f:
             print(f.read())
     else:
-        print("\n❌ 修補失敗 (Patch Failed):")
+        print("\n❌ Patch Failed:")
         print(result["error"])
         
     # 清理測試檔案 (Clean up)

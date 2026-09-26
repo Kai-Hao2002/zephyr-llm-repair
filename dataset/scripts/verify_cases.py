@@ -61,7 +61,7 @@ class ZephyrCaseVerifier:
         self._save_lock = threading.Lock()
 
         if not os.path.exists(self.json_path):
-            raise FileNotFoundError(f"找不到資料集檔案: {self.json_path}")
+            raise FileNotFoundError(f"Dataset file not found: {self.json_path}")
 
     def verify_all_cases(self):
         with open(self.json_path, "r", encoding="utf-8") as f:
@@ -84,12 +84,12 @@ class ZephyrCaseVerifier:
                 verified_cases = json.load(f)
             seen_ids = {c["id"] for c in verified_cases}
 
-        logger.info(f"📂 載入 {len(cases)} 筆候選 Bug 案例 (已累積 {len(verified_cases)} 筆驗證通過)，準備以 {self.max_workers} 個並行 Docker 容器進行 QEMU 驗證...")
+        logger.info(f"📂 Loaded {len(cases)} candidate bug cases ({len(verified_cases)} already verified); preparing QEMU verification with {self.max_workers} parallel Docker containers...")
 
         pending_cases = [c for c in cases if c["id"] not in seen_ids]
         skipped = len(cases) - len(pending_cases)
         if skipped:
-            logger.info(f"⏭️ 略過 {skipped} 筆已經驗證過的案例 (id 已存在於 verified_zephyr_bugs.json)。")
+            logger.info(f"⏭️ Skipping {skipped} already-verified cases (their ids already exist in verified_zephyr_bugs.json).")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_case = {executor.submit(self._verify_one_case, case): case for case in pending_cases}
@@ -98,7 +98,7 @@ class ZephyrCaseVerifier:
                 try:
                     verified_case = future.result()
                 except Exception as e:
-                    logger.error(f"❌ 案例 {case['id']} 驗證過程中發生例外: {e}")
+                    logger.error(f"❌ Exception while verifying case {case['id']}: {e}")
                     continue
 
                 if verified_case is not None:
@@ -108,7 +108,7 @@ class ZephyrCaseVerifier:
                         self._save_verified_cases(verified_cases)
 
         logger.info("\n" + "="*50)
-        logger.info(f"🎉 驗證完畢！共篩選出 {len(verified_cases)}/{len(cases)} 個高品質的 QEMU 可重現案例。")
+        logger.info(f"🎉 Verification finished! Kept {len(verified_cases)}/{len(cases)} high-quality QEMU-reproducible cases.")
 
     def _verify_one_case(self, case: dict):
         """
@@ -152,8 +152,8 @@ class ZephyrCaseVerifier:
         category = case.get("category", "other")
 
         targets_desc = ", ".join(f"{inj['operator']} on {inj['target_file']}" for inj in injections)
-        logger.info(f"🧬 {tag} 開始驗證注入案例: {case['title']}")
-        logger.info(f"   ↳ {tag} 目標: {targets_desc} | App: {target_app} | Board: {board}")
+        logger.info(f"🧬 {tag} Starting to verify the injection case: {case['title']}")
+        logger.info(f"   ↳ {tag} Targets: {targets_desc} | App: {target_app} | Board: {board}")
 
         # extra_files 目前設計成套用在整組 injections 上，尚未支援「每個
         # injection 各自帶自己的 extra_files」——多檔案 compound 案例若也
@@ -172,10 +172,10 @@ class ZephyrCaseVerifier:
         )
 
         if not gate_result["accepted"]:
-            logger.warning(f"   ⚠️ {tag} 注入驗證未通過: {gate_result['reason']}")
+            logger.warning(f"   ⚠️ {tag} Injection verification failed: {gate_result['reason']}")
             return None
 
-        logger.info(f"   ✅ {tag} 注入後成功重現預期失敗、還原後成功建置！這是一個完美的合成評估案例。")
+        logger.info(f"   ✅ {tag} After injection the expected failure was reproduced, and after reverting the build succeeded! This is a perfect synthetic evaluation case.")
 
         mutated_result = gate_result["mutated_result"]
         compressed_log = self.log_filter.compress_log(mutated_result["log"])
@@ -216,12 +216,12 @@ class ZephyrCaseVerifier:
         Verifies a real mined case: checks out broken_commit and builds it
         directly, expecting an explicit crash or build failure.
         """
-        logger.info(f"🧪 {tag} 開始驗證: {case['title']} | Commit: {case['broken_commit'][:10]}")
+        logger.info(f"🧪 {tag} Starting verification: {case['title']} | Commit: {case['broken_commit'][:10]}")
 
         # 測試目標應用程式 (預設使用 hello_world，您也可以根據 Bug 模組動態調整)
         target_app = case.get("target_app", "samples/hello_world")
         board = case.get("board", "qemu_x86")
-        logger.info(f"   ↳ {tag} 目標 App: {target_app} | 開發板: {board}")
+        logger.info(f"   ↳ {tag} Target app: {target_app} | Board: {board}")
 
         result = self._run_sandbox_test(case['id'], case['broken_commit'], target_app, board)
 
@@ -230,20 +230,20 @@ class ZephyrCaseVerifier:
         # west update 抓取模組太慢或環境問題，兩者都不是真正重現，必須捨棄。
         if result["status"] not in ACCEPTED_FAILURE_STATUSES:
             if result["status"] == "success":
-                logger.warning(f"   ⚠️ {tag} 居然編譯且執行成功！這代表它是隱性 Bug 或依賴特定硬體，捨棄此案例。")
+                logger.warning(f"   ⚠️ {tag} It compiled and ran successfully! That means it is a latent bug or depends on specific hardware; discarding this case.")
             elif result["status"] == "unsupported_board":
-                logger.warning(f"   ⚠️ {tag} 目標板子 '{board}' 不支援模擬 (QEMU/native)，無法驗證執行期行為，捨棄此案例。")
+                logger.warning(f"   ⚠️ {tag} The target board '{board}' does not support emulation (QEMU/native), so runtime behavior cannot be verified; discarding this case.")
             elif result["status"] == "docker_infra_error":
-                logger.warning(f"   ⚠️ {tag} Docker daemon 本身斷線/崩潰，與目標 commit 無關，捨棄此案例 (建議稍後重跑)。")
+                logger.warning(f"   ⚠️ {tag} The Docker daemon itself disconnected/crashed, unrelated to the target commit; discarding this case (consider re-running later).")
             elif result["status"] == "west_update_error":
-                logger.warning(f"   ⚠️ {tag} west update 抓取模組時網路故障，與目標 commit 無關，捨棄此案例 (建議稍後重跑)。")
+                logger.warning(f"   ⚠️ {tag} A network failure occurred while west update fetched modules, unrelated to the target commit; discarding this case (consider re-running later).")
             elif result["status"] == "target_path_missing":
-                logger.warning(f"   ⚠️ {tag} target_app 路徑 '{target_app}' 在這個 commit 上不存在 (猜測錯誤)，與目標 commit 是否有 bug 無關，捨棄此案例。")
+                logger.warning(f"   ⚠️ {tag} The target_app path '{target_app}' does not exist at this commit (a wrong guess), unrelated to whether the target commit has a bug; discarding this case.")
             else:
-                logger.warning(f"   ⚠️ {tag} 狀態為 '{result['status']}' (非明確崩潰/建置失敗特徵，可能只是逾時或環境問題)，捨棄以避免雜訊污染資料集。")
+                logger.warning(f"   ⚠️ {tag} The status is '{result['status']}' (not a clear crash/build-failure signature, possibly just a timeout or environment problem); discarding to avoid noise polluting the dataset.")
             return None
 
-        logger.info(f"   ✅ {tag} 成功捕捉到錯誤特徵 (狀態: {result['status']})！這是一個完美的評估案例。")
+        logger.info(f"   ✅ {tag} Successfully captured the error signature (status: {result['status']})! This is a perfect evaluation case.")
 
         # 壓縮並儲存初始錯誤日誌，這將是 LLM 的起點
         compressed_log = self.log_filter.compress_log(result["log"])

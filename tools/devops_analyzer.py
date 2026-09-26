@@ -62,4 +62,4 @@ def annotate_log_with_classification(log: str) -> str:
     tag = classify_build_failure(log)
     if tag is None:
         return log
-    return log + f"\n\n[DevOps Expert 分析：日誌樣式疑似屬於「{tag}」類別的建置失敗。]"
+    return log + f"\n\n[DevOps Expert analysis: the log pattern looks like a build failure of the \"{tag}\" category.]"

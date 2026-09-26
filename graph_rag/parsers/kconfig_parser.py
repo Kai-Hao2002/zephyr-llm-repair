@@ -31,10 +31,10 @@ class KconfigParser:
         Parses the specified Kconfig file and returns a dictionary with nodes and edges.
         """
         if not os.path.exists(kconfig_path):
-            self.logger.error(f"找不到 Kconfig 檔案 (Kconfig file not found): {kconfig_path}")
+            self.logger.error(f"Kconfig file not found: {kconfig_path}")
             return {"nodes": {}, "edges": []}
 
-        self.logger.info(f"開始解析 Kconfig 樹 (Starting to parse Kconfig tree): {kconfig_path}")
+        self.logger.info(f"Starting to parse Kconfig tree: {kconfig_path}")
         
         # warn_to_stderr=False 避免解析時產生大量 Zephyr 特有的警告洗頻
         kconf = kconfiglib.Kconfig(kconfig_path, warn_to_stderr=False)
@@ -79,7 +79,7 @@ class KconfigParser:
                 "depends_on": [f"CONFIG_{d}" for d in deps]
             }
 
-        self.logger.info(f"解析完成！共提取 {len(graph_data['nodes'])} 個節點，{len(graph_data['edges'])} 條邊界。")
+        self.logger.info(f"Parsing complete! Extracted {len(graph_data['nodes'])} nodes and {len(graph_data['edges'])} edges.")
         return graph_data
 
     def _extract_symbols_from_expr(self, expr) -> Set[str]:
@@ -129,12 +129,12 @@ config PRINTK
     parser = KconfigParser()
     result = parser.parse(dummy_kconfig_path)
 
-    print("\n=== 萃取出的圖譜邊界 (Extracted Graph Edges) ===")
+    print("\n=== Extracted Graph Edges ===")
     for edge in result["edges"]:
         # 輸出格式: 節點A --[關係]--> 節點B
         print(f"{edge[0]} --[{edge[2]}]--> {edge[1]}")
 
-    print("\n=== 節點詳細資訊 (Node Details - CONFIG_SENSOR_XYZ) ===")
+    print("\n=== Node Details - CONFIG_SENSOR_XYZ ===")
     import json
     print(json.dumps(result["nodes"].get("CONFIG_SENSOR_XYZ", {}), indent=2))
 

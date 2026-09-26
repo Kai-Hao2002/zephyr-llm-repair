@@ -74,6 +74,16 @@ _MODEL_BY_PROVIDER_AND_ROLE = {
 
 _provider = os.environ.get("ZEPHYR_LLM_PROVIDER", _DEFAULT_PROVIDER)
 
+# 單模型模式：開啟後 "fast" 角色也改用該供應商的 "pro" 模型，整條 pipeline 只用一個
+# 模型。RQ4 跨供應商比較時，「哪個模型算另一家的 fast 等價物」是主觀對應，會變成
+# 額外的混淆變因；單模型模式讓「換供應商」只改變一個東西。預設關閉，既有行為不變。
+# Single-model mode: when on, the "fast" role also uses the provider's "pro" model, so
+# the whole pipeline runs on one model. In an RQ4 cross-provider comparison, "which model
+# is the other provider's fast equivalent" is a subjective mapping and becomes an extra
+# confound; single-model mode makes "switching provider" change exactly one thing.
+# Off by default, so existing behavior is unchanged.
+_single_model = os.environ.get("ZEPHYR_SINGLE_MODEL", "").strip().lower() in ("1", "true", "yes")
+
 
 def set_provider(provider: str) -> None:
     """整次 evaluate.py 執行期間呼叫一次 (main() 裡，剖析完 --model-provider
@@ -88,12 +98,27 @@ def get_provider() -> str:
     return _provider
 
 
+def set_single_model(enabled: bool) -> None:
+    """跟 set_provider 一樣，整次執行開頭呼叫一次 (Call once at process start, like set_provider)."""
+    global _single_model
+    _single_model = bool(enabled)
+
+
+def is_single_model() -> bool:
+    return _single_model
+
+
+def _model_for_role(role: str) -> str:
+    if role not in ("fast", "pro"):
+        raise ValueError(f"unknown role '{role}', expected 'fast' or 'pro'")
+    models = _MODEL_BY_PROVIDER_AND_ROLE[_provider]
+    return models["pro"] if _single_model else models[role]
+
+
 def get_model_name(role: str) -> str:
     """呼叫端 (agents/*.py) 記 token 用量時要標記用的實際模型名稱字串——
     不能寫死 "gemini-2.5-pro" 之類的固定字串，跨供應商比較時會失真。"""
-    if role not in ("fast", "pro"):
-        raise ValueError(f"unknown role '{role}', expected 'fast' or 'pro'")
-    return _MODEL_BY_PROVIDER_AND_ROLE[_provider][role]
+    return _model_for_role(role)
 
 
 def get_chat_model(role: str, temperature: float = 0, timeout: int = 120) -> Any:
@@ -110,9 +135,7 @@ def get_chat_model(role: str, temperature: float = 0, timeout: int = 120) -> Any
     (agents/*.py) never need to change how they call this just because the
     provider changed.
     """
-    if role not in ("fast", "pro"):
-        raise ValueError(f"unknown role '{role}', expected 'fast' or 'pro'")
-    model = _MODEL_BY_PROVIDER_AND_ROLE[_provider][role]
+    model = _model_for_role(role)
 
     if _provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI

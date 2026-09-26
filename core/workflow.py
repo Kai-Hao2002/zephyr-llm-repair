@@ -186,8 +186,8 @@ def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
 
     if eval_result["status"] == "missing_required_test":
         compressed_log = log_filter.compress_log(eval_result["log"]) + (
-            f"\n\n[判定失敗：套件整體成功，但目標測試 '{required_pass_test}' 未見 PASS，"
-            f"patch 疑似繞過而非真正修復。]"
+            f"\n\n[Verdict: FAILED. The suite as a whole succeeded, but the target test '{required_pass_test}' shows no PASS, "
+            f"so the patch appears to have bypassed the check rather than genuinely fixing the problem.]"
         )
         return {"status": "missing_required_test", "resolved": False, "compiled": compiled, "log": compressed_log}
 
@@ -218,13 +218,13 @@ def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     max_iterations = state.get("max_iterations", 5)
     failure_final_status = _compute_failure_final_status(current_iter, max_iterations)
 
-    print(f"\n⚙️ [ApplyPatch] 套用第 {current_iter} 次迭代的修補...")
+    print(f"\n⚙️ [ApplyPatch] Applying the patch of iteration {current_iter}...")
 
     applier = PatchApplier(workspace_path=workspace_path)
     patch_result = applier.apply_patches(patch_content)
 
     if not patch_result["success"]:
-        print("   ❌ 修補應用失敗！格式錯誤或找不到匹配的原始碼。")
+        print("   ❌ Patch application failed! Bad format, or no matching original code found.")
         return {
             "current_error_log": f"Patch Application Failed:\n{patch_result['error']}",
             "error_type": "patch_format_error",
@@ -232,14 +232,14 @@ def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
             "iterations": current_iter,
             "final_status": failure_final_status,
             **record_attempt_outcome(
-                current_iter, f"套用修補失敗 (格式錯誤/找不到匹配的原始碼)：{patch_result['error']}",
+                current_iter, f"Patch application failed (bad format / no matching original code): {patch_result['error']}",
                 compiled=False, tool_invocation_error=True,
                 pending_token_usage=state.get("pending_token_usage", []),
             ),
         }
 
     applied_files = patch_result.get("applied_files", [])
-    print(f"   ✅ 修補成功應用至: {applied_files}")
+    print(f"   ✅ Patch applied successfully to: {applied_files}")
     return {
         "error_type": "patch_applied",
         "applied_files": applied_files,
@@ -269,21 +269,21 @@ def static_check_node(state: ZephyrAgentState) -> Dict[str, Any]:
     board = state.get("board", "qemu_x86")
     applied_files = state.get("applied_files", [])
 
-    print(f"\n🔍 [StaticCheck] 對第 {current_iter} 次迭代的修補做靜態分析...")
+    print(f"\n🔍 [StaticCheck] Running static analysis on the patch of iteration {current_iter}...")
     checker = StaticChecker()
     result = checker.check(workspace_path, target_app, board, applied_files)
 
     if result["passed"]:
-        print("   ✅ 靜態分析通過，進入完整建置。")
+        print("   ✅ Static analysis passed, proceeding to the full build.")
         return {"error_type": "static_check_passed"}
 
-    print("   ⚠️ 靜態分析發現問題，直接打回 Patch 重新生成，跳過這次完整建置。")
+    print("   ⚠️ Static analysis found problems; sending the patch straight back for regeneration and skipping the full build this time.")
     return {
         "current_error_log": result["log"],
         "error_type": "static_check_failed",
         "final_status": failure_final_status,
         **record_attempt_outcome(
-            current_iter, f"修補已套用至 {applied_files}，但靜態分析發現問題：{result['log']}",
+            current_iter, f"Patch applied to {applied_files}, but static analysis found problems: {result['log']}",
             compiled=False, tool_invocation_error=False,
             pending_token_usage=state.get("pending_token_usage", []),
         ),
@@ -354,7 +354,7 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
     target_app = state.get("target_app", ".")
     required_pass_test = state.get("required_pass_test")
 
-    print(f"\n🔨 [DevOps] 第 {current_iter} 次迭代：開始在隔離容器中編譯 (west build)...")
+    print(f"\n🔨 [DevOps] Iteration {current_iter}: starting compilation in an isolated container (west build)...")
     # timeout=15 對一次真正的 west build (可能要編譯 Zephyr kernel + app)
     # 來說遠遠不夠，幾乎每次都會提早 timeout，把任何案例都誤判為建置卡住
     # ——FaultInjector 驗證資料集時本來就是用 600s (tools/fault_injector.py)，
@@ -371,8 +371,8 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
     if not eval_result["compiled"]:
         conflict_tag = classify_build_failure(eval_result["log"])
         annotated_log = annotate_log_with_classification(eval_result["log"])
-        print(f"   💥 建置失敗 (狀態: {eval_result['status']})"
-              + (f"，日誌樣式疑似屬於「{conflict_tag}」類別" if conflict_tag else ""))
+        print(f"   💥 Build failed (status: {eval_result['status']})"
+              + (f", the log pattern looks like the \"{conflict_tag}\" category" if conflict_tag else ""))
         return {
             "current_error_log": annotated_log,
             "error_type": eval_result["status"],
@@ -380,16 +380,16 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
             "final_status": failure_final_status,
             **record_attempt_outcome(
                 current_iter,
-                f"修補已套用至 {applied_files}，通過靜態分析後 west build 仍然失敗 "
-                f"(狀態: {eval_result['status']}"
-                + (f"，疑似屬於「{conflict_tag}」類別" if conflict_tag else "")
-                + f")：{annotated_log}",
+                f"Patch applied to {applied_files}; west build still failed after passing static analysis "
+                f"(status: {eval_result['status']}"
+                + (f", likely the \"{conflict_tag}\" category" if conflict_tag else "")
+                + f"): {annotated_log}",
                 compiled=False, tool_invocation_error=False,
                 pending_token_usage=state.get("pending_token_usage", []),
             ),
         }
 
-    print("   ✅ 建置成功，交給 QA Expert 執行並觀察執行期結果。")
+    print("   ✅ Build succeeded, handing over to the QA Expert to run it and observe the runtime result.")
     return {"error_type": "devops_build_passed", "pending_eval_result": eval_result}
 
 
@@ -415,7 +415,7 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
     eval_result = state["pending_eval_result"]
 
     if eval_result["status"] == "missing_required_test":
-        print(f"   ⚠️ [QA] 套件回報成功，但目標測試 '{required_pass_test}' 沒有真的通過——patch 疑似投機取巧 (刪除/跳過該測試)，不算修復成功。")
+        print(f"   ⚠️ [QA] The suite reported success, but the target test '{required_pass_test}' did not really pass. The patch looks like it games the check (deleting/skipping the test), so this does not count as a fix.")
         return {
             "current_error_log": eval_result["log"],
             "error_type": "missing_required_test",
@@ -423,15 +423,15 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
             "final_status": failure_final_status,
             **record_attempt_outcome(
                 current_iter,
-                f"修補已套用至 {applied_files}，套件整體回報成功，但目標測試 '{required_pass_test}' 未見 PASS，"
-                f"疑似投機取巧而非真正修復。",
+                f"Patch applied to {applied_files}; the suite as a whole reported success, but the target test '{required_pass_test}' shows no PASS, "
+                f"so this looks like gaming the check rather than a genuine fix.",
                 compiled=eval_result["compiled"], tool_invocation_error=False,
                 pending_token_usage=state.get("pending_token_usage", []),
             ),
         }
 
     if eval_result["status"] == "success":
-        print("   🎉 [QA] 執行期驗證通過！")
+        print("   🎉 [QA] Runtime verification passed!")
         return {
             "current_error_log": eval_result["log"],
             "error_type": "success",
@@ -440,7 +440,7 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
             **record_iteration_success(current_iter, state.get("pending_token_usage", [])),
         }
 
-    print(f"   💥 [QA] 執行期驗證失敗 (狀態: {eval_result['status']})，正在過濾日誌...")
+    print(f"   💥 [QA] Runtime verification failed (status: {eval_result['status']}), filtering the log...")
     return {
         "current_error_log": eval_result["log"],
         "error_type": eval_result["status"],
@@ -448,8 +448,8 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
         "final_status": failure_final_status,
         **record_attempt_outcome(
             current_iter,
-            f"修補已套用至 {applied_files}，通過建置後執行，但執行期驗證失敗 "
-            f"(狀態: {eval_result['status']})：{eval_result['log']}",
+            f"Patch applied to {applied_files}; it passed the build and ran, but runtime verification failed "
+            f"(status: {eval_result['status']}): {eval_result['log']}",
             compiled=eval_result["compiled"], tool_invocation_error=False,
             pending_token_usage=state.get("pending_token_usage", []),
         ),

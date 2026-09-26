@@ -204,14 +204,20 @@ def summarize(records: List[Dict[str, Any]], ground_truth: Dict[str, List[str]],
     # against Gemini.
     by_group = defaultdict(list)
     for r in records:
-        by_group[(r.get("pipeline", "unknown"), r.get("model_provider", "gemini"))].append(r)
+        by_group[(r.get("pipeline", "unknown"), r.get("model_provider", "gemini"),
+                  bool(r.get("single_model", False)))].append(r)
 
     summary = {}
-    for (pipeline, model_provider), recs in sorted(by_group.items()):
-        key = f"{pipeline}[{model_provider}]"
+    for (pipeline, model_provider, single_model), recs in sorted(by_group.items()):
+        # 單模型模式的結果跟雙層 (fast+pro) 的結果不能混在同一組。舊資料沒有
+        # single_model 欄位，視為 False，鍵的格式維持原樣。
+        # Single-model results must not be pooled with two-tier (fast+pro) ones. Older
+        # data has no single_model field and counts as False, keeping the key format unchanged.
+        key = f"{pipeline}[{model_provider}{',single-model' if single_model else ''}]"
         summary[key] = {
             "pipeline": pipeline,
             "model_provider": model_provider,
+            "single_model": single_model,
             "loop_metrics": compute_loop_metrics(recs, max_k),
             "retrieval_metrics": compute_retrieval_metrics(recs, ground_truth),
             "cost_metrics": compute_cost_metrics(recs),
