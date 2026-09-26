@@ -78,7 +78,7 @@ def knowledge_expert_node(state: Dict[str, Any]) -> Dict[str, Any]:
     retriever = get_retriever()
 
     # 執行子圖提取與 YAML 序列化 (Execute subgraph extraction and YAML serialization)
-    yaml_context = retriever.retrieve_context(keywords, radius=2)
+    yaml_context = retriever.retrieve_context(keywords, radius=1)
 
     # 也可以透過 LLM 整理檢索結果，但為了節省 Token，直接傳遞 YAML 是最有效率的做法
     # We could also use an LLM to summarize the retrieved results, but to save tokens, passing YAML directly is the most efficient approach.

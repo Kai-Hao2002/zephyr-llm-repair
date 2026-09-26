@@ -5,6 +5,22 @@ import os
 import logging
 from typing import Dict, Any
 
+
+class _TagIgnoringLoader(yaml.SafeLoader):
+    """dtc 的 YAML 輸出含 !phandle 等自訂 tag，SafeLoader 不認得會整份解析失敗。"""
+
+
+def _ignore_tag(loader, tag_suffix, node):
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node)
+    return loader.construct_scalar(node)
+
+
+_TagIgnoringLoader.add_multi_constructor("!", _ignore_tag)
+
+
 class DTSParser:
     """
     負責將 Device Tree (DTS) 檔案透過 dtc 轉換為 YAML，並解析為圖譜結構。
@@ -30,7 +46,7 @@ class DTSParser:
 
         # 2. 解析 YAML 結構 (Parse YAML structure)
         try:
-            dts_tree = yaml.safe_load(yaml_content)
+            dts_tree = yaml.load(yaml_content, Loader=_TagIgnoringLoader)
         except yaml.YAMLError as e:
             self.logger.error(f"YAML 解析失敗 (YAML parsing failed): {e}")
             return {"nodes": {}, "edges": []}

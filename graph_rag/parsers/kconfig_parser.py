@@ -56,7 +56,7 @@ class KconfigParser:
             
             # 2. 解析 Selects (後繼相依 - 該符號被啟動時，會連帶啟動哪些符號)
             selects = []
-            for select_expr, _ in sym.selects:
+            for select_expr, *_ in sym.selects:
                 if isinstance(select_expr, kconfiglib.Symbol):
                     target_id = f"CONFIG_{select_expr.name}"
                     selects.append(target_id)
