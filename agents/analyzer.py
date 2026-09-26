@@ -69,6 +69,12 @@ Decision rules:
 
     return {
         "search_keywords": result.search_keywords,
+        "analyzer_diagnosis": {
+            "iteration": state.get("iterations", 0) + 1,
+            "reasoning": result.reasoning,
+            "error_category": result.error_category,
+            "search_keywords": result.search_keywords,
+        },
         "messages": [f"Analyzer diagnosis ({result.error_category}): {result.reasoning}"],
         "pending_token_usage": append_usage(state.get("pending_token_usage", []), usage_entry),
     }

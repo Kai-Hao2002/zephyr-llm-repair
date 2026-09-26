@@ -37,6 +37,7 @@ from agents.supervisor import (
     record_attempt_outcome, record_iteration_success,
 )
 from tools.static_checker import StaticChecker
+from core.trajectory import build_trajectory
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -158,6 +159,21 @@ def _compute_failure_final_status(current_iter: int, max_iterations: int) -> str
 _COMPILED_STATUSES = frozenset({"crash", "missing_required_test", "success"})
 
 
+def _proposed_trajectory(state: ZephyrAgentState, stage: str, status: str, **fields) -> Dict[str, Any]:
+    """Proposed 的軌跡紀錄：patch/Analyzer 診斷/檢索結果一律從 state 讀，
+    各節點只補自己那一步的輸出 (見 core/trajectory.py)。
+    Proposed's trajectory record: patch/Analyzer diagnosis/retrieval come
+    from state; each node adds only its own step's output (see
+    core/trajectory.py)."""
+    return build_trajectory(
+        stage, status,
+        patch=state.get("patch_content", ""),
+        analyzer_diagnosis=state.get("analyzer_diagnosis"),
+        retrieved_files=state.get("retrieved_files"),
+        **fields,
+    )
+
+
 def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
                              required_pass_test: str = None) -> Dict[str, Any]:
     """
@@ -235,6 +251,8 @@ def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
                 current_iter, f"Patch application failed (bad format / no matching original code): {patch_result['error']}",
                 compiled=False, tool_invocation_error=True,
                 pending_token_usage=state.get("pending_token_usage", []),
+                trajectory=_proposed_trajectory(state, "apply", "patch_format_error",
+                                                applied_files=patch_result.get("applied_files", []), apply_error=patch_result["error"]),
             ),
         }
 
@@ -286,6 +304,9 @@ def static_check_node(state: ZephyrAgentState) -> Dict[str, Any]:
             current_iter, f"Patch applied to {applied_files}, but static analysis found problems: {result['log']}",
             compiled=False, tool_invocation_error=False,
             pending_token_usage=state.get("pending_token_usage", []),
+            trajectory=_proposed_trajectory(state, "static_check", "static_check_failed",
+                                            applied_files=applied_files, static_check_passed=False,
+                                            static_check_log=result["log"]),
         ),
     }
 
@@ -386,6 +407,9 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
                 + f"): {annotated_log}",
                 compiled=False, tool_invocation_error=False,
                 pending_token_usage=state.get("pending_token_usage", []),
+                trajectory=_proposed_trajectory(state, "build", eval_result["status"],
+                                                applied_files=applied_files, static_check_passed=True,
+                                                filtered_log=eval_result["log"], conflict_tag=conflict_tag),
             ),
         }
 
@@ -427,6 +451,9 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
                 f"so this looks like gaming the check rather than a genuine fix.",
                 compiled=eval_result["compiled"], tool_invocation_error=False,
                 pending_token_usage=state.get("pending_token_usage", []),
+                trajectory=_proposed_trajectory(state, "run", eval_result["status"],
+                                                applied_files=applied_files, static_check_passed=True,
+                                                filtered_log=eval_result["log"]),
             ),
         }
 
@@ -437,7 +464,12 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
             "error_type": "success",
             "iterations": current_iter,
             "final_status": "resolved",
-            **record_iteration_success(current_iter, state.get("pending_token_usage", [])),
+            **record_iteration_success(
+                current_iter, state.get("pending_token_usage", []),
+                trajectory=_proposed_trajectory(state, "run", "success",
+                                                applied_files=applied_files, static_check_passed=True,
+                                                filtered_log=eval_result["log"]),
+            ),
         }
 
     print(f"   💥 [QA] Runtime verification failed (status: {eval_result['status']}), filtering the log...")
@@ -452,6 +484,9 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
             f"(status: {eval_result['status']}): {eval_result['log']}",
             compiled=eval_result["compiled"], tool_invocation_error=False,
             pending_token_usage=state.get("pending_token_usage", []),
+            trajectory=_proposed_trajectory(state, "run", eval_result["status"],
+                                            applied_files=applied_files, static_check_passed=True,
+                                            filtered_log=eval_result["log"]),
         ),
     }
 

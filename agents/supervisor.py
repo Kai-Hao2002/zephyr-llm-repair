@@ -93,7 +93,8 @@ def _compress_outcome_to_one_sentence(outcome_description: str) -> Tuple[str, Op
 
 def _build_iteration_log_entry(current_iter: int, *, compiled: bool, resolved: bool,
                                 tool_invocation_error: bool,
-                                token_usage: List[Dict[str, Any]]) -> Dict[str, Any]:
+                                token_usage: List[Dict[str, Any]],
+                                trajectory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """兩個公開函式 (record_attempt_outcome/record_iteration_success) 共用的
     iteration_log 條目組裝邏輯，見 core/state.py 的欄位說明。"""
     return {
@@ -102,11 +103,13 @@ def _build_iteration_log_entry(current_iter: int, *, compiled: bool, resolved: b
         "resolved": resolved,
         "tool_invocation_error": tool_invocation_error,
         "token_usage": token_usage,
+        "trajectory": trajectory,
     }
 
 
 def record_attempt_outcome(current_iter: int, outcome_description: str, *, compiled: bool,
-                            tool_invocation_error: bool, pending_token_usage: List[Dict[str, Any]]) -> Dict[str, Any]:
+                            tool_invocation_error: bool, pending_token_usage: List[Dict[str, Any]],
+                            trajectory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     建立這次迭代(失敗收場)要附加進 attempt_history/iteration_log 的一筆
     紀錄，回傳一個可以直接跟呼叫端節點 (apply_patch_node/static_check_node/
@@ -155,12 +158,14 @@ def record_attempt_outcome(current_iter: int, outcome_description: str, *, compi
         "iteration_log": [_build_iteration_log_entry(
             current_iter, compiled=compiled, resolved=False,
             tool_invocation_error=tool_invocation_error, token_usage=token_usage,
+            trajectory=trajectory,
         )],
         "pending_token_usage": [],
     }
 
 
-def record_iteration_success(current_iter: int, pending_token_usage: List[Dict[str, Any]]) -> Dict[str, Any]:
+def record_iteration_success(current_iter: int, pending_token_usage: List[Dict[str, Any]],
+                             trajectory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     qa_node 修復成功時的對應函式——成功不需要壓縮摘要 (Patch 不會再被
     呼叫)，但仍然要寫一筆 iteration_log 條目 (RQ1/RQ3 的 Pass@k、迭代次數
@@ -175,6 +180,7 @@ def record_iteration_success(current_iter: int, pending_token_usage: List[Dict[s
         "iteration_log": [_build_iteration_log_entry(
             current_iter, compiled=True, resolved=True,
             tool_invocation_error=False, token_usage=list(pending_token_usage),
+            trajectory=trajectory,
         )],
         "pending_token_usage": [],
     }

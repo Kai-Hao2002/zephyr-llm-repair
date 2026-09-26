@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 from core.state import create_initial_state, ZephyrAgentState
+from core.trajectory import clip_text
 from core.workflow import build_zephyr_graph, build_devops_docker_cmd
 from core.baseline_pipelines import run_b1, run_b2, run_b3
 from core.llm_provider import set_provider, get_provider, set_single_model, is_single_model
@@ -528,6 +529,12 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
         "ttr_seconds": ttr_seconds,
         "iteration_log": iteration_log,
         "first_retrieval_files": first_retrieval_files,
+        # agent 第一次診斷實際拿到的 log (repro-check 過濾後的即時 log，或
+        # 資料集記錄的 initial_error_log)，給錯誤訊號品質分析用。
+        # The log the agent's first diagnosis actually received (the
+        # repro-check's filtered live log, or the dataset's recorded
+        # initial_error_log), for the error-signal-quality analysis.
+        "initial_error_log": clip_text(state["current_error_log"]),
         "workspace_path": workspace_path,
     }
 

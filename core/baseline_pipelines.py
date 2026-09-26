@@ -41,6 +41,7 @@ from typing import Any, Dict
 
 from core.state import ZephyrAgentState
 from core.workflow import evaluate_repair_attempt
+from core.trajectory import build_trajectory
 from tools.patch_applier import PatchApplier
 from agents.patch_expert import collect_relevant_context_paths, MAX_PATCH_CONTEXT_CHARS
 from agents.baselines import b1_generate_full_file_patch, b2_generate_patch, b3_generate_patch
@@ -69,7 +70,8 @@ def _read_context_files(workspace_path: str, target_app: str, error_log: str,
 
 
 def _iteration_log_entry(current_iter: int, compiled: bool, resolved: bool,
-                          tool_invocation_error: bool, usage_entries: list) -> Dict[str, Any]:
+                          tool_invocation_error: bool, usage_entries: list,
+                          trajectory: Dict[str, Any] = None) -> Dict[str, Any]:
     """跟 agents/supervisor.py 的 _build_iteration_log_entry 完全同一個
     shape——results.json 的分析腳本 (analyze_results.py) 要能不分 pipeline
     地讀同一種 iteration_log 結構，Proposed 跟 B1/B2/B3 的紀錄格式不能各自
@@ -80,6 +82,7 @@ def _iteration_log_entry(current_iter: int, compiled: bool, resolved: bool,
         "resolved": resolved,
         "tool_invocation_error": tool_invocation_error,
         "token_usage": usage_entries,
+        "trajectory": trajectory,
     }
 
 
@@ -103,7 +106,9 @@ def run_b1(state: ZephyrAgentState) -> Dict[str, Any]:
         print(f"   ❌ Patch application failed: {apply_result['error']}")
         return {
             "final_status": "failed_max_retries", "iterations": 1, "error_type": "patch_format_error",
-            "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry])],
+            "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry], build_trajectory(
+                "apply", "patch_format_error", patch=patch, applied_files=apply_result.get("applied_files", []), apply_error=apply_result["error"],
+            ))],
         }
 
     eval_result = evaluate_repair_attempt(
@@ -113,7 +118,12 @@ def run_b1(state: ZephyrAgentState) -> Dict[str, Any]:
     print(f"   {'🎉' if eval_result['resolved'] else '💥'} Build/run result: {eval_result['status']}")
     return {
         "final_status": final_status, "iterations": 1, "error_type": eval_result["status"],
-        "iteration_log": [_iteration_log_entry(1, eval_result["compiled"], eval_result["resolved"], False, [usage_entry])],
+        "iteration_log": [_iteration_log_entry(
+            1, eval_result["compiled"], eval_result["resolved"], False, [usage_entry],
+            build_trajectory("run" if eval_result["compiled"] else "build", eval_result["status"], patch=patch,
+                             applied_files=apply_result["applied_files"],
+                             filtered_log=eval_result["log"]),
+        )],
     }
 
 
@@ -144,7 +154,10 @@ def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
         print(f"   ❌ Patch application failed: {apply_result['error']}")
         return {
             "final_status": "failed_max_retries", "iterations": 1, "error_type": "patch_format_error",
-            "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry])],
+            "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry], build_trajectory(
+                "apply", "patch_format_error", patch=patch_text, applied_files=apply_result.get("applied_files", []),
+                apply_error=apply_result["error"], retrieved_files=retrieved_files,
+            ))],
             "first_retrieval_files": retrieved_files,
         }
 
@@ -155,7 +168,12 @@ def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
     print(f"   {'🎉' if eval_result['resolved'] else '💥'} Build/run result: {eval_result['status']}")
     return {
         "final_status": final_status, "iterations": 1, "error_type": eval_result["status"],
-        "iteration_log": [_iteration_log_entry(1, eval_result["compiled"], eval_result["resolved"], False, [usage_entry])],
+        "iteration_log": [_iteration_log_entry(
+            1, eval_result["compiled"], eval_result["resolved"], False, [usage_entry],
+            build_trajectory("run" if eval_result["compiled"] else "build", eval_result["status"], patch=patch_text,
+                             applied_files=apply_result["applied_files"],
+                             filtered_log=eval_result["log"], retrieved_files=retrieved_files),
+        )],
         "first_retrieval_files": retrieved_files,
     }
 
@@ -185,7 +203,9 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
         if not apply_result["success"]:
             print(f"   ❌ Patch application failed: {apply_result['error']}")
             error_log = f"Patch Application Failed:\n{apply_result['error']}"
-            iteration_log.append(_iteration_log_entry(current_iter, False, False, True, [usage_entry]))
+            iteration_log.append(_iteration_log_entry(current_iter, False, False, True, [usage_entry], build_trajectory(
+                "apply", "patch_format_error", patch=patch_text, applied_files=apply_result.get("applied_files", []), apply_error=apply_result["error"],
+            )))
             if current_iter >= max_iters:
                 return {"final_status": "failed_max_retries", "iterations": current_iter,
                         "error_type": "patch_format_error", "iteration_log": iteration_log}
@@ -193,7 +213,9 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
 
         eval_result = evaluate_repair_attempt(workspace_path, board, target_app, required_pass_test)
         iteration_log.append(_iteration_log_entry(
-            current_iter, eval_result["compiled"], eval_result["resolved"], False, [usage_entry]
+            current_iter, eval_result["compiled"], eval_result["resolved"], False, [usage_entry],
+            build_trajectory("run" if eval_result["compiled"] else "build", eval_result["status"], patch=patch_text,
+                             applied_files=apply_result["applied_files"], filtered_log=eval_result["log"]),
         ))
         if eval_result["resolved"]:
             print("   🎉 Runtime verification passed!")

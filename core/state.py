@@ -135,6 +135,18 @@ class ZephyrAgentState(TypedDict):
     # Proposed/B2 never had Analyzer decide retrieval was needed).
     first_retrieval_files: Optional[List[str]]
 
+    # Analyzer 最近一次的診斷 ({"iteration", "reasoning", "error_category",
+    # "search_keywords"})，只給 core/trajectory.py 的軌跡紀錄用。iteration
+    # 是 Analyzer 執行當下所屬的迭代編號——StaticCheck 失敗直接回 Patch 時
+    # Analyzer 不會重跑，下一輪軌跡裡的診斷就是上一輪留下的，靠這個欄位分辨。
+    # Analyzer's most recent diagnosis ({"iteration", "reasoning",
+    # "error_category", "search_keywords"}), used only for the trajectory
+    # records in core/trajectory.py. iteration is the iteration the Analyzer
+    # ran for — a StaticCheck failure goes straight back to Patch without
+    # re-running Analyzer, so the next iteration's trajectory carries the
+    # previous diagnosis; this field tells them apart.
+    analyzer_diagnosis: Optional[Dict[str, Any]]
+
     # DevOps Expert (devops_node) 建置成功時，把完整的 evaluate_repair_attempt()
     # 回傳結果暫存在這裡，交給下一個節點 QA Expert (qa_node) 解讀——兩個
     # 節點對應提案 Methodology 描述的 "Build (west)" 跟 "Execute (QEMU) /
@@ -244,6 +256,7 @@ def create_initial_state(workspace_path: str, initial_log: str, max_iters: int =
         "pending_token_usage": [],
         "first_retrieval_files": None,
         "pending_eval_result": None,
+        "analyzer_diagnosis": None,
         "workspace_path": workspace_path,
         "board": board,
         "target_app": target_app,
