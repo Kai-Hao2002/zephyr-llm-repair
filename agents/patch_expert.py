@@ -16,6 +16,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from core.state import ZephyrAgentState
 from core.llm_usage import extract_usage, append_usage
 from core.llm_provider import get_chat_model, get_model_name
+from core.llm_retry import call_with_retry
 
 _LOG_PATH_PREFIX = "/zephyrproject/zephyr/"
 _LOG_EXT_PATH_RE = re.compile(re.escape(_LOG_PATH_PREFIX) + r"([\w\-./]+\.(?:c|h|conf|dts|dtsi|overlay))\b")
@@ -208,12 +209,12 @@ Please start generating the patch blocks:""")
     ])
 
     chain = prompt | llm
-    response = chain.invoke({
+    response = call_with_retry(lambda: chain.invoke({
         "attempt_history": attempt_history_text,
         "project_files": project_files_content,
         "context": state.get("retrieved_context", "None"),
         "error_log": state.get("current_error_log", "")
-    })
+    }), what="patch_expert")
 
     patch_text = response.content
     usage_entry = extract_usage(response, node="patch_expert", model=get_model_name("pro"))

@@ -14,6 +14,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from core.state import ZephyrAgentState
 from core.llm_usage import extract_usage, append_usage
 from core.llm_provider import get_chat_model, get_model_name
+from core.llm_retry import call_with_retry
 
 
 class AnalyzerOutput(BaseModel):
@@ -60,7 +61,7 @@ Decision rules:
     ])
 
     chain = prompt | structured_llm
-    raw_output = chain.invoke({"error_log": state.get("current_error_log", "")})
+    raw_output = call_with_retry(lambda: chain.invoke({"error_log": state.get("current_error_log", "")}), what="analyzer")
     result: AnalyzerOutput = raw_output["parsed"]
     usage_entry = extract_usage(raw_output["raw"], node="analyzer", model=get_model_name("fast"))
 

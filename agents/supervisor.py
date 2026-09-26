@@ -21,6 +21,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from core.state import ZephyrAgentState
 from core.llm_usage import extract_usage
 from core.llm_provider import get_chat_model, get_model_name
+from core.llm_retry import call_with_retry, record_fallback
 
 # 從第幾次迭代開始，把每次嘗試的結果壓成一句話再放進 attempt_history，
 # 而不是繼續帶著較完整的錯誤日誌片段——迭代次數愈往後，愈需要控制
@@ -83,11 +84,12 @@ def _compress_outcome_to_one_sentence(outcome_description: str) -> Tuple[str, Op
             ("human", "{outcome}")
         ])
         chain = prompt | llm
-        response = chain.invoke({"outcome": outcome_description})
+        response = call_with_retry(lambda: chain.invoke({"outcome": outcome_description}), what="supervisor_compression")
         usage_entry = extract_usage(response, node="supervisor_compression", model=get_model_name("fast"))
         first_line = response.content.strip().splitlines()[0] if response.content.strip() else ""
         return (first_line or outcome_description[:200], usage_entry)
-    except Exception:
+    except Exception as e:
+        record_fallback("supervisor_compression", e)
         return (outcome_description[:200], None)
 
 

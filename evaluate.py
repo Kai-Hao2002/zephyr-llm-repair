@@ -42,6 +42,7 @@ from dotenv import load_dotenv
 
 from core.state import create_initial_state, ZephyrAgentState
 from core.trajectory import clip_text
+from core.llm_retry import is_transient, pop_events
 from core.workflow import build_zephyr_graph, build_devops_docker_cmd
 from core.baseline_pipelines import run_b1, run_b2, run_b3
 from core.llm_provider import set_provider, get_provider, set_single_model, is_single_model
@@ -592,13 +593,24 @@ def main():
 
     results = []
     for case in cases:
+        # api_events：這個案例期間 LLM/embedding API 的暫時性錯誤重試與降級
+        # 紀錄 (見 core/llm_retry.py)。error_kind="transient_api" 代表重試
+        # 用完仍失敗，該案例應單筆重跑，不能當成結果。
+        # api_events: this case's LLM/embedding API transient-error retries
+        # and degradations (see core/llm_retry.py). error_kind="transient_api"
+        # means retries ran out; rerun the case alone, don't count it as a result.
+        pop_events()
         try:
-            results.append(run_case(case, args.runs_dir, args.max_retries, args.skip_repro_check, args.pipeline))
+            result = run_case(case, args.runs_dir, args.max_retries, args.skip_repro_check, args.pipeline)
+            result["api_events"] = pop_events()
+            results.append(result)
         except Exception as e:
             logger.error(f"[{case['id']}] Run failed: {e}")
             results.append({"case_id": case["id"], "category": case.get("category"), "pipeline": args.pipeline,
                              "model_provider": get_provider(), "single_model": is_single_model(),
-                             "final_status": "error", "error": str(e)})
+                             "final_status": "error", "error": str(e),
+                             "error_kind": "transient_api" if is_transient(e) else "other",
+                             "api_events": pop_events()})
 
     results_out = args.results_out or os.path.join(args.runs_dir, "results.json")
     os.makedirs(os.path.dirname(results_out) or ".", exist_ok=True)

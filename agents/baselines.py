@@ -30,6 +30,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from core.llm_usage import extract_usage
 from core.llm_provider import get_chat_model, get_model_name
+from core.llm_retry import call_with_retry
 
 # 三個 baseline 的修補生成都用 "pro" 角色 (見 core/llm_provider.py)——跟
 # Proposed pipeline 的 Patch Expert 用同一個角色定位，維持公平比較 (三個
@@ -100,7 +101,7 @@ def b1_generate_full_file_patch(error_log: str) -> Tuple[Dict[str, str], Dict[st
         ("human", "Error log:\n{error_log}"),
     ])
     chain = prompt | structured_llm
-    raw_output = chain.invoke({"error_log": error_log})
+    raw_output = call_with_retry(lambda: chain.invoke({"error_log": error_log}), what="b1_zero_shot")
     result: B1FullFilePatch = raw_output["parsed"]
     usage_entry = extract_usage(raw_output["raw"], node="b1_zero_shot", model=get_model_name(_PATCH_ROLE))
     return {"filepath": result.filepath.strip(), "content": result.content}, usage_entry
@@ -136,7 +137,8 @@ def b2_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
                   "[Current error log]\n{error_log}\n\nPlease start generating the patch blocks:"),
     ])
     chain = prompt | llm
-    response = chain.invoke({"error_log": error_log, "project_files": project_files_content})
+    response = call_with_retry(lambda: chain.invoke({"error_log": error_log, "project_files": project_files_content}),
+                               what="b2_single_agent_rag")
     usage_entry = extract_usage(response, node="b2_single_agent_rag", model=get_model_name(_PATCH_ROLE))
     return response.content, usage_entry
 
@@ -172,6 +174,7 @@ def b3_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
                   "[Current error log]\n{error_log}\n\nPlease start generating the patch blocks:"),
     ])
     chain = prompt | llm
-    response = chain.invoke({"error_log": error_log, "project_files": project_files_content})
+    response = call_with_retry(lambda: chain.invoke({"error_log": error_log, "project_files": project_files_content}),
+                               what="b3_closed_loop")
     usage_entry = extract_usage(response, node="b3_closed_loop", model=get_model_name(_PATCH_ROLE))
     return response.content, usage_entry

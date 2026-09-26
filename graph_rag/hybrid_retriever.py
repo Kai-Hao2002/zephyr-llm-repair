@@ -29,6 +29,8 @@ from typing import List, Optional
 from rank_bm25 import BM25Okapi
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
+from core.llm_retry import call_with_retry, record_fallback
+
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _INDEXABLE_EXTENSIONS = (".c", ".h", ".conf", ".dts", ".dtsi", ".overlay")
 
@@ -197,8 +199,8 @@ class HybridRetriever:
                         candidate_contents.append(f.read()[: self._EMBED_CONTENT_CHARS])
                 except Exception:
                     candidate_contents.append("")
-            doc_vectors = embeddings.embed_documents(candidate_contents)
-            query_vector = embeddings.embed_query(query)
+            doc_vectors = call_with_retry(lambda: embeddings.embed_documents(candidate_contents), what="embed_documents")
+            query_vector = call_with_retry(lambda: embeddings.embed_query(query), what="embed_query")
             semantic_order = sorted(
                 range(len(candidate_paths)),
                 key=lambda i: _cosine_similarity(query_vector, doc_vectors[i]),
@@ -241,7 +243,8 @@ class HybridRetriever:
             # dedupe first.
             final_order = sorted(candidate_paths, key=lambda p: combined_scores[p], reverse=True)
             return final_order[:top_k]
-        except Exception:
+        except Exception as e:
+            record_fallback("hybrid_semantic_rerank", e)
             # 語意重排失敗 (例如 embedding API 暫時出錯) 時退回純 BM25
             # 排序，而不是讓整個檢索直接沒有任何結果——BM25 的排序本身
             # 已經是有用的訊號，只是少了語意層的再排序。
