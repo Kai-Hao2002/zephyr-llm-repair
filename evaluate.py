@@ -145,22 +145,39 @@ def load_dataset(dataset_path: str) -> List[Dict[str, Any]]:
 def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
     """
     在一個拋棄式容器內對 case['broken_commit'] 做
-    checkout -> west update --narrow -> 套用 mutation，完全比照
-    tools/fault_injector.py._run() 已經拿來驗證過整個資料集的流程 (同一棵
-    /zephyrproject/zephyr 樹、同一種 operator 跳脫方式)，再把容器內產生的
-    /zephyrproject/zephyr 複製到 host 上的 dest_dir，移除 .git，回傳
-    dest_dir 的絕對路徑。
+    checkout -> 套用 mutation，比照 tools/fault_injector.py._run() 已經拿來
+    驗證過整個資料集的流程 (同一棵 /zephyrproject/zephyr 樹、同一種
+    operator 跳脫方式)，再把容器內產生的 /zephyrproject/zephyr 複製到 host
+    上的 dest_dir，移除 .git，回傳 dest_dir 的絕對路徑。
+
+    跟 fault_injector 不同，這裡不跑 `west update --narrow`：它只更新
+    /zephyrproject/modules 等 zephyr/ 以外的專案，而這裡只 docker cp
+    zephyr/ 出來；建置與 StaticCheck 也只把 workspace 掛到
+    /zephyrproject/zephyr，模組一律用 zephyr-sandbox image 自帶的快照
+    (2026-08-30 main)。2026-09-26 以同一案例 (inject_c_hello_world_brace)
+    分別產生兩種 workspace 做完整比對：64234 個檔案內容、權限、路徑完全
+    相同，準備時間則從 909 秒降到 112 秒。
 
     只有這個函式讀取 case['broken_commit']/['injection']/['injections']；
     回傳值只是一個檔案系統路徑，這幾個欄位的內容不會出現在回傳值、
     workspace 內容，或任何寫出的檔案裡。
 
-    Runs checkout -> west update --narrow -> mutation-apply inside a
-    disposable container, mirroring tools/fault_injector.py._run() exactly
-    (same /zephyrproject/zephyr tree, same operator-escaping scheme) — the
-    process this dataset was originally verified with. Copies the
-    container's resulting /zephyrproject/zephyr out to dest_dir on the
-    host, strips .git, and returns dest_dir's absolute path.
+    Runs checkout -> mutation-apply inside a disposable container,
+    mirroring tools/fault_injector.py._run() (same /zephyrproject/zephyr
+    tree, same operator-escaping scheme) — the process this dataset was
+    originally verified with. Copies the container's resulting
+    /zephyrproject/zephyr out to dest_dir on the host, strips .git, and
+    returns dest_dir's absolute path.
+
+    Unlike fault_injector, this does not run `west update --narrow`: it
+    only updates projects outside zephyr/ (e.g. /zephyrproject/modules),
+    while only zephyr/ is docker cp'd out here; builds and StaticCheck
+    also mount the workspace at /zephyrproject/zephyr only, so modules
+    always come from the zephyr-sandbox image's own snapshot (2026-08-30
+    main). Verified 2026-09-26 by preparing the same case
+    (inject_c_hello_world_brace) both ways and diffing in full: all 64234
+    files identical in content, mode and path, while prep time dropped
+    from 909s to 112s.
 
     Only this function ever reads case['broken_commit']/['injection']/
     ['injections']; the return value is just a filesystem path — none of
@@ -183,7 +200,7 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
     # 跟 tools/fault_injector.py._run() 用同一套機制：host 路徑各自 bind-mount
     # 到一個獨立的 staging 路徑 (不能直接掛到最終路徑——如果那個路徑是既有
     # git 追蹤檔案，唯讀 mount 會讓 git checkout 覆寫時得到 Permission
-    # denied，整條 checkout 失敗)，等 checkout + west update 都做完、目標
+    # denied，整條 checkout 失敗)，等 checkout 做完、目標
     # 路徑回到一般檔案狀態後，再用 cp 複製過去，且必須發生在 mutation 指令
     # 之前 (mutation 目標檔本身可能就是這裡新增的檔案，如本案例)。
     # extra_files supports "port an existing test to a new board" cases that
@@ -193,7 +210,7 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
     # independent staging path (not directly at its final path — if that path
     # is an existing git-tracked file, a read-only mount would make git
     # checkout's overwrite fail with Permission denied), then cp'd into place
-    # once checkout + west update have finished, before the mutation commands
+    # once checkout has finished, before the mutation commands
     # run (the mutation's own target_file may be one of these newly-added
     # files, as in this case).
     extra_files = case.get("extra_files") or injections[0].get("extra_files")
@@ -211,7 +228,6 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
         "cd /zephyrproject/zephyr && "
         f"git fetch origin {broken_commit} && "
         f"git checkout {broken_commit} && "
-        "west update --narrow && "
         + " && ".join(copy_steps + mutate_cmds)
     )
 
@@ -225,18 +241,13 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
 
     logger.info(f"[{case_id}] Preparing the broken workspace (checkout {broken_commit[:12]} + applying the mutation)...")
     try:
-        # 實測 (2026-09-01)：光是 west update --narrow 這一步 (逐一從十幾個
-        # 不同的 GitHub repo 抓各家 HAL module) 就可能吃到 15 分鐘，加上
-        # 前面的 fetch/checkout 跟後面的 mutation，整體逼近甚至超過原本
-        # 900 秒的上限——這不是新案例才會遇到的問題，是這個步驟本身在
-        # 網路較慢時的真實耗時，調高到 1800 秒留出實際需要的緩衝。
-        # Measured (2026-09-01): west update --narrow alone (fetching each
-        # HAL module from a dozen-plus separate GitHub repos one by one)
-        # can take up to 15 minutes; combined with the fetch/checkout before
-        # it and the mutation after, the total routinely approaches or
-        # exceeds the previous 900s cap — not something specific to any one
-        # case, just this step's real duration when the network is slower.
-        # Raised to 1800s to give the headroom this step actually needs.
+        # 1800 秒上限原本是為了 west update --narrow (2026-09-01 實測可達
+        # 15 分鐘) 調高的；拿掉 west update 後準備階段實測約 2 分鐘
+        # (2026-09-26)，上限保留 1800 秒，給網路較慢時的 git fetch 留緩衝。
+        # The 1800s cap was originally raised for west update --narrow
+        # (measured up to 15 minutes on 2026-09-01); with west update
+        # dropped, prep measured ~2 minutes (2026-09-26). The cap is kept at
+        # 1800s as headroom for git fetch on a slow network.
         result = subprocess.run(docker_run_cmd, capture_output=True, text=True, timeout=1800)
         if result.returncode != 0:
             raise RuntimeError(
