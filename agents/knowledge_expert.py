@@ -4,6 +4,7 @@ from typing import Dict, Any, List
 from graph_rag.build_graph import ZephyrGraphBuilder
 from graph_rag.retriever import GraphRetriever
 from graph_rag.hybrid_retriever import HybridRetriever
+from core.llm_retry import RetrievalDegradedError, record_fallback, strict_fallbacks
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,13 @@ def knowledge_expert_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # Hybrid RAG is an additional signal on top of existing graph
             # retrieval — a failure here shouldn't take down the whole
             # Knowledge node; fall back to graph-retrieval-only results.
+            # 評測模式下不准退回 (見 core/llm_retry.py 的 strict_fallbacks)。
+            # Not allowed in evaluation mode (see core/llm_retry.py's strict_fallbacks).
+            if isinstance(e, RetrievalDegradedError):
+                raise
+            record_fallback("hybrid_retrieval", e)
+            if strict_fallbacks():
+                raise RetrievalDegradedError(f"Hybrid RAG retrieval failed and strict mode forbids skipping it: {e}") from e
             logger.warning(f"Hybrid RAG retrieval failed, skipping (does not affect the existing graph retrieval): {e}")
 
     result: Dict[str, Any] = {"retrieved_context": yaml_context, "retrieved_files": retrieved_files}

@@ -29,7 +29,7 @@ from typing import List, Optional
 from rank_bm25 import BM25Okapi
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-from core.llm_retry import call_with_retry, record_fallback
+from core.llm_retry import RetrievalDegradedError, call_with_retry, record_fallback, strict_fallbacks
 
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _INDEXABLE_EXTENSIONS = (".c", ".h", ".conf", ".dts", ".dtsi", ".overlay")
@@ -41,7 +41,7 @@ _INDEXABLE_EXTENSIONS = (".c", ".h", ".conf", ".dts", ".dtsi", ".overlay")
 # supported by this API version); gemini-embedding-001 is the embedding
 # model that actually works — verified with a real embed_query() call
 # first, not guessed from docs.
-_EMBEDDING_MODEL = "models/gemini-embedding-001"
+EMBEDDING_MODEL = "models/gemini-embedding-001"
 
 
 def _is_indexable_file(filename: str) -> bool:
@@ -149,7 +149,7 @@ class HybridRetriever:
             # hang with no response at all; without a timeout the caller
             # blocks indefinitely.
             self._embeddings = GoogleGenerativeAIEmbeddings(
-                model=_EMBEDDING_MODEL, request_options={"timeout": 120}
+                model=EMBEDDING_MODEL, request_options={"timeout": 120}
             )
         return self._embeddings
 
@@ -245,6 +245,10 @@ class HybridRetriever:
             return final_order[:top_k]
         except Exception as e:
             record_fallback("hybrid_semantic_rerank", e)
+            if strict_fallbacks():
+                raise RetrievalDegradedError(
+                    f"Hybrid semantic re-rank failed and strict mode forbids the BM25 fallback: {e}"
+                ) from e
             # 語意重排失敗 (例如 embedding API 暫時出錯) 時退回純 BM25
             # 排序，而不是讓整個檢索直接沒有任何結果——BM25 的排序本身
             # 已經是有用的訊號，只是少了語意層的再排序。

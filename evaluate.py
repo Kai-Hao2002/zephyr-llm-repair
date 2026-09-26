@@ -36,16 +36,18 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
 from core.state import create_initial_state, ZephyrAgentState
 from core.trajectory import clip_text
-from core.llm_retry import is_transient, pop_events
+from core.llm_retry import is_daily_quota, is_transient, pop_events, set_strict_fallbacks
 from core.workflow import build_zephyr_graph, build_devops_docker_cmd
 from core.baseline_pipelines import run_b1, run_b2, run_b3
-from core.llm_provider import set_provider, get_provider, set_single_model, is_single_model
+from core.llm_provider import set_provider, get_provider, set_single_model, is_single_model, get_model_name
+from graph_rag.hybrid_retriever import EMBEDDING_MODEL
 from tools.fault_injector import MUTATE_SCRIPT_HOST_PATH, MUTATE_SCRIPT_CONTAINER_PATH
 from tools.qemu_oracle import QemuOracle
 from tools.log_filter import LogFilter
@@ -540,6 +542,61 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
     }
 
 
+def _command_output(cmd: List[str]) -> Optional[str]:
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def collect_run_meta() -> Dict[str, Any]:
+    """
+    這次 evaluate.py 執行的環境指紋，逐筆寫進 results.json 的 run_meta：
+    程式碼 commit (以及有沒有未提交的修改)、實際用到的模型 ID、Docker
+    image ID、主要 SDK 版本。跨批次合併結果時，靠它確認每一筆都是同一個
+    凍結版本跑出來的。
+    Fingerprint of this evaluate.py run, written into each results.json
+    record's run_meta: code commit (and whether tracked files had
+    uncommitted changes), the model IDs actually used, the Docker image ID,
+    and key SDK versions. When merging results across batches, this is how
+    to confirm every record came from the same frozen version.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    def _version(package: str) -> Optional[str]:
+        try:
+            return version(package)
+        except PackageNotFoundError:
+            return None
+
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
+    dirty = _command_output(["git", "-C", repo_dir, "status", "--porcelain", "--untracked-files=no"])
+    return {
+        "code_commit": _command_output(["git", "-C", repo_dir, "rev-parse", "HEAD"]),
+        "code_dirty": None if dirty is None else bool(dirty),
+        "model_provider": get_provider(),
+        "single_model": is_single_model(),
+        "models": {"fast": get_model_name("fast"), "pro": get_model_name("pro"), "embedding": EMBEDDING_MODEL},
+        # `docker image inspect zephyr-sandbox` 在這台 Docker (29.5.3) 上會回報
+        # No such image，`docker images` 卻查得到，所以用後者。
+        # `docker image inspect zephyr-sandbox` reports "No such image" on this
+        # Docker (29.5.3) while `docker images` finds it, so use the latter.
+        "docker_image_id": _command_output(["docker", "images", "zephyr-sandbox", "--no-trunc", "--format", "{{.ID}}"]),
+        "strict_fallbacks": True,
+        "sdk_versions": {p: _version(p) for p in ("langchain-core", "langgraph", "langchain-google-genai",
+                                                   "google-genai", "langchain-anthropic", "langchain-openai")},
+    }
+
+
+def _error_kind(exc: BaseException) -> str:
+    if is_daily_quota(exc):
+        return "daily_quota"
+    if is_transient(exc):
+        return "transient_api"
+    return "other"
+
+
 def select_cases(dataset: List[Dict[str, Any]], args: argparse.Namespace) -> List[Dict[str, Any]]:
     if args.case_id:
         matches = [c for c in dataset if c["id"] == args.case_id]
@@ -586,6 +643,11 @@ def main():
     set_provider(args.model_provider)
     if args.single_model:
         set_single_model(True)
+    set_strict_fallbacks(True)
+    run_meta = collect_run_meta()
+    logger.info(f"Run meta: {json.dumps(run_meta, ensure_ascii=False)}")
+    if run_meta["code_dirty"]:
+        logger.warning("Tracked files have uncommitted changes; run_meta.code_commit does not fully describe the code being run.")
 
     dataset = load_dataset(args.dataset)
     cases = select_cases(dataset, args)
@@ -594,23 +656,36 @@ def main():
     results = []
     for case in cases:
         # api_events：這個案例期間 LLM/embedding API 的暫時性錯誤重試與降級
-        # 紀錄 (見 core/llm_retry.py)。error_kind="transient_api" 代表重試
-        # 用完仍失敗，該案例應單筆重跑，不能當成結果。
+        # 紀錄 (見 core/llm_retry.py)。error_kind 不是 "other" 的 error
+        # (transient_api = 重試用完；daily_quota = 每日配額用完；Hybrid 檢索
+        # 在評測模式下失敗也歸在這兩類或 other) 都代表該案例應單筆重跑，不能
+        # 當成結果。
         # api_events: this case's LLM/embedding API transient-error retries
-        # and degradations (see core/llm_retry.py). error_kind="transient_api"
-        # means retries ran out; rerun the case alone, don't count it as a result.
+        # and degradations (see core/llm_retry.py). An error whose error_kind
+        # isn't "other" (transient_api = retries ran out; daily_quota = daily
+        # quota exhausted) means rerun the case alone, don't count it as a result.
         pop_events()
+        started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             result = run_case(case, args.runs_dir, args.max_retries, args.skip_repro_check, args.pipeline)
             result["api_events"] = pop_events()
-            results.append(result)
         except Exception as e:
             logger.error(f"[{case['id']}] Run failed: {e}")
-            results.append({"case_id": case["id"], "category": case.get("category"), "pipeline": args.pipeline,
-                             "model_provider": get_provider(), "single_model": is_single_model(),
-                             "final_status": "error", "error": str(e),
-                             "error_kind": "transient_api" if is_transient(e) else "other",
-                             "api_events": pop_events()})
+            result = {"case_id": case["id"], "category": case.get("category"), "pipeline": args.pipeline,
+                      "model_provider": get_provider(), "single_model": is_single_model(),
+                      "final_status": "error", "error": str(e), "error_kind": _error_kind(e),
+                      "api_events": pop_events()}
+        result["started_at"] = started_at
+        result["run_meta"] = run_meta
+        results.append(result)
+        # 每日配額用完後，接下來的案例只會在同一個地方失敗 (而且每筆都先
+        # 花掉準備 workspace + repro build 的時間)，直接停下整批。
+        # Once the daily quota is exhausted, every following case would just
+        # fail the same way (each after spending workspace prep + a repro
+        # build first), so stop the whole batch.
+        if result.get("error_kind") == "daily_quota":
+            logger.error("Daily API quota exhausted; stopping the batch. Rerun the remaining cases after the quota resets.")
+            break
 
     results_out = args.results_out or os.path.join(args.runs_dir, "results.json")
     os.makedirs(os.path.dirname(results_out) or ".", exist_ok=True)

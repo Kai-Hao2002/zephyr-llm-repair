@@ -46,6 +46,28 @@ _TRANSIENT_MESSAGE_RE = re.compile(
 
 _events: List[Dict[str, Any]] = []
 
+# 評測模式 (evaluate.py 開啟) 下，Hybrid RAG 語意重排失敗不准悄悄退回純
+# BM25，改成拋出 RetrievalDegradedError，讓該案例記成 error、之後單筆重跑
+# ——確保 Proposed 的每一筆結果都真的用了 Hybrid 檢索。
+# In evaluation mode (enabled by evaluate.py), a Hybrid RAG semantic
+# re-rank failure may not silently fall back to plain BM25; it raises
+# RetrievalDegradedError instead, so the case is recorded as an error and
+# rerun alone — ensuring every Proposed result really used Hybrid retrieval.
+_strict_fallbacks = False
+
+
+class RetrievalDegradedError(RuntimeError):
+    pass
+
+
+def set_strict_fallbacks(enabled: bool) -> None:
+    global _strict_fallbacks
+    _strict_fallbacks = bool(enabled)
+
+
+def strict_fallbacks() -> bool:
+    return _strict_fallbacks
+
 
 def _transient_exception_types() -> tuple:
     types = [TimeoutError, ConnectionError]
@@ -74,6 +96,16 @@ _TRANSIENT_TYPES = _transient_exception_types()
 # also a 429 but only resets the next day; a 15-minute backoff is pointless,
 # so it counts as non-transient.
 _DAILY_QUOTA_RE = re.compile(r"PerDay", re.IGNORECASE)
+
+
+def is_daily_quota(exc: BaseException) -> bool:
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if _DAILY_QUOTA_RE.search(str(exc)):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 
 def is_transient(exc: BaseException) -> bool:
