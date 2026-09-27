@@ -131,14 +131,55 @@ def _describe(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {str(exc)[:300]}"
 
 
+# 同一個呼叫逾時幾次就判定為「卡住」而放棄 (見 LLMHangError)。
+# How many timeouts of the same call count as a hang and give up (see LLMHangError).
+_MAX_TIMEOUT_ATTEMPTS = 3
+
+
+class LLMHangError(RuntimeError):
+    """
+    同一個呼叫連續逾時 _MAX_TIMEOUT_ATTEMPTS 次。2026-09-27 實測：少數請求
+    (約 2% 的案例) 會讓 Gemini 2.5 Pro 進入極長的思考，有時 2 分鐘內回應、
+    有時超過 25 分鐘都沒有任何輸出 (串流也收不到第一個 chunk)；同一時間其他
+    請求正常，所以不是 API 故障或額度問題，一直重試只會一筆耗掉好幾小時。
+    evaluate.py 把它記成 error_kind="llm_hang"，之後換時段再單筆重跑。
+
+    The same call timed out _MAX_TIMEOUT_ATTEMPTS times. Observed 2026-09-27:
+    a few requests (~2% of cases) send Gemini 2.5 Pro into extremely long
+    thinking — sometimes answering within 2 minutes, sometimes producing no
+    output for over 25 minutes (not even a first streamed chunk) — while other
+    requests succeed at the same time, so it is neither an outage nor a quota
+    issue, and retrying indefinitely burns hours per case. evaluate.py records
+    it as error_kind="llm_hang" for a later rerun at a different time.
+    """
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, TimeoutError) or type(exc).__name__ in ("ReadTimeout", "WriteTimeout", "PoolTimeout", "APITimeoutError"):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
 def call_with_retry(fn: Callable[[], Any], *, what: str) -> Any:
-    """呼叫 fn()；遇到暫時性錯誤就退避重試，用完次數或非暫時性錯誤則原樣拋出。
+    """呼叫 fn()；遇到暫時性錯誤就退避重試，用完次數或非暫時性錯誤則原樣拋出；
+    同一個呼叫逾時 _MAX_TIMEOUT_ATTEMPTS 次則拋出 LLMHangError。
     Calls fn(); backs off and retries on transient errors, re-raising as-is
-    once retries run out or on a non-transient error."""
+    once retries run out or on a non-transient error; raises LLMHangError
+    once the same call has timed out _MAX_TIMEOUT_ATTEMPTS times."""
+    timeouts = 0
     for attempt in range(len(_BACKOFF_SECONDS) + 1):
         try:
             return fn()
         except Exception as e:
+            if _is_timeout(e):
+                timeouts += 1
+                if timeouts >= _MAX_TIMEOUT_ATTEMPTS:
+                    _events.append({"kind": "hang", "what": what, "timeouts": timeouts, "error": _describe(e)})
+                    raise LLMHangError(f"[{what}] timed out {timeouts} times in a row; giving up: {_describe(e)}") from e
             if attempt == len(_BACKOFF_SECONDS) or not is_transient(e):
                 raise
             wait = _BACKOFF_SECONDS[attempt] * random.uniform(0.8, 1.2)

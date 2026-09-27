@@ -137,13 +137,20 @@ def get_chat_model(role: str, temperature: float = 0, timeout: int = 120) -> Any
     """
     model = _model_for_role(role)
 
+    # SDK 自己的重試關掉 (Gemini 的 attempts=1 即只呼叫一次)：重試一律交給
+    # core/llm_retry.py，否則 SDK 對逾時的 6 次快速重試會讓一個卡住的請求
+    # 在外層還沒判定卡住前就先耗掉 6 × timeout。
+    # SDK-level retries disabled (Gemini attempts=1 means a single call):
+    # retries are left entirely to core/llm_retry.py, otherwise the SDK's 6
+    # quick retries on timeouts burn 6 x timeout on a hung request before the
+    # outer layer can even detect the hang.
     if _provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
-        return ChatGoogleGenerativeAI(model=model, temperature=temperature, timeout=timeout)
+        return ChatGoogleGenerativeAI(model=model, temperature=temperature, timeout=timeout, max_retries=1)
     if _provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(model=model, temperature=temperature, timeout=timeout)
+        return ChatAnthropic(model=model, temperature=temperature, timeout=timeout, max_retries=0)
     if _provider == "openai":
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=model, temperature=temperature, timeout=timeout)
+        return ChatOpenAI(model=model, temperature=temperature, timeout=timeout, max_retries=0)
     raise ValueError(f"unknown provider '{_provider}'")  # pragma: no cover - set_provider already validates

@@ -44,7 +44,7 @@ from dotenv import load_dotenv
 
 from core.state import create_initial_state, ZephyrAgentState
 from core.trajectory import clip_text
-from core.llm_retry import is_daily_quota, is_transient, pop_events, set_strict_fallbacks
+from core.llm_retry import LLMHangError, is_daily_quota, is_transient, pop_events, set_strict_fallbacks
 from core.workflow import build_zephyr_graph, build_devops_docker_cmd
 from core.baseline_pipelines import run_b1, run_b2, run_b3
 from core.llm_provider import set_provider, get_provider, set_single_model, is_single_model, get_model_name
@@ -593,6 +593,8 @@ def collect_run_meta() -> Dict[str, Any]:
 
 
 def _error_kind(exc: BaseException) -> str:
+    if isinstance(exc, LLMHangError) or isinstance(exc.__cause__, LLMHangError):
+        return "llm_hang"
     if is_daily_quota(exc):
         return "daily_quota"
     if is_transient(exc):
