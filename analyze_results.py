@@ -131,10 +131,28 @@ def compute_loop_metrics(records: List[Dict[str, Any]], max_k: int) -> Dict[str,
     是兩個獨立指標，見 core/workflow.py 的 evaluate_repair_attempt。
     """
     completed = [r for r in records if r.get("iteration_log") is not None]
-    error_count = len(records) - len(completed)
-    n = len(completed)
+    # error_kind="llm_hang" (見 core/llm_retry.py 的 LLMHangError)：模型對這個
+    # 輸入持續沒有回應。依 2026-09-28 的決定，主要數據把它計入分母、算成
+    # 沒修好 (實際部署一樣有時間上限，而且會卡住的多半是需要長思考的難案例，
+    # 排除會讓修好率偏高)；另外輸出排除它們的 functional_pass_rate_excl_hang
+    # 當敏感度分析。卡住那一輪之前的 iteration_log 沒有留下，Pass@k 也保守
+    # 算成沒編譯成功。其他 error (transient_api/daily_quota/other) 是該單筆
+    # 重跑的環境問題，仍然排除在外、另外計數。
+    # error_kind="llm_hang" (see core/llm_retry.py's LLMHangError): the model
+    # persistently gave no response to this input. Per the 2026-09-28
+    # decision, the primary numbers count it in the denominator as unresolved
+    # (a real deployment has a time limit too, and hung cases tend to be hard
+    # ones needing long thinking, so excluding them inflates the pass rate);
+    # functional_pass_rate_excl_hang excludes them as a sensitivity analysis.
+    # The iteration_log before the hang isn't kept, so Pass@k conservatively
+    # counts them as never compiled. Other errors (transient_api/daily_quota/
+    # other) are environment problems to rerun, still excluded and counted.
+    hung = [r for r in records if r.get("iteration_log") is None and r.get("error_kind") == "llm_hang"]
+    error_count = len(records) - len(completed) - len(hung)
+    n = len(completed) + len(hung)
     if n == 0:
-        return {"n_cases": 0, "n_errors": error_count, "pass_at_k": {}, "functional_pass_rate": None, "mean_iterations": None}
+        return {"n_cases": 0, "n_errors": error_count, "n_llm_hang": 0, "pass_at_k": {}, "functional_pass_rate": None,
+                "functional_pass_rate_excl_hang": None, "mean_iterations": None}
 
     pass_at_k = {}
     for k in range(1, max_k + 1):
@@ -144,12 +162,18 @@ def compute_loop_metrics(records: List[Dict[str, Any]], max_k: int) -> Dict[str,
         )
         pass_at_k[k] = hits / n
 
-    functional_pass_rate = sum(1 for r in completed if r.get("final_status") == "resolved") / n
-    mean_iterations = sum(r.get("iterations", 0) for r in completed) / n
+    resolved = sum(1 for r in completed if r.get("final_status") == "resolved")
+    functional_pass_rate = resolved / n
+    functional_pass_rate_excl_hang = resolved / len(completed) if completed else None
+    # 卡住的案例不知道實際跑了幾輪，平均迭代次數只算有完整紀錄的案例。
+    # Hung cases' true iteration count is unknown; mean iterations uses complete records only.
+    mean_iterations = sum(r.get("iterations", 0) for r in completed) / len(completed) if completed else None
 
     return {
-        "n_cases": n, "n_errors": error_count, "pass_at_k": pass_at_k,
-        "functional_pass_rate": functional_pass_rate, "mean_iterations": mean_iterations,
+        "n_cases": n, "n_errors": error_count, "n_llm_hang": len(hung), "pass_at_k": pass_at_k,
+        "functional_pass_rate": functional_pass_rate,
+        "functional_pass_rate_excl_hang": functional_pass_rate_excl_hang,
+        "mean_iterations": mean_iterations,
     }
 
 
@@ -238,12 +262,14 @@ def print_summary(summary: Dict[str, Any], max_k: int) -> None:
         loop = metrics["loop_metrics"]
         retrieval = metrics["retrieval_metrics"]
         cost = metrics["cost_metrics"]
-        print(f"\n=== {group_key} (n={loop['n_cases']}, errors={loop.get('n_errors', 0)}) ===")
+        print(f"\n=== {group_key} (n={loop['n_cases']}, llm_hang={loop.get('n_llm_hang', 0)}, other errors={loop.get('n_errors', 0)}) ===")
         print("[RQ1/RQ3] Bounded Compilation Success Rate (Pass@k):")
         for k in range(1, max_k + 1):
             if k in loop["pass_at_k"]:
                 print(f"    Pass@{k}: {_fmt_pct(loop['pass_at_k'][k])}")
-        print(f"  Functional Pass Rate: {_fmt_pct(loop['functional_pass_rate'])}")
+        print(f"  Functional Pass Rate: {_fmt_pct(loop['functional_pass_rate'])}"
+              + (f"  (excluding {loop['n_llm_hang']} llm_hang: {_fmt_pct(loop['functional_pass_rate_excl_hang'])})"
+                 if loop.get("n_llm_hang") else ""))
         print(f"  Mean iterations: {_fmt_num(loop['mean_iterations'], 2)}")
         print(f"[RQ2] Retrieval quality (n={retrieval['n_cases']} cases with a first-firing retrieval):")
         print(f"  MRR: {_fmt_num(retrieval['mrr'], 3)}")
