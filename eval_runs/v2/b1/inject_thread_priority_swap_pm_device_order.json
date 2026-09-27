@@ -1,0 +1,72 @@
+[
+  {
+    "case_id": "inject_thread_priority_swap_pm_device_order",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 178.4281289577484,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-pro",
+            "input_tokens": 516,
+            "output_tokens": 13777
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/subsys/pm/power_mgmt/src/main.c",
+            "content": "/*\n * Copyright (c) 2018 Intel Corporation.\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n#include <zephyr/pm/pm.h>\n#include <zephyr/pm/device.h>\n#include <zephyr/pm/state.h>\n\n#include <zephyr/device.h>\n#include <zephyr/init.h>\n\nstatic const struct device *dev_a;\nstatic const struct device *dev_b;\nstatic const struct device *dev_c;\n\nstatic int device_a_init(const struct device *dev)\n{\n\tdev_a = dev;\n\treturn 0;\n}\n\nstatic int device_b_init(const struct device *dev)\n{\n\tdev_b = dev;\n\treturn 0;\n}\n\nstatic int device_c_init(const struct device *dev)\n{\n\tdev_c = dev;\n\treturn 0;\n}\n\n/*\n * Suspend order: B -> A -> C\n * Resume order: C -> A -> B\n */\n\nstatic int device_a_pm_action(const struct device *dev, enum pm_device_action action)\n{\n\tenum pm_device_state state_b, state_c;\n\n\t(void)pm_device_state_get(dev_b, &state_b);\n\t(void)pm_device_state_get(dev_c, &state_c);\n\n\tswitch (action) {\n\tcase PM_DEVICE_ACTION_SUSPEND:\n\t\t/* When A is suspended, B should be suspended and C active */\n\t\tzassert_equal(state_b, PM_DEVICE_STATE_SUSPENDED, \"B should be suspended\");\n\t\tzassert_not_equal(state_c, PM_DEVICE_STATE_SUSPENDED, \"C should be active\");\n\t\tbreak;\n\tcase PM_DEVICE_ACTION_RESUME:\n\t\t/* When A is resumed, C should be active and B suspended */\n\t\tzassert_not_equal(state_c, PM_DEVICE_STATE_SUSPENDED, \"C should be active\");\n\t\tzassert_equal(state_b, PM_DEVICE_STATE_SUSPENDED, \"B should be suspended\");\n\t\tbreak;\n\tdefault:\n\t\treturn -ENOTSUP;\n\t}\n\n\treturn 0;\n}\n\nstatic int device_b_pm_action(const struct device *dev, enum pm_device_action action)\n{\n\tenum pm_device_state state_a, state_c;\n\n\t(void)pm_device_state_get(dev_a, &state_a);\n\t(void)pm_device_state_get(dev_c, &state_c);\n\n\tswitch (action) {\n\tcase PM_DEVICE_ACTION_SUSPEND:\n\t\t/* When B is suspended, A and C should be active */\n\t\tzassert_not_equal(state_a, PM_DEVICE_STATE_SUSPENDED, \"A should be active\");\n\t\tzassert_not_equal(state_c, PM_DEVICE_STATE_SUSPENDED, \"C should be active\");\n\t\tbreak;\n\tcase PM_DEVICE_ACTION_RESUME:\n\t\t/* When B is resumed, A and C should be active */\n\t\tzassert_not_equal(state_a, PM_DEVICE_STATE_SUSPENDED, \"A should be active\");\n\t\tzassert_not_equal(state_c, PM_DEVICE_STATE_SUSPENDED, \"C should be active\");\n\t\tbreak;\n\tdefault:\n\t\treturn -ENOTSUP;\n\t}\n\n\treturn 0;\n}\n\nstatic int device_c_pm_action(const struct device *dev, enum pm_device_action action)\n{\n\tenum pm_device_state state_a, state_b;\n\n\t(void)pm_device_state_get(dev_a, &state_a);\n\t(void)pm_device_state_get(dev_b, &state_b);\n\n\tswitch (action) {\n\tcase PM_DEVICE_ACTION_SUSPEND:\n\t\t/* When C is suspended, A and B should be suspended */\n\t\tzassert_equal(state_a, PM_DEVICE_STATE_SUSPENDED, \"A should be suspended\");\n\t\tzassert_equal(state_b, PM_DEVICE_STATE_SUSPENDED, \"B should be suspended\");\n\t\tbreak;\n\tcase PM_DEVICE_ACTION_RESUME:\n\t\t/* When C is resumed, A and B should be suspended */\n\t\tzassert_equal(state_a, PM_DEVICE_STATE_SUSPENDED, \"A should be suspended\");\n\t\tzassert_equal(state_b, PM_DEVICE_STATE_SUSPENDED, \"B should be suspended\");\n\t\tbreak;\n\tdefault:\n\t\treturn -ENOTSUP;\n\t}\n\n\treturn 0;\n}\n\n/*\n * Init order: C -> A -> B\n * This will result in suspend order: B -> A -> C\n */\nPM_DEVICE_DEFINE(pm_device_a, device_a_pm_action);\nDEVICE_DEFINE(pm_device_a, \"pm_device_a\", &device_a_init, PM_DEVICE_GET(pm_device_a),\n\t      NULL, APPLICATION, 1, NULL);\n\nPM_DEVICE_DEFINE(pm_device_b, device_b_pm_action);\nDEVICE_DEFINE(pm_device_b, \"pm_device_b\", &device_b_init, PM_DEVICE_GET(pm_device_b),\n\t      NULL, APPLICATION, 2, NULL);\n\nPM_DEVICE_DEFINE(pm_device_c, device_c_pm_action);\nDEVICE_DEFINE(pm_device_c, \"pm_device_c\", &device_c_init, PM_DEVICE_GET(pm_device_c),\n\t      NULL, APPLICATION, 0, NULL);\n\n\nstatic void test_busy(void)\n{\n\tpm_busy_set(\"test\");\n\tzassert_true(pm_system_is_busy(), \"PM should be busy\");\n\n\tpm_busy_clear(\"test\");\n\tzassert_false(pm_system_is_busy(), \"PM should not be busy\");\n}\n\nstatic void test_device_order(void)\n{\n\t/*\n\t * Entering suspend state should suspend devices in the reverse\n\t * order of their initialization. The assertions in the PM action\n\t * callbacks validate the order.\n\t */\n\tpm_system_force_power_state(PM_STATE_SUSPEND_TO_IDLE);\n\n\t/*\n\t * Coming back from suspend state should resume devices in the same\n\t * order of their initialization. The assertions in the PM action\n\t * callbacks validate the order.\n\t */\n}\n\nZTEST_SUITE(power_management_1cpu, NULL, NULL, NULL, NULL, NULL);\n\nZTEST(power_management_1cpu, test_busy)\n{\n\ttest_busy();\n}\n\nZTEST(power_management_1cpu, test_device_order)\n{\n\ttest_device_order();\n}\n"
+          },
+          "applied_files": [
+            "tests/subsys/pm/power_mgmt/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c:124:41: error: macro \"DEVICE_DEFINE\" requires 9 arguments, but only 8 given\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c:123:1: error: type defaults to ‘int’ in declaration of ‘DEVICE_DEFINE’ [-Werror=implicit-int]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c:128:41: error: macro \"DEVICE_DEFINE\" requires 9 arguments, but only 8 given\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c:127:1: error: type defaults to ‘int’ in declaration of ‘DEVICE_DEFINE’ [-Werror=implicit-int]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c:132:41: error: macro \"DEVICE_DEFINE\" requires 9 arguments, but only 8 given\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c:131:1: error: type defaults to ‘int’ in declaration of ‘DEVICE_DEFINE’ [-Werror=implicit-int]\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[114/123] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[115/123] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[116/123] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[117/123] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[118/123] Building C object zephyr/kernel/CMakeFiles/kernel.dir/events.c.obj\n[119/123] Linking C static library zephyr/kernel/libkernel.a\n[120/123] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[121/123] Building native simulator runner, and linking final executable\n[122/123] Running utility command for native_runner_executable\n[122/123] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE power_management_1cpu\n===================================================================\nSTART - test_busy\nPASS - test_busy in 0.000 seconds\n===================================================================\nSTART - test_device_order\nExiting due to fatal error\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/pm/power_mgmt/src/main.c:112: device_b_pm_action: (state_c not equal to PM_DEVICE_STATE_SUSPENDED)",
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/b1/inject_thread_priority_swap_pm_device_order",
+    "api_events": [],
+    "started_at": "2026-09-26T06:35:58+00:00",
+    "run_meta": {
+      "code_commit": "538b7706719863a3dea78dc56e2c9df57e2888c9",
+      "code_dirty": false,
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-pro",
+        "pro": "gemini-2.5-pro",
+        "embedding": "models/gemini-embedding-001"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

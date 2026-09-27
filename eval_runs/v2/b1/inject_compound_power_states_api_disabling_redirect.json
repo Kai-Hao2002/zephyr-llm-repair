@@ -1,0 +1,72 @@
+[
+  {
+    "case_id": "inject_compound_power_states_api_disabling_redirect",
+    "category": "compound",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 201.8325800895691,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-pro",
+            "input_tokens": 615,
+            "output_tokens": 16838
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/subsys/pm/power_states_api/src/main.c",
+            "content": "/*\n * Copyright (c) 2023, Intel Corporation.\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <zephyr/pm/pm.h>\n#include <zephyr/pm/device.h>\n#include <zephyr/pm/policy.h>\n#include <zephyr/ztest.h>\n\nstatic atomic_t suspend_to_idle_count;\nstatic atomic_t suspend_to_ram_count;\nstatic atomic_t suspend_to_disk_count;\n\nstatic void suspend_to_idle_post_op(enum pm_state state, uint8_t substate_id)\n{\n\tatomic_inc(&suspend_to_idle_count);\n}\n\nstatic void suspend_to_ram_post_op(enum pm_state state, uint8_t substate_id)\n{\n\tatomic_inc(&suspend_to_ram_count);\n}\n\nstatic void suspend_to_disk_post_op(enum pm_state state, uint8_t substate_id)\n{\n\tatomic_inc(&suspend_to_disk_count);\n}\n\n/* Define the power states */\nstatic const struct pm_state_info states[] = {\n\tPM_STATE_INFO(PM_STATE_SUSPEND_TO_IDLE, PM_STATE_SUBSTATE_NONE, suspend_to_idle_post_op),\n\tPM_STATE_INFO(PM_STATE_SUSPEND_TO_RAM, PM_STATE_SUBSTATE_NONE, suspend_to_ram_post_op),\n\tPM_STATE_INFO(PM_STATE_SUSPEND_TO_DISK, PM_STATE_SUBSTATE_NONE, suspend_to_disk_post_op),\n};\n\nstatic int pm_test_dev_pm_action(const struct device *dev,\n\t\t\t\t enum pm_device_action action)\n{\n\treturn 0;\n}\n\nPM_DEVICE_DEFINE(pm_test_dev, pm_test_dev_pm_action);\nDEVICE_DEFINE(pm_test_dev, \"pm_test_dev\", NULL, NULL, NULL, NULL,\n\t      APPLICATION, 0, NULL);\n\nstatic void test_power_states(void)\n{\n\t(void)atomic_set(&suspend_to_idle_count, 0);\n\t(void)atomic_set(&suspend_to_ram_count, 0);\n\t(void)atomic_set(&suspend_to_disk_count, 0);\n\n\tpm_system_force_power_state(PM_STATE_SUSPEND_TO_IDLE);\n\tzassert_equal(atomic_get(&suspend_to_idle_count), 1);\n\n\tpm_system_force_power_state(PM_STATE_SUSPEND_TO_RAM);\n\tzassert_equal(atomic_get(&suspend_to_ram_count), 1);\n\n\tpm_system_force_power_state(PM_STATE_SUSPEND_TO_DISK);\n\tzassert_equal(atomic_get(&suspend_to_disk_count), 1);\n}\n\nstatic void test_device_power_state_constraints(void)\n{\n\tconst struct device *const dev = DEVICE_GET(pm_test_dev);\n\tstruct pm_device_power_state_constraints constraints;\n\n\t/* By default all states are enabled */\n\t(void)atomic_set(&suspend_to_ram_count, 0);\n\tpm_system_force_power_state(PM_STATE_SUSPEND_TO_RAM);\n\tzassert_equal(atomic_get(&suspend_to_ram_count), 1,\n\t\t      \"suspend_to_ram_count should be 1\");\n\n\t/*\n\t * Let's disable suspend to ram when device is in active state.\n\t */\n\t(void)atomic_set(&suspend_to_ram_count, 0);\n\tconstraints = (struct pm_device_power_state_constraints){\n\t\t.flags = PM_DEVICE_POWER_STATE_FLAG_ACTIVE,\n\t};\n\t/* By default, all states are allowed */\n\tmemset(constraints.states, 1, sizeof(constraints.states));\n\n\t/*\n\t * We are setting constraints for PM_DEVICE_STATE_ACTIVE, so we need\n\t * to make sure the device is in this state.\n\t */\n\tpm_device_state_set(dev, PM_DEVICE_STATE_ACTIVE);\n\t/* Disable suspend to ram */\n\tconstraints.states[PM_STATE_SUSPEND_TO_RAM] = 0;\n\tpm_device_power_state_constraints_set(dev, &constraints);\n\tpm_system_force_power_state(PM_STATE_SUSPEND_TO_RAM);\n\tzassert_equal(atomic_get(&suspend_to_ram_count), 0,\n\t\t      \"suspend_to_ram_count should be 0\");\n\n\t/* Now, let's enable it back */\n\tconstraints.states[PM_STATE_SUSPEND_TO_RAM] = 1;\n\tpm_device_power_state_constraints_set(dev, &constraints);\n\tpm_system_force_power_state(PM_STATE_SUSPEND_TO_RAM);\n\tzassert_equal(atomic_get(&suspend_to_ram_count), 1,\n\t\t      \"suspend_to_ram_count should be 1\");\n\n\t/* Finally, let's remove the constraint */\n\t(void)atomic_set(&suspend_to_ram_count, 0);\n\tpm_device_power_state_constraints_set(dev, NULL);\n\tpm_system_force_power_state(PM_STATE_SUSPEND_TO_RAM);\n\tzassert_equal(atomic_get(&suspend_to_ram_count), 1,\n\t\t      \"suspend_to_ram_count should be 1\");\n}\n\nstatic void *power_states_1cpu_setup(void)\n{\n\t/*\n\t * Let's make sure the device is in active state.\n\t */\n\tpm_device_state_set(DEVICE_GET(pm_test_dev), PM_DEVICE_STATE_ACTIVE);\n\n\treturn NULL;\n}\n\nstatic void power_states_1cpu_before(void *fixture)\n{\n\tARG_UNUSED(fixture);\n\n\t(void)atomic_set(&suspend_to_idle_count, 0);\n\t(void)atomic_set(&suspend_to_ram_count, 0);\n\t(void)atomic_set(&suspend_to_disk_count, 0);\n}\n\nunsigned int pm_policy_get_state_count(void)\n{\n\treturn ARRAY_SIZE(states);\n}\n\nconst struct pm_state_info *pm_policy_get_states(void)\n{\n\treturn states;\n}\n\nZTEST_SUITE(power_states_1cpu, NULL, power_states_1cpu_setup,\n\t    power_states_1cpu_before, NULL, NULL);\n\nZTEST(power_states_1cpu, test_power_states)\n{\n\ttest_power_states();\n}\n\nZTEST(power_states_1cpu, test_device_power_state_constraints)\n{\n\ttest_device_power_state_constraints();\n}\n"
+          },
+          "applied_files": [
+            "tests/subsys/pm/power_states_api/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/pm/power_states_api/src/main.c:34:49: error: ‘PM_STATE_SUBSTATE_NONE’ undeclared here (not in a function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/sys/util.h:89:39: error: expected identifier or ‘(’ before ‘int’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/sys/util.h:89:43: error: expected ‘)’ before ‘sizeof’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/pm/power_states_api/src/main.c:68:50: error: storage size of ‘constraints’ isn’t known\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/pm/power_states_api/src/main.c:81:18: error: ‘struct pm_device_power_state_constraints’ has no member named ‘flags’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/pm/power_states_api/src/main.c:81:26: error: ‘PM_DEVICE_POWER_STATE_FLAG_ACTIVE’ undeclared (first use in this function); did you mean ‘PM_DEVICE_STATE_ACTIVE’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/pm/power_states_api/src/main.c:80:65: error: invalid use of undefined type ‘struct pm_device_power_state_constraints’\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[110/123] Building C object zephyr/kernel/CMakeFiles/kernel.dir/pipe.c.obj\n[111/123] Building C object zephyr/kernel/CMakeFiles/kernel.dir/sched.c.obj\n[112/123] Building C object zephyr/kernel/CMakeFiles/kernel.dir/scheduler.c.obj\n[113/123] Building C object zephyr/kernel/CMakeFiles/kernel.dir/spinlock_validate.c.obj\n[114/123] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeslicing.c.obj\n[115/123] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[116/123] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[117/123] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[118/123] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[119/123] Linking C static library zephyr/kernel/libkernel.a\n[120/123] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[121/123] Building native simulator runner, and linking final executable\n[122/123] Running utility command for native_runner_executable\n[122/123] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE power_states_1cpu\n===================================================================\nSTART - test_device_power_state_constraints\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/pm/power_states_api/src/main.c:88: power_states_1cpu_test_device_power_state_constraints: (suspend_to_ram_count == 0 is false)",
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/b1/inject_compound_power_states_api_disabling_redirect",
+    "api_events": [],
+    "started_at": "2026-09-26T11:32:27+00:00",
+    "run_meta": {
+      "code_commit": "538b7706719863a3dea78dc56e2c9df57e2888c9",
+      "code_dirty": false,
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-pro",
+        "pro": "gemini-2.5-pro",
+        "embedding": "models/gemini-embedding-001"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

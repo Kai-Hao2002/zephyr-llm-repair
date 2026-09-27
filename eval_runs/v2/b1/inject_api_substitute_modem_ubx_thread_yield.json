@@ -1,0 +1,72 @@
+[
+  {
+    "case_id": "inject_api_substitute_modem_ubx_thread_yield",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 163.42045497894287,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-pro",
+            "input_tokens": 578,
+            "output_tokens": 13354
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/subsys/modem/modem_ubx/src/main.c",
+            "content": "/*\n * Copyright (c) 2022-2023 Trackunit Corporation\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n\n#include <zephyr/modem/pipe.h>\n#include <zephyr/modem/backend/uart.h>\n\n#include <modem_ubx.h>\n#include <modem_ubx_utils.h>\n\n#include <string.h>\n\nstruct modem_ubx_test_suite_data {\n\tstruct ubx_data ubx_data;\n\tstruct modem_cmd_handler_data cmd_handler_data;\n\tuint8_t cmd_match_buf[32];\n\tstruct modem_context ubx;\n\tstruct modem_pipe_config pipe_config;\n\tstruct modem_backend_uart_config uart_backend_config;\n\tstruct modem_backend_uart uart_backend;\n};\n\nstatic struct modem_ubx_test_suite_data test_suite_data;\n\nstruct test_script {\n\tconst void *cmd;\n\tsize_t cmd_len;\n\tconst void *rsp;\n\tsize_t rsp_len;\n\tint (*validate)(const void *rsp, size_t rsp_len);\n};\n\nstruct test_script_runner {\n\tstruct k_work work;\n\tconst struct test_script *script;\n\tsize_t script_len;\n\tint current;\n\tstruct {\n\t\tbool done;\n\t\tint ret;\n\t\tstruct k_sem sem;\n\t} result;\n};\n\nstatic struct test_script_runner test_script_runner;\nstatic struct k_work_delayable rsp_work;\n\nstatic void send_rsp_work_handler(struct k_work *item)\n{\n\tstruct test_script_runner *runner = &test_script_runner;\n\tconst struct test_script *script = &runner->script[runner->current];\n\n\tmodem_pipe_receive(&test_suite_data.ubx.iface.pipe, (uint8_t *)script->rsp,\n\t\t\t   script->rsp_len);\n}\n\nstatic int mock_pipe_send(const struct device *d, const uint8_t *buf, int len)\n{\n\tstruct test_script_runner *runner = &test_script_runner;\n\tconst struct test_script *script = &runner->script[runner->current];\n\n\tzassert_true(runner->current < runner->script_len, \"Too many commands sent\");\n\tzassert_not_null(script->cmd, \"Command not set in script\");\n\tzassert_equal(len, script->cmd_len, \"Invalid command length\");\n\tzassert_mem_equal(buf, script->cmd, script->cmd_len, \"Invalid command\");\n\n\tif (script->rsp) {\n\t\tk_work_schedule(&rsp_work, K_MSEC(100));\n\t}\n\n\treturn 0;\n}\n\nstatic int mock_pipe_open(const struct device *d)\n{\n\treturn 0;\n}\n\nstatic int mock_pipe_close(const struct device *d)\n{\n\treturn 0;\n}\n\nstatic const struct modem_pipe_api mock_pipe_api = {\n\t.open = mock_pipe_open,\n\t.send = mock_pipe_send,\n\t.close = mock_pipe_close,\n};\n\nDEVICE_DEFINE(mock_pipe, \"mock_pipe\", NULL, NULL, NULL, NULL, APPLICATION, 0, &mock_pipe_api);\n\nstatic void test_script_runner_init(struct test_script_runner *runner,\n\t\t\t\t    const struct test_script *script, size_t script_len)\n{\n\t(void)memset(runner, 0x00, sizeof(*runner));\n\trunner->script = script;\n\trunner->script_len = script_len;\n\tk_sem_init(&runner->result.sem, 0, 1);\n}\n\nstatic void runner_run(struct k_work *item)\n{\n\tstruct test_script_runner *runner = CONTAINER_OF(item, struct test_script_runner, work);\n\tconst struct test_script *script = &runner->script[runner->current];\n\n\tstruct modem_cmd cmds[] = {\n\t\tMODEM_CMD(script->cmd, script->cmd_len, script->rsp, script->rsp_len,\n\t\t\t  script->validate),\n\t};\n\n\trunner->result.ret = modem_cmd_handler_send_cmds(\n\t\t&test_suite_data.ubx.cmd_handler, &test_suite_data.ubx.iface, cmds,\n\t\tARRAY_SIZE(cmds), K_SECONDS(1));\n\n\trunner->result.done = true;\n\tk_sem_give(&runner->result.sem);\n}\n\nstatic void test_script_runner_run(struct test_script_runner *runner)\n{\n\tk_work_init(&runner->work, runner_run);\n\tk_work_submit(&runner->work);\n}\n\nstatic int validate_ack(const void *rsp, size_t rsp_len)\n{\n\tconst struct ubx_ack *ack = rsp;\n\n\tif (rsp_len != sizeof(*ack)) {\n\t\treturn -EIO;\n\t}\n\n\tif (ubx_utils_header_valid(&ack->hdr) == false) {\n\t\treturn -EIO;\n\t}\n\n\tif (ubx_utils_checksum_valid((const uint8_t *)ack, sizeof(*ack)) == false) {\n\t\treturn -EIO;\n\t}\n\n\treturn 0;\n}\n\nstatic void *modem_ubx_test_setup(void)\n{\n\tk_work_init_delayable(&rsp_work, send_rsp_work_handler);\n\treturn NULL;\n}\n\nstatic void modem_ubx_test_before(void *f)\n{\n\t(void)memset(&test_suite_data, 0x00, sizeof(test_suite_data));\n\n\ttest_suite_data.uart_backend_config.uart = DEVICE_GET(mock_pipe);\n\ttest_suite_data.pipe_config.backend = &test_suite_data.uart_backend.backend;\n\ttest_suite_data.pipe_config.iface_data = &test_suite_data.uart_backend;\n\ttest_suite_data.pipe_config.iface_config = &test_suite_data.uart_backend_config;\n\n\tmodem_cmd_handler_init(&test_suite_data.ubx.cmd_handler,\n\t\t\t       &test_suite_data.cmd_handler_data, test_suite_data.cmd_match_buf,\n\t\t\t       sizeof(test_suite_data.cmd_match_buf));\n\n\tmodem_pipe_init(&test_suite_data.ubx.iface.pipe, &test_suite_data.pipe_config);\n\n\tubx_init(&test_suite_data.ubx, &test_suite_data.ubx_data);\n}\n\nZTEST(modem_ubx, test_cmd_no_rsp_is_non_blocking)\n{\n\tstruct ubx_cmd cmd = {\n\t\t.hdr = UBX_HEADER_DEFAULT,\n\t\t.cls = UBX_CLASS_CFG,\n\t\t.id = UBX_CFG_ID_ANT,\n\t\t.len = 0,\n\t};\n\n\tubx_utils_header_update(&cmd.hdr, sizeof(cmd) - sizeof(cmd.hdr));\n\tubx_utils_checksum_update((uint8_t *)&cmd, sizeof(cmd));\n\n\tstruct test_script script[] = {\n\t\t{\n\t\t\t.cmd = &cmd,\n\t\t\t.cmd_len = sizeof(cmd),\n\t\t},\n\t};\n\n\ttest_script_runner_init(&test_script_runner, script, ARRAY_SIZE(script));\n\ttest_script_runner_run(&test_script_runner);\n\n\tzassert_ok(k_sem_take(&test_script_runner.result.sem, K_SECONDS(1)));\n\tzassert_true(test_script_runner.result.done, \"Command should be done\");\n\tzassert_ok(test_script_runner.result.ret, \"Command should succeed\");\n}\n\nZTEST(modem_ubx, test_cmd_rsp_blocks_and_receives_rsp)\n{\n\tstruct ubx_cmd cmd = {\n\t\t.hdr = UBX_HEADER_DEFAULT,\n\t\t.cls = UBX_CLASS_CFG,\n\t\t.id = UBX_CFG_ID_ANT,\n\t\t.len = 0,\n\t};\n\n\tubx_utils_header_update(&cmd.hdr, sizeof(cmd) - sizeof(cmd.hdr));\n\tubx_utils_checksum_update((uint8_t *)&cmd, sizeof(cmd));\n\n\tstruct ubx_ack ack = {\n\t\t.hdr = UBX_HEADER_DEFAULT,\n\t\t.cls = UBX_CLASS_ACK,\n\t\t.id = UBX_ACK_ID_ACK,\n\t\t.len = 2,\n\t\t.ack_cls = UBX_CLASS_CFG,\n\t\t.ack_id = UBX_CFG_ID_ANT,\n\t};\n\n\tubx_utils_header_update(&ack.hdr, sizeof(ack) - sizeof(ack.hdr));\n\tubx_utils_checksum_update((uint8_t *)&ack, sizeof(ack));\n\n\tstruct test_script script[] = {\n\t\t{\n\t\t\t.cmd = &cmd,\n\t\t\t.cmd_len = sizeof(cmd),\n\t\t\t.rsp = &ack,\n\t\t\t.rsp_len = sizeof(ack),\n\t\t\t.validate = validate_ack,\n\t\t},\n\t};\n\n\ttest_script_runner_init(&test_script_runner, script, ARRAY_SIZE(script));\n\ttest_script_runner_run(&test_script_runner);\n\n\tzassert_false(test_script_runner.result.done, \"Command should be blocking\");\n\tzassert_ok(k_sem_take(&test_script_runner.result.sem, K_SECONDS(1)));\n\tzassert_true(test_script_runner.result.done, \"Command should be done\");\n\tzassert_ok(test_script_runner.result.ret, \"Command should succeed\");\n}\n\nZTEST_SUITE(modem_ubx, NULL, modem_ubx_test_setup, modem_ubx_test_before, NULL, NULL);\n"
+          },
+          "applied_files": [
+            "tests/subsys/modem/modem_ubx/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/modem/modem_ubx/src/main.c:13:10: fatal error: modem_ubx.h: No such file or directory\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[107/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/spinlock_validate.c.obj\n[108/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[109/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[110/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[111/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[112/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/events.c.obj\n[113/117] Linking C static library zephyr/kernel/libkernel.a\n[114/117] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[115/117] Building native simulator runner, and linking final executable\n[116/117] Running utility command for native_runner_executable\n[116/117] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE modem_ubx\n===================================================================\nSTART - test_cmd_no_rsp_is_non_blocking\nPASS - test_cmd_no_rsp_is_non_blocking in 0.000 seconds\n===================================================================\nSTART - test_cmd_rsp_blocks_and_receives_rsp\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/modem/modem_ubx/src/main.c:224: modem_ubx_test_cmd_rsp_blocks_and_receives_rsp: (test_script_runner.result.done is false)",
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/b1/inject_api_substitute_modem_ubx_thread_yield",
+    "api_events": [],
+    "started_at": "2026-09-26T07:37:51+00:00",
+    "run_meta": {
+      "code_commit": "538b7706719863a3dea78dc56e2c9df57e2888c9",
+      "code_dirty": false,
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-pro",
+        "pro": "gemini-2.5-pro",
+        "embedding": "models/gemini-embedding-001"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

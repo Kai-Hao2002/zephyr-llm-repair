@@ -1,0 +1,72 @@
+[
+  {
+    "case_id": "inject_runtime_adc_emul_offbyone",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 109.35355305671692,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-pro",
+            "input_tokens": 618,
+            "output_tokens": 6826
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "drivers/adc/adc_emul.c",
+            "content": "/*\n * Copyright 2021 The Chromium OS Authors\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#define DT_DRV_COMPAT zephyr_adc_emul\n\n#include <zephyr/device.h>\n#include <zephyr/drivers/adc.h>\n#include <zephyr/drivers/adc/adc_emul.h>\n#include <zephyr/kernel.h>\n#include <zephyr/logging/log.h>\n\nLOG_MODULE_REGISTER(adc_emul, CONFIG_ADC_LOG_LEVEL);\n\n/**\n * @brief Structure for ADC emulator configuration\n *\n * @param num_channels The number of channels supported by the emulator\n * @param vref_mv The reference voltage in millivolts\n */\nstruct adc_emul_config {\n\tuint8_t num_channels;\n\tuint16_t vref_mv;\n};\n\n/**\n * @brief Structure for ADC emulator data\n *\n * @param const_values Pointer to array holding the constant values for each\n *                     channel.\n */\nstruct adc_emul_data {\n\tuint32_t *const_values;\n};\n\nstatic int adc_emul_channel_setup(const struct device *dev,\n\t\t\t\t  const struct adc_channel_cfg *channel_cfg)\n{\n\tconst struct adc_emul_config *config = dev->config;\n\n\tif (channel_cfg->channel_id >= config->num_channels) {\n\t\tLOG_ERR(\"Invalid channel id %d\", channel_cfg->channel_id);\n\t\treturn -EINVAL;\n\t}\n\n\t/* All other settings are ignored by the emulator */\n\n\treturn 0;\n}\n\nstatic int adc_emul_read(const struct device *dev,\n\t\t\t const struct adc_sequence *sequence)\n{\n\tconst struct adc_emul_config *config = dev->config;\n\tstruct adc_emul_data *data = dev->data;\n\tint error = 0;\n\tuint32_t val;\n\tsize_t buf_len;\n\n\tbuf_len = sequence->buffer_size;\n\n\tfor (uint32_t i = 0; i < sequence->channels; i++) {\n\t\tuint8_t channel_id = i;\n\n\t\tif (sequence->options) {\n\t\t\tchannel_id = sequence->options->extra_samplings * i;\n\t\t}\n\n\t\tif (channel_id >= config->num_channels) {\n\t\t\tLOG_ERR(\"Invalid channel id %d\", channel_id);\n\t\t\terror = -EINVAL;\n\t\t\tbreak;\n\t\t}\n\n\t\tval = data->const_values[channel_id];\n\n\t\tswitch (sequence->resolution) {\n\t\tcase 8:\n\t\t\tif (val > 255) {\n\t\t\t\tval = 255;\n\t\t\t}\n\t\t\tbreak;\n\t\tcase 10:\n\t\t\tif (val > 1023) {\n\t\t\t\tval = 1023;\n\t\t\t}\n\t\t\tbreak;\n\t\tcase 12:\n\t\t\tif (val > 4095) {\n\t\t\t\tval = 4095;\n\t\t\t}\n\t\t\tbreak;\n\t\tcase 16:\n\t\t\tif (val > 65535) {\n\t\t\t\tval = 65535;\n\t\t\t}\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tLOG_ERR(\"Unsupported resolution %d\",\n\t\t\t\tsequence->resolution);\n\t\t\terror = -ENOTSUP;\n\t\t\tbreak;\n\t\t}\n\t\tif (error) {\n\t\t\tbreak;\n\t\t}\n\n\t\tif (buf_len < sizeof(val)) {\n\t\t\tLOG_ERR(\"Provided buffer is too small\");\n\t\t\terror = -ENOMEM;\n\t\t\tbreak;\n\t\t}\n\n\t\tmemcpy(sequence->buffer, &val, sizeof(val));\n\t\tbuf_len -= sizeof(val);\n\t}\n\n\treturn error;\n}\n\n#ifdef CONFIG_ADC_ASYNC\nstatic int adc_emul_read_async(const struct device *dev,\n\t\t\t       const struct adc_sequence *sequence,\n\t\t\t       struct k_poll_signal *async)\n{\n\t/* TODO(b/262220532): implement */\n\treturn -ENOTSUP;\n}\n#endif /* CONFIG_ADC_ASYNC */\n\nstatic const struct adc_driver_api adc_emul_driver_api = {\n\t.channel_setup = adc_emul_channel_setup,\n\t.read = adc_emul_read,\n#ifdef CONFIG_ADC_ASYNC\n\t.read_async = adc_emul_read_async,\n#endif /* CONFIG_ADC_ASYNC */\n};\n\nint adc_emul_const_value_set(const struct device *dev, uint8_t channel,\n\t\t\t     uint32_t value)\n{\n\tconst struct adc_emul_config *config = dev->config;\n\tstruct adc_emul_data *data = dev->data;\n\n\tif (channel >= config->num_channels) {\n\t\treturn -EINVAL;\n\t}\n\n\tdata->const_values[channel] = value;\n\n\treturn 0;\n}\n\nstatic int adc_emul_init(const struct device *dev)\n{\n\tstruct adc_emul_data *data = dev->data;\n\tconst struct adc_emul_config *config = dev->config;\n\n\tif (data->const_values == NULL) {\n\t\tLOG_ERR(\"const_values must be provided\");\n\t\treturn -EINVAL;\n\t}\n\n\tfor (int i = 0; i < config->num_channels; i++) {\n\t\tdata->const_values[i] = 0;\n\t}\n\n\treturn 0;\n}\n\n#define ADC_EMUL_INIT(n)                                                       \\\n\tstatic uint32_t adc_emul_const_values_##n[DT_INST_PROP(n, num_channels)]; \\\n\tstatic struct adc_emul_data adc_emul_data_##n = {                       \\\n\t\t.const_values = adc_emul_const_values_##n,                     \\\n\t};                                                                     \\\n\tstatic const struct adc_emul_config adc_emul_config_##n = {             \\\n\t\t.num_channels = DT_INST_PROP(n, num_channels),                 \\\n\t\t.vref_mv = DT_INST_PROP(n, vref_mv),                           \\\n\t};                                                                     \\\n\tDEVICE_DT_INST_DEFINE(n, adc_emul_init, NULL, &adc_emul_data_##n,       \\\n\t\t\t      &adc_emul_config_##n, POST_KERNEL,               \\\n\t\t\t      CONFIG_ADC_INIT_PRIORITY, &adc_emul_driver_api);\n\nDT_INST_FOREACH_STATUS_OKAY(ADC_EMUL_INIT)\n"
+          },
+          "applied_files": [
+            "drivers/adc/adc_emul.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/adc/adc_emul.c:141:5: error: conflicting types for ‘adc_emul_const_value_set’; have ‘int(const struct device *, uint8_t,  uint32_t)’ {aka ‘int(const struct device *, unsigned char,  unsigned int)’}\n\n[C/C++ Compilation Error Detected]\n/tmp/build/zephyr/include/generated/zephyr/devicetree_generated.h:247:37: error: ‘DT_N_S_adc_P_num_channels’ undeclared here (not in a function); did you mean ‘DT_N_S_adc_P_nchannels’?\n\n[C/C++ Compilation Error Detected]\n/tmp/build/zephyr/include/generated/zephyr/devicetree_generated.h:247:37: error: ‘DT_N_S_adc_P_vref_mv’ undeclared here (not in a function); did you mean ‘DT_N_S_adc_P_ref_vdd_mv’?\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[102/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/sched.c.obj\n[103/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/spinlock_validate.c.obj\n[104/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/scheduler.c.obj\n[105/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/pipe.c.obj\n[106/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeslicing.c.obj\n[107/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[108/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[109/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[110/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[111/115] Linking C static library zephyr/kernel/libkernel.a\n[112/115] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[113/115] Building native simulator runner, and linking final executable\n[114/115] Running utility command for native_runner_executable\n[114/115] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE adc_emul\n===================================================================\nSTART - test_adc_emul_const_value_set_invalid_channel\nAssertion failed at WEST_TOPDIR/zephyr/tests/drivers/adc/adc_emul/src/main.c:750: adc_emul_test_adc_emul_const_value_set_invalid_channel: (ret not equal to -EINVAL)",
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/b1/inject_runtime_adc_emul_offbyone",
+    "api_events": [],
+    "started_at": "2026-09-26T08:42:39+00:00",
+    "run_meta": {
+      "code_commit": "538b7706719863a3dea78dc56e2c9df57e2888c9",
+      "code_dirty": false,
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-pro",
+        "pro": "gemini-2.5-pro",
+        "embedding": "models/gemini-embedding-001"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

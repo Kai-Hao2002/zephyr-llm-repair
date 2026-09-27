@@ -1,0 +1,72 @@
+[
+  {
+    "case_id": "inject_dts_espi_host_compatible_baseline2",
+    "category": "dts",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 157.22280716896057,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-pro",
+            "input_tokens": 221,
+            "output_tokens": 14215
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "drivers/espi/espi_emul.c",
+            "content": "/*\n * Copyright (c) 2020 Intel Corporation\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#define DT_DRV_COMPAT zephyr_espi_emul\n\n#include <zephyr/device.h>\n#include <zephyr/devicetree.h>\n#include <zephyr/drivers/emul.h>\n#include <zephyr/drivers/espi.h>\n#include <zephyr/drivers/espi_emul.h>\n#include <zephyr/sys/util.h>\n\n#include <zephyr/logging/log.h>\nLOG_MODULE_REGISTER(espi_emul, CONFIG_ESPI_LOG_LEVEL);\n\n/**\n * @brief eSPI emulator data\n *\n * @param espi_dev eSPI controller to which emulator is connected\n * @param host_evt_pending_callback Pointer to application callback function\n * @param user_data Pointer to user data\n * @param espi_cb eSPI callback structure for host events\n * @param emul Pointer to the parent emulator structure\n */\nstruct espi_emul_data {\n\tconst struct device *espi_dev;\n\tespi_emul_host_evt_sin_cb_t host_evt_pending_callback;\n\tvoid *user_data;\n\tstruct espi_callback espi_cb;\n\tconst struct emul *emul;\n};\n\n/**\n * @brief eSPI emulator config\n *\n * @param espi_dev eSPI controller to which emulator is connected\n */\nstruct espi_emul_cfg {\n\tconst struct device *espi_dev;\n};\n\nstatic int espi_emul_send_vw(const struct emul *target,\n\t\t\t    enum espi_vwire_signal signal, uint8_t level)\n{\n\tstruct espi_emul_data *data = target->data;\n\n\treturn espi_emul_driver_api_send_vw(data->espi_dev, signal, level);\n}\n\nstatic int espi_emul_receive_vw(const struct emul *target,\n\t\t\t       enum espi_vwire_signal signal, uint8_t *level)\n{\n\tstruct espi_emul_data *data = target->data;\n\n\treturn espi_emul_driver_api_receive_vw(data->espi_dev, signal, level);\n}\n\nstatic int espi_emul_send_p80(const struct emul *target, uint32_t data)\n{\n\tstruct espi_emul_data *emul_data = target->data;\n\n#ifdef CONFIG_ESPI_PERIPHERAL_DEBUG_PORT_80\n\treturn espi_emul_driver_api_send_p80(emul_data->espi_dev, data);\n#else\n\treturn -EOPNOTSUPP;\n#endif\n}\n\nstatic int espi_emul_read_lpc_request(const struct emul *target,\n\t\t\t\t     enum lpc_peripheral_opcode *op,\n\t\t\t\t     uint32_t *addr)\n{\n\tstruct espi_emul_data *data = target->data;\n\n\treturn espi_emul_driver_api_read_lpc_req(data->espi_dev, op, addr);\n}\n\nstatic int espi_emul_write_lpc_response(const struct emul *target,\n\t\t\t\t       uint32_t data)\n{\n\tstruct espi_emul_data *emul_data = target->data;\n\n\treturn espi_emul_driver_api_write_lpc_com(emul_data->espi_dev, data);\n}\n\nstatic int espi_emul_set_host_evt_sin_cb(const struct emul *target,\n\t\t\t\t\tespi_emul_host_evt_sin_cb_t cb,\n\t\t\t\t\tvoid *user_data)\n{\n\tstruct espi_emul_data *data = target->data;\n\n\tdata->host_evt_pending_callback = cb;\n\tdata->user_data = user_data;\n\n\treturn 0;\n}\n\nstatic void espi_emul_host_evt_rx_isr(const struct device *dev,\n\t\t\t\t     struct espi_callback *cb,\n\t\t\t\t     struct espi_event event)\n{\n\tstruct espi_emul_data *data = CONTAINER_OF(cb, struct espi_emul_data, espi_cb);\n\tconst struct emul *target = data->emul;\n\n\tif (data->host_evt_pending_callback) {\n\t\tdata->host_evt_pending_callback(target, event, data->user_data);\n\t}\n}\n\nstatic int espi_emul_init(const struct emul *target)\n{\n\tconst struct espi_emul_cfg *cfg = target->cfg;\n\tstruct espi_emul_data *data = target->data;\n\n\tdata->emul = target;\n\tdata->espi_dev = cfg->espi_dev;\n\n\tdata->espi_cb.handler = espi_emul_host_evt_rx_isr;\n\tdata->espi_cb.evt_mask = ESPI_EVENT_HOST_RST_assert |\n\t\t\t   ESPI_EVENT_HOST_RST_deassert;\n\n\tespi_init_callback(data->espi_dev, &data->espi_cb, data->espi_cb.evt_mask);\n\tespi_add_callback(data->espi_dev, &data->espi_cb);\n\n\treturn 0;\n}\n\nstatic const struct espi_emul_api espi_emul_api = {\n\t.send_vw = espi_emul_send_vw,\n\t.receive_vw = espi_emul_receive_vw,\n\t.send_p80 = espi_emul_send_p80,\n\t.read_lpc_request = espi_emul_read_lpc_request,\n\t.write_lpc_response = espi_emul_write_lpc_response,\n\t.set_host_evt_sin_cb = espi_emul_set_host_evt_sin_cb,\n};\n\n#define ESPI_EMUL_INIT_FN(n)                                                   \\\n\tBUILD_ASSERT(DT_NODE_HAS_STATUS(DT_INST_BUS(n), okay),                 \\\n\t\t     \"eSPI emulator parent eSPI controller is disabled\");      \\\n\t\t\t\t\t\t\t\t\t       \\\n\tstatic struct espi_emul_data espi_emul_data_##n;                       \\\n\t\t\t\t\t\t\t\t\t       \\\n\tstatic const struct espi_emul_cfg espi_emul_cfg_##n = {                \\\n\t\t.espi_dev = DEVICE_DT_GET(DT_INST_BUS(n)),                     \\\n\t};                                                                     \\\n\t\t\t\t\t\t\t\t\t       \\\n\tEMUL_DT_INST_DEFINE(n, espi_emul_init, &espi_emul_data_##n,             \\\n\t\t\t    &espi_emul_cfg_##n, &espi_emul_api, NULL);\n\nDT_INST_FOREACH_STATUS_OKAY(ESPI_EMUL_INIT_FN)\n"
+          },
+          "applied_files": [
+            "drivers/espi/espi_emul.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:30:9: error: unknown type name ‘espi_emul_host_evt_sin_cb_t’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:90:41: error: unknown type name ‘espi_emul_host_evt_sin_cb_t’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:109:17: error: called object is not a function or function pointer\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:122:22: error: ‘struct espi_callback’ has no member named ‘evt_mask’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:122:34: error: ‘ESPI_EVENT_HOST_RST_assert’ undeclared (first use in this function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:123:28: error: ‘ESPI_EVENT_HOST_RST_deassert’ undeclared (first use in this function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:125:73: error: ‘struct espi_callback’ has no member named ‘evt_mask’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:131:21: error: variable ‘espi_emul_api’ has initializer but incomplete type\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:132:10: error: ‘const struct espi_emul_api’ has no member named ‘send_vw’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:133:10: error: ‘const struct espi_emul_api’ has no member named ‘receive_vw’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:134:10: error: ‘const struct espi_emul_api’ has no member named ‘send_p80’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:135:10: error: ‘const struct espi_emul_api’ has no member named ‘read_lpc_request’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:136:10: error: ‘const struct espi_emul_api’ has no member named ‘write_lpc_response’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:137:10: error: ‘const struct espi_emul_api’ has no member named ‘set_host_evt_sin_cb’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:137:32: error: ‘espi_emul_set_host_evt_sin_cb’ undeclared here (not in a function); did you mean ‘espi_emul_host_evt_rx_isr’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/espi/espi_emul.c:131:35: error: storage size of ‘espi_emul_api’ isn’t known\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Linker Error Detected]\n/usr/bin/ld: /tmp/build/zephyr/NSI/tmp/build/zephyr/zephyr.elf.loc_cpusw.o:/zephyrproject/zephyr/drivers/espi/espi_emul.c:245:(.rodata.emuls_0+0x0): undefined reference to `__device_dts_ord_24'\ncollect2: error: ld returned 1 exit status\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/b1/inject_dts_espi_host_compatible_baseline2",
+    "api_events": [],
+    "started_at": "2026-09-26T14:34:19+00:00",
+    "run_meta": {
+      "code_commit": "538b7706719863a3dea78dc56e2c9df57e2888c9",
+      "code_dirty": false,
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-pro",
+        "pro": "gemini-2.5-pro",
+        "embedding": "models/gemini-embedding-001"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

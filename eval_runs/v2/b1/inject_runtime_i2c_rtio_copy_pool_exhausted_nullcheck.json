@@ -1,0 +1,72 @@
+[
+  {
+    "case_id": "inject_runtime_i2c_rtio_copy_pool_exhausted_nullcheck",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 114.08687210083008,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-pro",
+            "input_tokens": 712,
+            "output_tokens": 8289
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "drivers/i2c/i2c_rtio.c",
+            "content": "/*\n * Copyright (c) 2023 Google LLC\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <zephyr/drivers/i2c.h>\n#include <zephyr/rtio/rtio.h>\n#include <zephyr/drivers/i2c/rtio.h>\n\n#include <zephyr/logging/log.h>\nLOG_MODULE_REGISTER(i2c_rtio, CONFIG_I2C_LOG_LEVEL);\n\n#if CONFIG_I2C_RTIO_COPY_BUF_SLAB_SIZE > 0\n/**\n * @brief Transaction that requires copying to/from a temporary buffer\n *\n * Used when the provided buffer is not DMA-able.\n */\nstruct i2c_rtio_copy_trans {\n\t/* The i2c message being transferred */\n\tstruct i2c_msg msg;\n\t/* The sqe that produced this transaction */\n\tstruct rtio_sqe *sqe;\n\t/* The buffer for copying */\n\tuint8_t buf[];\n};\n\nK_MEM_SLAB_DEFINE_STATIC(i2c_rtio_copy_slab, CONFIG_I2C_RTIO_COPY_BUF_SLAB_SIZE,\n\t\t\t CONFIG_I2C_RTIO_COPY_BUF_SLAB_COUNT, 4);\n\n/**\n * @brief Check if a buffer needs to be copied\n *\n * @param iodev The iodev\n * @param buf The buffer\n * @param len The length of the buffer\n * @return true If the buffer needs to be copied\n * @return false Otherwise\n */\nstatic bool i2c_rtio_copy_needed(const struct rtio_iodev *iodev, uint8_t *buf, uint32_t len)\n{\n\tconst struct i2c_dt_spec *spec = iodev->data;\n\n\treturn !i2c_is_buffer_accessible(spec->bus, buf, len);\n}\n\n/**\n * @brief Allocate a copy transaction\n *\n * @param iodev The iodev\n * @param len The length of the buffer to allocate\n * @return struct i2c_rtio_copy_trans* The allocated transaction\n * @return NULL if no memory\n */\nstatic struct i2c_rtio_copy_trans *i2c_rtio_copy_alloc(const struct rtio_iodev *iodev,\n\t\t\t\t\t\t      uint32_t len)\n{\n\tstruct i2c_rtio_copy_trans *copy;\n\n\tif (k_mem_slab_alloc(&i2c_rtio_copy_slab, (void **)&copy, K_NO_WAIT) != 0) {\n\t\treturn NULL;\n\t}\n\n\treturn copy;\n}\n\n/**\n * @brief Free a copy transaction\n *\n * @param copy The transaction to free\n */\nstatic void i2c_rtio_copy_free(struct i2c_rtio_copy_trans *copy)\n{\n\tk_mem_slab_free(&i2c_rtio_copy_slab, (void **)&copy);\n}\n#else\nstatic bool i2c_rtio_copy_needed(const struct rtio_iodev *iodev, uint8_t *buf, uint32_t len)\n{\n\treturn false;\n}\n#endif\n\n/**\n * @brief Callback from the i2c transfer\n *\n * @param error Error code from the transfer, 0 on success\n * @param data User data, the rtio_sqe\n */\nstatic void i2c_rtio_xfer_done(int error, void *data)\n{\n\tstruct rtio_sqe *sqe = data;\n\tconst struct rtio_iodev *iodev = sqe->iodev;\n\tstruct i2c_rtio_data *dev_data = iodev->api_data;\n\n#if CONFIG_I2C_RTIO_COPY_BUF_SLAB_SIZE > 0\n\tif (dev_data->curr_copy != NULL) {\n\t\tif (error == 0 && (dev_data->curr_copy->msg.flags & I2C_MSG_READ)) {\n\t\t\tmemcpy(dev_data->curr_copy->sqe->rx.buf, dev_data->curr_copy->buf,\n\t\t\t       dev_data->curr_copy->msg.len);\n\t\t}\n\t\ti2c_rtio_copy_free(dev_data->curr_copy);\n\t\tdev_data->curr_copy = NULL;\n\t}\n#endif\n\n\trtio_sqe_ok(sqe, error);\n\tk_sem_give(&dev_data->txn_sem);\n}\n\nstatic void i2c_iodev_submit(struct rtio_iodev *iodev, struct rtio_sqe *sqe)\n{\n\tconst struct i2c_dt_spec *spec = iodev->data;\n\tstruct i2c_rtio_data *data = iodev->api_data;\n\tuint16_t addr = (uint16_t)sqe->iodev_data;\n\tint res;\n\tstruct i2c_msg msg = {\n\t\t.flags = 0,\n\t};\n\n\tif (k_sem_take(&data->txn_sem, K_NO_WAIT) != 0) {\n\t\trtio_sqe_err(sqe, -EBUSY);\n\t\treturn;\n\t}\n\n\tswitch (sqe->op) {\n\tcase RTIO_OP_RX:\n\t\tmsg.flags |= I2C_MSG_READ;\n\t\t/* Fallthrough */\n\tcase RTIO_OP_TX:\n\t\tmsg.flags |= I2C_MSG_STOP;\n\n\t\tif (sqe->op == RTIO_OP_TX) {\n\t\t\tmsg.buf = sqe->tx.buf;\n\t\t\tmsg.len = sqe->tx.buf_len;\n\t\t} else {\n\t\t\tmsg.buf = sqe->rx.buf;\n\t\t\tmsg.len = sqe->rx.buf_len;\n\t\t}\n\n#if CONFIG_I2C_RTIO_COPY_BUF_SLAB_SIZE > 0\n\t\tif (i2c_rtio_copy_needed(iodev, msg.buf, msg.len)) {\n\t\t\tstruct i2c_rtio_copy_trans *copy = i2c_rtio_copy_alloc(iodev, msg.len);\n\n\t\t\tif (copy == NULL) {\n\t\t\t\trtio_sqe_err(sqe, -ENOMEM);\n\t\t\t\tk_sem_give(&data->txn_sem);\n\t\t\t\treturn;\n\t\t\t}\n\n\t\t\tif (sqe->op == RTIO_OP_TX) {\n\t\t\t\tmemcpy(copy->buf, msg.buf, msg.len);\n\t\t\t}\n\n\t\t\tmsg.buf = copy->buf;\n\t\t\tcopy->msg = msg;\n\t\t\tcopy->sqe = sqe;\n\t\t\tdata->curr_copy = copy;\n\t\t}\n#endif\n\n\t\tres = i2c_transfer_cb(spec->bus, &msg, 1, addr, i2c_rtio_xfer_done, sqe);\n\t\tif (res != 0) {\n\t\t\trtio_sqe_err(sqe, res);\n\t\t\tk_sem_give(&data->txn_sem);\n\t\t}\n\t\tbreak;\n\tdefault:\n\t\trtio_sqe_err(sqe, -ENOTSUP);\n\t\tk_sem_give(&data->txn_sem);\n\t}\n}\n\n#if CONFIG_I2C_RTIO_FALLBACK\n/**\n * @brief Work handler for fallback synchronous operation\n *\n * @param item The work item\n */\nstatic void i2c_iodev_submit_work_handler(struct k_work *item)\n{\n\tstruct rtio_sqe *sqe = CONTAINER_OF(item, struct rtio_sqe, work);\n\tconst struct rtio_iodev *iodev = sqe->iodev;\n\tconst struct i2c_dt_spec *spec = iodev->data;\n\tint res;\n\n\tLOG_DBG(\"Sync RTIO work item for: %p\", sqe);\n\n\tswitch (sqe->op) {\n\tcase RTIO_OP_RX:\n\t\tres = i2c_read_dt(spec, sqe->rx.buf, sqe->rx.buf_len);\n\t\tbreak;\n\tcase RTIO_OP_TX:\n\t\tres = i2c_write_dt(spec, sqe->tx.buf, sqe->tx.buf_len);\n\t\tbreak;\n\tdefault:\n\t\tres = -ENOTSUP;\n\t}\n\n\trtio_sqe_ok(sqe, res);\n}\n\n/**\n * @brief Submit an i2c request using the fallback path\n *\n * @param iodev The iodev\n * @param sqe The submission queue entry\n */\nstatic void i2c_iodev_submit_fallback(struct rtio_iodev *iodev, struct rtio_sqe *sqe)\n{\n\tLOG_DBG(\"Executing fallback for dev: %p, sqe: %p\", iodev->dev, sqe);\n\n\tk_work_init(&sqe->work, i2c_iodev_submit_work_handler);\n\tk_work_submit(&sqe->work);\n}\n#endif\n\n/**\n * @brief Setup the iodev for the i2c device\n *\n * @param iodev The iodev\n * @param dev The i2c device\n * @return int 0 on success\n */\nstatic int i2c_rtio_iodev_setup(const struct rtio_iodev *iodev, const struct device *dev)\n{\n\tconst struct i2c_driver_api *api = (const struct i2c_driver_api *)dev->api;\n\tstruct i2c_rtio_data *data = iodev->api_data;\n\n\tk_sem_init(&data->txn_sem, 1, 1);\n\n\tif (api->transfer_cb != NULL) {\n\t\t((struct rtio_iodev_api *)iodev->api)->submit = i2c_iodev_submit;\n\t}\n#if CONFIG_I2C_RTIO_FALLBACK\n\telse {\n\t\t((struct rtio_iodev_api *)iodev->api)->submit = i2c_iodev_submit_fallback;\n\t}\n#endif\n\n\treturn 0;\n}\n\nconst struct rtio_iodev_api i2c_rtio_iodev_api = {\n\t.setup = i2c_rtio_iodev_setup,\n\t.submit = NULL, /* Set in setup */\n};\n"
+          },
+          "applied_files": [
+            "drivers/i2c/i2c_rtio.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:95:47: error: ‘const struct rtio_iodev’ has no member named ‘api_data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:109:29: error: invalid use of undefined type ‘struct i2c_rtio_data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:112:13: error: conflicting types for ‘i2c_iodev_submit’; have ‘void(struct rtio_iodev *, struct rtio_sqe *)’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:115:43: error: ‘struct rtio_iodev’ has no member named ‘api_data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:116:38: error: ‘struct rtio_sqe’ has no member named ‘iodev_data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:122:29: error: invalid use of undefined type ‘struct i2c_rtio_data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:166:41: error: invalid use of undefined type ‘struct i2c_rtio_data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:171:33: error: invalid use of undefined type ‘struct i2c_rtio_data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:229:43: error: ‘const struct rtio_iodev’ has no member named ‘api_data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:231:25: error: invalid use of undefined type ‘struct i2c_rtio_data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:233:18: error: ‘const struct i2c_driver_api’ has no member named ‘transfer_cb’; did you mean ‘transfer’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:246:10: error: ‘const struct rtio_iodev_api’ has no member named ‘setup’\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw:    R    P len=03:\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw: contents:\nd3 7f f5                                         |...\nPASS - test_fallback_transaction in 0.000 seconds\n===================================================================\nSTART - test_fallback_transaction_error\n[00:00:00.000,000] <dbg> i2c_rtio.i2c_iodev_submit_fallback: Executing fallback for dev: 0x805bae8, sqe: 0x8060b30\n[00:00:00.000,000] <dbg> i2c_rtio.i2c_iodev_submit_work_handler: Sync RTIO work item for: 0x8060b30\n[00:00:00.000,000] <dbg> i2c_emul_ctlr.i2c_emul_transfer: i2c_emul_transfer(dev=0x805bae8, addr=0x80)\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw: I2C msg: i2c@100, addr=80\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw:    R      len=03:\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw: contents:\nd3 7f f5                                         |...\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw:    R    P len=03:\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw: contents:\nd3 7f f5                                         |...\nPASS - test_fallback_transaction_error in 0.000 seconds\n===================================================================\nSTART - test_i2c_rtio_copy_pool_exhausted\nSegmentation fault",
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/b1/inject_runtime_i2c_rtio_copy_pool_exhausted_nullcheck",
+    "api_events": [],
+    "started_at": "2026-09-26T09:46:49+00:00",
+    "run_meta": {
+      "code_commit": "538b7706719863a3dea78dc56e2c9df57e2888c9",
+      "code_dirty": false,
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-pro",
+        "pro": "gemini-2.5-pro",
+        "embedding": "models/gemini-embedding-001"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

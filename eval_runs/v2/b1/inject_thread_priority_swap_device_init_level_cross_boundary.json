@@ -1,0 +1,72 @@
+[
+  {
+    "case_id": "inject_thread_priority_swap_device_init_level_cross_boundary",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 187.3977210521698,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-pro",
+            "input_tokens": 380,
+            "output_tokens": 17697
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/kernel/device/src/main.c",
+            "content": "/*\n * Copyright (c) 2018 Intel Corporation\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <zephyr/device.h>\n#include <zephyr/init.h>\n#include <zephyr/ztest.h>\n\n#include \"device_api.h\"\n\n/*\n * Used to test initialization ordering. The init functions for the\n * devices defined below will add a pointer to themselves to the\n * init_record array. The test will then verify that the pointers are\n * in the expected order.\n */\nstatic const void *init_record[16];\nstatic size_t init_record_idx;\n\nstatic void init_record_add(const void *dev)\n{\n\tif (init_record_idx < ARRAY_SIZE(init_record)) {\n\t\tinit_record[init_record_idx++] = dev;\n\t}\n}\n\nstatic int init_fn(const struct device *dev)\n{\n\tinit_record_add(dev);\n\treturn 0;\n}\n\n/* For testing SYS_INIT at POST_KERNEL */\nstatic int post_kernel_obj;\n\nstatic int sys_init_fn(const struct device *dev)\n{\n\tARG_UNUSED(dev);\n\n\tinit_record_add(&post_kernel_obj);\n\treturn 0;\n}\n\nDEVICE_DEFINE(dev_pre_1_p70, \"dev_pre_1_p70\", init_fn, NULL, NULL, NULL,\n\t      PRE_KERNEL_1, 70, NULL);\nDEVICE_DEFINE(dev_pre_1_p60, \"dev_pre_1_p60\", init_fn, NULL, NULL, NULL,\n\t      PRE_KERNEL_1, 60, NULL);\nDEVICE_DEFINE(dev_pre_2_p50, \"dev_pre_2_p50\", init_fn, NULL, NULL, NULL,\n\t      PRE_KERNEL_2, 50, NULL);\nDEVICE_DEFINE(dev_pre_2_p40, \"dev_pre_2_p40\", init_fn, NULL, NULL, NULL,\n\t      PRE_KERNEL_2, 40, NULL);\nDEVICE_DEFINE(dev_post_p30, \"dev_post_p30\", init_fn, NULL, NULL, NULL,\n\t      POST_KERNEL, 30, NULL);\nDEVICE_DEFINE(dev_app_p20, \"dev_app_p20\", init_fn, NULL, NULL, NULL,\n\t      APPLICATION, 20, NULL);\nDEVICE_DEFINE(dev_app_p10, \"dev_app_p10\", init_fn, NULL, NULL, NULL,\n\t      APPLICATION, 10, NULL);\n#ifdef CONFIG_SMP\nDEVICE_DEFINE(dev_smp_p0, \"dev_smp_p0\", init_fn, NULL, NULL, NULL,\n\t      SMP, 0, NULL);\n#endif\n\nSYS_INIT(sys_init_fn, POST_KERNEL, 0);\n\nstatic const void *const expected_order[] = {\n\tDEVICE_GET(dev_pre_1_p60),\n\tDEVICE_GET(dev_pre_1_p70),\n\tDEVICE_GET(dev_pre_2_p40),\n\tDEVICE_GET(dev_pre_2_p50),\n\t&post_kernel_obj,\n\tDEVICE_GET(dev_post_p30),\n\tDEVICE_GET(dev_app_p10),\n\tDEVICE_GET(dev_app_p20),\n#ifdef CONFIG_SMP\n\tDEVICE_GET(dev_smp_p0),\n#endif\n};\n\n/* For testing device de-initialization */\nstatic bool deinit_test_device_initialized;\n\nstatic int deinit_test_device_init(const struct device *dev)\n{\n\tARG_UNUSED(dev);\n\tdeinit_test_device_initialized = true;\n\treturn 0;\n}\n\n#ifdef CONFIG_DEVICE_DEINIT\nstatic int deinit_test_device_deinit(const struct device *dev)\n{\n\tARG_UNUSED(dev);\n\tdeinit_test_device_initialized = false;\n\treturn 0;\n}\n#endif\n\nDEVICE_DEFINE(deinit_test_device, \"deinit_test_device\",\n\t      deinit_test_device_init,\n#ifdef CONFIG_DEVICE_DEINIT\n\t      deinit_test_device_deinit,\n#else\n\t      NULL,\n#endif\n\t      NULL, NULL, POST_KERNEL, 0, NULL);\n\nZTEST(device, test_deinit_not_supported)\n{\n\tconst struct device *dev = DEVICE_GET(deinit_test_device);\n\tint err;\n\n\tzassert_true(device_is_ready(dev), \"device should be ready\");\n\n#ifdef CONFIG_DEVICE_DEINIT\n\tztest_test_skip();\n#endif\n\n\terr = device_deinit(dev);\n\tzassert_equal(err, -ENOSYS, \"deinit should not be supported\");\n}\n\nZTEST(device, test_deinit_success_and_redeinit)\n{\n\tconst struct device *dev = DEVICE_GET(deinit_test_device);\n\tint err;\n\n#ifndef CONFIG_DEVICE_DEINIT\n\tztest_test_skip();\n#endif\n\n\tzassert_true(device_is_ready(dev), \"device should be ready\");\n\tzassert_true(deinit_test_device_initialized, \"device should be initialized\");\n\n\terr = device_deinit(dev);\n\tzassert_ok(err, \"deinit should succeed\");\n\tzassert_false(device_is_ready(dev), \"device should not be ready\");\n\tzassert_false(deinit_test_device_initialized, \"device should be deinitialized\");\n\n\t/* Re-initialize the device */\n\terr = device_init(dev);\n\tzassert_ok(err, \"re-init should succeed\");\n\tzassert_true(device_is_ready(dev), \"device should be ready again\");\n\tzassert_true(deinit_test_device_initialized, \"device should be initialized again\");\n}\n\nZTEST(device, test_device_api)\n{\n\tconst struct device *const dev_a = DEVICE_GET(dev_a);\n\tconst struct device *const dev_b = DEVICE_GET(dev_b);\n\tconst struct device *const dev_c = DEVICE_GET(dev_c);\n\tconst struct device *const dev_d = DEVICE_GET(dev_d);\n\tconst struct device *const dev_e = DEVICE_GET(dev_e);\n\tconst struct device *const dev_f = DEVICE_GET(dev_f);\n\n\tzassert_true(device_is_ready(dev_a));\n\tzassert_true(device_is_ready(dev_b));\n\tzassert_true(device_is_ready(dev_c));\n\tzassert_true(device_is_ready(dev_d));\n\tzassert_true(device_is_ready(dev_e));\n\tzassert_false(device_is_ready(dev_f));\n}\n\nZTEST(device, test_device_api_extends)\n{\n\tconst struct device *const dev_a = DEVICE_GET(dev_a);\n\tconst struct device *const dev_b = DEVICE_GET(dev_b);\n\n\tzassert_true(device_is_ready(dev_a));\n\tzassert_true(device_is_ready(dev_b));\n\n\tzassert_true(is_device_api_my_api(dev_a));\n\tzassert_true(is_device_api_my_api(dev_b));\n\n\tzassert_false(is_device_api_my_ext_api(dev_a));\n\tzassert_true(is_device_api_my_ext_api(dev_b));\n\n\tconst struct my_ext_api *ext_api = (const struct my_ext_api *)dev_b->api;\n\n\tzassert_equal(ext_api->my_ext_func(dev_b), 1);\n}\n\nZTEST(device, test_device_api_extends_grandchild)\n{\n\tconst struct device *const dev_d = DEVICE_GET(dev_d);\n\n\tzassert_true(device_is_ready(dev_d));\n\n\tzassert_true(is_device_api_my_api(dev_d));\n\tzassert_true(is_device_api_my_ext_api(dev_d));\n\n\tconst struct my_ext_api *ext_api = (const struct my_ext_api *)dev_d->api;\n\n\tzassert_equal(ext_api->my_ext_func(dev_d), 1);\n}\n\nZTEST(device, test_device_api_extends_sibling)\n{\n\tconst struct device *const dev_c = DEVICE_GET(dev_c);\n\tconst struct device *const dev_e = DEVICE_GET(dev_e);\n\n\tzassert_true(device_is_ready(dev_c));\n\tzassert_true(device_is_ready(dev_e));\n\n\tzassert_true(is_device_api_my_api(dev_c));\n\tzassert_true(is_device_api_my_api(dev_e));\n\n\tzassert_false(is_device_api_my_ext_api(dev_c));\n\tzassert_false(is_device_api_my_ext_api(dev_e));\n}\n\nZTEST(device, test_device_init_level)\n{\n\tbool seq_correct = true;\n\tsize_t i;\n\n\tif (init_record_idx != ARRAY_SIZE(expected_order)) {\n\t\tTC_PRINT(\"Wrong number of init calls: %u, expected %u\\n\",\n\t\t\t (unsigned int)init_record_idx,\n\t\t\t (unsigned int)ARRAY_SIZE(expected_order));\n\t\tseq_correct = false;\n\t\tgoto out;\n\t}\n\n\tfor (i = 0; i < ARRAY_SIZE(expected_order); i++) {\n\t\tif (init_record[i] != expected_order[i]) {\n\t\t\tconst struct device *rd = init_record[i];\n\t\t\tconst struct device *ed = expected_order[i];\n\n\t\t\tTC_PRINT(\"Device %u/%u init order wrong\\n\",\n\t\t\t\t (unsigned int)i,\n\t\t\t\t (unsigned int)ARRAY_SIZE(expected_order));\n\t\t\tif (rd != NULL) {\n\t\t\t\tTC_PRINT(\"  Got: %s\\n\", rd->name);\n\t\t\t} else {\n\t\t\t\tTC_PRINT(\"  Got: NULL\\n\");\n\t\t\t}\n\t\t\tif (ed != NULL) {\n\t\t\t\tTC_PRINT(\"  Expected: %s\\n\", ed->name);\n\t\t\t} else {\n\t\t\t\tTC_PRINT(\"  Expected: NULL\\n\");\n\t\t\t}\n\t\t\tseq_correct = false;\n\t\t}\n\t}\n\nout:\n\tzassert_true(seq_correct, \"Device init sequence wrong\");\n}\n\nZTEST_SUITE(device, NULL, NULL, NULL, NULL, NULL);\n"
+          },
+          "applied_files": [
+            "tests/kernel/device/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/device/src/main.c:12:10: fatal error: device_api.h: No such file or directory\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_deinit_not_supported\nPASS - test_deinit_not_supported in 0.000 seconds\n===================================================================\nSTART - test_deinit_success_and_redeinit\nPASS - test_deinit_success_and_redeinit in 0.000 seconds\n===================================================================\nSTART - test_device_api\nPASS - test_device_api in 0.000 seconds\n===================================================================\nSTART - test_device_api_extends\nPASS - test_device_api_extends in 0.000 seconds\n===================================================================\nSTART - test_device_api_extends_grandchild\nPASS - test_device_api_extends_grandchild in 0.000 seconds\n===================================================================\nSTART - test_device_api_extends_sibling\nPASS - test_device_api_extends_sibling in 0.000 seconds\n===================================================================\nSTART - test_device_init_level\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/device/src/main.c:333: device_test_device_init_level: ((seq_correct == true) is false)",
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/b1/inject_thread_priority_swap_device_init_level_cross_boundary",
+    "api_events": [],
+    "started_at": "2026-09-26T06:29:35+00:00",
+    "run_meta": {
+      "code_commit": "538b7706719863a3dea78dc56e2c9df57e2888c9",
+      "code_dirty": false,
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-pro",
+        "pro": "gemini-2.5-pro",
+        "embedding": "models/gemini-embedding-001"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
