@@ -13,6 +13,11 @@
 # delete its result file and run again. Stops on a daily_quota error (see
 # evaluate.py).
 #
+# 環境變數 DEADLINE (epoch 秒) 有設定時，過了這個時間就在下一筆開始前停下
+# (exit 3)，不中斷跑到一半的案例。
+# If DEADLINE (epoch seconds) is set, stops before starting the next case once
+# it has passed (exit 3), never interrupting a case in progress.
+#
 # Usage: tools/run_batch.sh <pipeline> <out_dir> <work_dir> [extra evaluate.py args...]
 set -u
 
@@ -28,6 +33,10 @@ cd "$repo_dir"
 for case_id in $case_ids; do
     result="$out_dir/$case_id.json"
     [ -f "$result" ] && continue
+    if [ -n "${DEADLINE:-}" ] && [ "$(date +%s)" -ge "$DEADLINE" ]; then
+        echo "=== $(date '+%F %T') [$pipeline] deadline reached; stopping before $case_id"
+        exit 3
+    fi
     echo "=== $(date '+%F %T') [$pipeline] $case_id"
     runs_dir="$work_dir/$pipeline"
     "$python" evaluate.py --pipeline "$pipeline" --dataset "$dataset" --case-id "$case_id" \
