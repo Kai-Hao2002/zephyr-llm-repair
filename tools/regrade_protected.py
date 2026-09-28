@@ -90,7 +90,12 @@ def main():
 
     cases = {c["id"]: c for c in evaluate.load_dataset(evaluate.DEFAULT_DATASET_PATH)}
     records = json.load(open(args.results))
-    todo = [r for r in records if r.get("iteration_log") and touches_protected(cases[r["case_id"]], r)]
+    # 當時 patch 套用失敗 (stage == "apply") 的案例沒有建置過，判定本來就是
+    # 失敗，還原規則不影響它們，不需要重新判定。
+    # Cases whose patch failed to apply (stage == "apply") were never built and
+    # already count as failed; the rule cannot change them, so skip them.
+    todo = [r for r in records if r.get("iteration_log") and touches_protected(cases[r["case_id"]], r)
+            and r["iteration_log"][0]["trajectory"]["stage"] != "apply"]
     if args.case_id:
         todo = [r for r in todo if r["case_id"] in args.case_id]
     todo = todo[shard::shards]
