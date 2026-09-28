@@ -42,6 +42,7 @@ from typing import Any, Dict
 from core.state import ZephyrAgentState
 from core.workflow import evaluate_repair_attempt
 from core.trajectory import build_trajectory
+from core.protected_files import pop_restored
 from tools.patch_applier import PatchApplier
 from agents.patch_expert import collect_relevant_context_paths, MAX_PATCH_CONTEXT_CHARS
 from agents.baselines import b1_generate_full_file_patch, b2_generate_patch, b3_generate_patch
@@ -86,6 +87,12 @@ def _iteration_log_entry(current_iter: int, compiled: bool, resolved: bool,
     }
 
 
+def _trajectory(workspace_path: str, stage: str, status: str, **fields) -> Dict[str, Any]:
+    """build_trajectory 加上這一輪被評測端還原的受保護檔案 (見 core/protected_files.py)。
+    build_trajectory plus the protected files the evaluator restored this iteration (see core/protected_files.py)."""
+    return build_trajectory(stage, status, restored_files=pop_restored(workspace_path), **fields)
+
+
 def run_b1(state: ZephyrAgentState) -> Dict[str, Any]:
     """
     B1 Zero-Shot LLM：一次 LLM 呼叫、一次 apply、一次 build，不重試、
@@ -106,7 +113,7 @@ def run_b1(state: ZephyrAgentState) -> Dict[str, Any]:
         print(f"   ❌ Patch application failed: {apply_result['error']}")
         return {
             "final_status": "failed_max_retries", "iterations": 1, "error_type": "patch_format_error",
-            "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry], build_trajectory(
+            "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry], _trajectory(workspace_path,
                 "apply", "patch_format_error", patch=patch, applied_files=apply_result.get("applied_files", []), apply_error=apply_result["error"],
             ))],
         }
@@ -120,7 +127,7 @@ def run_b1(state: ZephyrAgentState) -> Dict[str, Any]:
         "final_status": final_status, "iterations": 1, "error_type": eval_result["status"],
         "iteration_log": [_iteration_log_entry(
             1, eval_result["compiled"], eval_result["resolved"], False, [usage_entry],
-            build_trajectory("run" if eval_result["compiled"] else "build", eval_result["status"], patch=patch,
+            _trajectory(workspace_path, "run" if eval_result["compiled"] else "build", eval_result["status"], patch=patch,
                              applied_files=apply_result["applied_files"],
                              filtered_log=eval_result["log"]),
         )],
@@ -154,7 +161,7 @@ def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
         print(f"   ❌ Patch application failed: {apply_result['error']}")
         return {
             "final_status": "failed_max_retries", "iterations": 1, "error_type": "patch_format_error",
-            "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry], build_trajectory(
+            "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry], _trajectory(workspace_path,
                 "apply", "patch_format_error", patch=patch_text, applied_files=apply_result.get("applied_files", []),
                 apply_error=apply_result["error"], retrieved_files=retrieved_files,
             ))],
@@ -170,7 +177,7 @@ def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
         "final_status": final_status, "iterations": 1, "error_type": eval_result["status"],
         "iteration_log": [_iteration_log_entry(
             1, eval_result["compiled"], eval_result["resolved"], False, [usage_entry],
-            build_trajectory("run" if eval_result["compiled"] else "build", eval_result["status"], patch=patch_text,
+            _trajectory(workspace_path, "run" if eval_result["compiled"] else "build", eval_result["status"], patch=patch_text,
                              applied_files=apply_result["applied_files"],
                              filtered_log=eval_result["log"], retrieved_files=retrieved_files),
         )],
@@ -203,7 +210,7 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
         if not apply_result["success"]:
             print(f"   ❌ Patch application failed: {apply_result['error']}")
             error_log = f"Patch Application Failed:\n{apply_result['error']}"
-            iteration_log.append(_iteration_log_entry(current_iter, False, False, True, [usage_entry], build_trajectory(
+            iteration_log.append(_iteration_log_entry(current_iter, False, False, True, [usage_entry], _trajectory(workspace_path,
                 "apply", "patch_format_error", patch=patch_text, applied_files=apply_result.get("applied_files", []), apply_error=apply_result["error"],
             )))
             if current_iter >= max_iters:
@@ -214,7 +221,7 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
         eval_result = evaluate_repair_attempt(workspace_path, board, target_app, required_pass_test)
         iteration_log.append(_iteration_log_entry(
             current_iter, eval_result["compiled"], eval_result["resolved"], False, [usage_entry],
-            build_trajectory("run" if eval_result["compiled"] else "build", eval_result["status"], patch=patch_text,
+            _trajectory(workspace_path, "run" if eval_result["compiled"] else "build", eval_result["status"], patch=patch_text,
                              applied_files=apply_result["applied_files"], filtered_log=eval_result["log"]),
         ))
         if eval_result["resolved"]:

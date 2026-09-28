@@ -44,6 +44,7 @@ from dotenv import load_dotenv
 
 from core.state import create_initial_state, ZephyrAgentState
 from core.trajectory import clip_text
+from core.protected_files import register as register_protected_files, unregister as unregister_protected_files
 from core.llm_retry import LLMHangError, is_daily_quota, is_transient, pop_events, set_strict_fallbacks
 from core.workflow import build_zephyr_graph, build_devops_docker_cmd
 from core.baseline_pipelines import run_b1, run_b2, run_b3
@@ -444,6 +445,26 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
     dest_dir = os.path.join(runs_dir, case_id)
 
     workspace_path = prepare_broken_workspace(case, dest_dir)
+    # 評測端的受保護檔案：target_app 底下除了被注入的檔案以外都快照起來，每次
+    # 建置前還原 (見 core/protected_files.py)。快照放在 workspace 外面。
+    # Evaluator-side protected files: snapshot everything under target_app except
+    # the injected files, restored before every build (see core/protected_files.py).
+    # The snapshot lives outside the workspace.
+    protected_count = register_protected_files(
+        workspace_path, case.get("target_app", "."),
+        [inj["target_file"] for inj in _normalize_injections(case)],
+        dest_dir.rstrip(os.sep) + ".protected",
+    )
+    logger.info(f"[{case_id}] Snapshotted {protected_count} protected test-app files")
+    try:
+        return _run_case_in_workspace(case, workspace_path, max_iters, skip_repro_check, pipeline, protected_count)
+    finally:
+        unregister_protected_files(workspace_path)
+
+
+def _run_case_in_workspace(case: Dict[str, Any], workspace_path: str, max_iters: int, skip_repro_check: bool,
+                           pipeline: str, protected_count: int) -> Dict[str, Any]:
+    case_id = case["id"]
 
     # repro-check 真的重新 build 一次時順便拿到的即時日誌，優先於資料集
     # 凍結的 initial_error_log 交給 agent 做第一次診斷——見
@@ -541,6 +562,7 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
         # repro-check's filtered live log, or the dataset's recorded
         # initial_error_log), for the error-signal-quality analysis.
         "initial_error_log": clip_text(state["current_error_log"]),
+        "protected_file_count": protected_count,
         "workspace_path": workspace_path,
     }
 

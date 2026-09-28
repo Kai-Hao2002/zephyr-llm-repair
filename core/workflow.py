@@ -39,6 +39,7 @@ from agents.supervisor import (
 )
 from tools.static_checker import StaticChecker
 from core.trajectory import build_trajectory
+from core.protected_files import pop_restored, restore as restore_protected_files
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -176,6 +177,7 @@ def _proposed_trajectory(state: ZephyrAgentState, stage: str, status: str, **fie
         patch=state.get("patch_content", ""),
         analyzer_diagnosis=state.get("analyzer_diagnosis"),
         retrieved_files=state.get("retrieved_files"),
+        restored_files=pop_restored(state.get("workspace_path")),
         **fields,
     )
 
@@ -200,6 +202,11 @@ def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
     once would let a test-deleting shortcut patch be misjudged as a
     successful repair).
     """
+    # 評測端：建置前先把 target_app 底下被 agent 改過的受保護檔案還原 (見
+    # core/protected_files.py)，改測試讓它通過的 patch 因此不會被判定為修好。
+    # Evaluator side: restore protected test-app files the agent changed before
+    # building (see core/protected_files.py), so test-tampering patches can't pass.
+    restore_protected_files(workspace_path)
     docker_cmd, container_name = build_devops_docker_cmd(workspace_path, board, target_app)
     oracle = QemuOracle(timeout=600)
     eval_result = oracle.evaluate(docker_cmd, container_name=container_name, required_pass_test=required_pass_test)
@@ -294,6 +301,7 @@ def static_check_node(state: ZephyrAgentState) -> Dict[str, Any]:
     applied_files = state.get("applied_files", [])
 
     print(f"\n🔍 [StaticCheck] Running static analysis on the patch of iteration {current_iter}...")
+    restore_protected_files(workspace_path)
     checker = StaticChecker()
     result = checker.check(workspace_path, target_app, board, applied_files)
 

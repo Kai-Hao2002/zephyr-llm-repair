@@ -30,14 +30,17 @@ def build_trajectory(stage: str, status: str, *, patch: Any = None, applied_file
                      apply_error: Optional[str] = None, static_check_passed: Optional[bool] = None,
                      static_check_log: Optional[str] = None, filtered_log: Optional[str] = None,
                      conflict_tag: Optional[str] = None, analyzer_diagnosis: Optional[Dict[str, Any]] = None,
-                     retrieved_files=None) -> Dict[str, Any]:
+                     retrieved_files=None, restored_files=None) -> Dict[str, Any]:
     """
     stage：這一輪停在哪一步 ("apply" / "static_check" / "build" / "run")。
     patch：LLM 原始輸出的 SEARCH/REPLACE 文字；B1 則是 {"filepath", "content"}。
+    restored_files：這一輪建置前被評測端還原的受保護檔案 (見 core/protected_files.py)。
     其餘欄位不適用的 pipeline/階段留 None。
 
     stage: where this iteration stopped ("apply" / "static_check" / "build" / "run").
     patch: the LLM's raw SEARCH/REPLACE output; for B1, {"filepath", "content"}.
+    restored_files: protected files the evaluator restored before building this
+    iteration (see core/protected_files.py).
     Fields that don't apply to a pipeline/stage are left None.
     """
     if isinstance(patch, dict):
@@ -56,4 +59,5 @@ def build_trajectory(stage: str, status: str, *, patch: Any = None, applied_file
         "conflict_tag": conflict_tag,
         "analyzer_diagnosis": analyzer_diagnosis,
         "retrieved_files": retrieved_files,
+        "restored_files": restored_files,
     }
