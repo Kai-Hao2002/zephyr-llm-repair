@@ -602,10 +602,17 @@ def collect_run_meta() -> Dict[str, Any]:
             return None
 
     repo_dir = os.path.dirname(os.path.abspath(__file__))
-    dirty = _command_output(["git", "-C", repo_dir, "status", "--porcelain", "--untracked-files=no"])
+    # eval_runs/ 底下是結果檔 (封存、搬移時也會被 git 視為已追蹤檔案的變動)，
+    # 不算程式碼，排除在外；實際不乾淨的路徑另外記在 code_dirty_paths。
+    # eval_runs/ holds result files (archiving/moving them also shows up as
+    # tracked-file changes); they are not code, so they are excluded. The
+    # actual dirty paths are recorded in code_dirty_paths.
+    dirty = _command_output(["git", "-C", repo_dir, "status", "--porcelain", "--untracked-files=no",
+                             "--", ".", ":(exclude)eval_runs"])
     return {
         "code_commit": _command_output(["git", "-C", repo_dir, "rev-parse", "HEAD"]),
         "code_dirty": None if dirty is None else bool(dirty),
+        "code_dirty_paths": None if dirty is None else [line.split(None, 1)[1] for line in dirty.splitlines()],
         "model_provider": get_provider(),
         "single_model": is_single_model(),
         "models": {"fast": get_model_name("fast"), "pro": get_model_name("pro"), "embedding": EMBEDDING_MODEL},
