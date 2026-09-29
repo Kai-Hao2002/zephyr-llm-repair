@@ -30,6 +30,7 @@ mkdir -p "$out_dir" "$work_dir"
 case_ids=$("$python" -c "import json,sys; print('\n'.join(c['id'] for c in json.load(open(sys.argv[1]))))" "$dataset")
 
 cd "$repo_dir"
+recent_errors=()
 for case_id in $case_ids; do
     result="$out_dir/$case_id.json"
     [ -f "$result" ] && continue
@@ -50,5 +51,20 @@ for case_id in $case_ids; do
     summary=$("$python" -c "import json,sys; r=json.load(open(sys.argv[1]))[0]; print(r['final_status'], r.get('error_kind') or '')" "$result")
     echo "    -> $summary"
     case "$summary" in *daily_quota*) echo "!!! daily quota exhausted; stopping"; rm -f "$result"; exit 2;; esac
+    # 連續 3 筆 error other 多半是環境壞了 (例如 2026-09-28 網路中斷時每筆 20 秒
+    # 就失敗)，停下整批並刪掉這幾筆結果，讓它們之後重跑，而不是把整批標成 error。
+    # Three "error other" in a row usually means the environment is broken (e.g.
+    # the 2026-09-28 network outage failed every case within 20s); stop the batch
+    # and delete those results so they rerun, instead of marking the whole batch.
+    if [ "$summary" = "error other" ]; then
+        recent_errors+=("$result")
+        if [ ${#recent_errors[@]} -ge 3 ]; then
+            echo "!!! 3 consecutive 'error other' results; stopping (removed: ${recent_errors[*]})"
+            rm -f "${recent_errors[@]}"
+            exit 4
+        fi
+    else
+        recent_errors=()
+    fi
 done
 echo "=== $(date '+%F %T') [$pipeline] all cases done"

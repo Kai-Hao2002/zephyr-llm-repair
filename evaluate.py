@@ -232,9 +232,15 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
             dest = f"/zephyrproject/zephyr/{container_rel_path}"
             copy_steps.append(f"mkdir -p $(dirname {dest}) && cp {staging_path} {dest}")
 
+    # image 裡本來就有資料集用到的 broken commit 時跳過 git fetch：2026-09-28
+    # 網路中斷時，每筆都在 fetch 這步失敗。產生的 workspace 完全相同，只是
+    # 不再依賴 GitHub。
+    # Skip git fetch when the image already has the broken commit: during the
+    # 2026-09-28 network outage every case failed at this fetch. The resulting
+    # workspace is identical; it just no longer depends on GitHub.
     inner_script = (
         "cd /zephyrproject/zephyr && "
-        f"git fetch origin {broken_commit} && "
+        f"(git cat-file -e {broken_commit}^{{commit}} 2>/dev/null || git fetch origin {broken_commit}) && "
         f"git checkout {broken_commit} && "
         + " && ".join(copy_steps + mutate_cmds)
     )
