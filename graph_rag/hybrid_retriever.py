@@ -42,6 +42,7 @@ _INDEXABLE_EXTENSIONS = (".c", ".h", ".conf", ".dts", ".dtsi", ".overlay")
 # model that actually works — verified with a real embed_query() call
 # first, not guessed from docs.
 EMBEDDING_MODEL = "models/gemini-embedding-001"
+EMBEDDING_API_KEY_ENV = "GEMINI_EMBEDDING_API_KEY"
 
 
 def _is_indexable_file(filename: str) -> bool:
@@ -148,8 +149,16 @@ class HybridRetriever:
             # as agents/analyzer.py: Gemini API calls have been observed to
             # hang with no response at all; without a timeout the caller
             # blocks indefinitely.
+            # 有設定 GEMINI_EMBEDDING_API_KEY 時改用這把專屬金鑰 (另一個開了
+            # 付費的專案)，避開預設金鑰的免費層級每日上限 (每天 1000 次、約 32 次
+            # 檢索)；沒設定就照舊用預設金鑰。同一個模型、同樣的輸入，只影響額度。
+            # Use the dedicated GEMINI_EMBEDDING_API_KEY (a separate billed
+            # project) when set, avoiding the default key's free-tier daily cap
+            # (1000 requests, ~32 retrievals); otherwise keep the default key.
+            # Same model and inputs, so only the quota changes.
+            extra = {"google_api_key": os.environ[EMBEDDING_API_KEY_ENV]} if os.environ.get(EMBEDDING_API_KEY_ENV) else {}
             self._embeddings = GoogleGenerativeAIEmbeddings(
-                model=EMBEDDING_MODEL, request_options={"timeout": 120}
+                model=EMBEDDING_MODEL, request_options={"timeout": 120}, **extra
             )
         return self._embeddings
 

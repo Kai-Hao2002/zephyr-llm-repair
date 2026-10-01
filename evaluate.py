@@ -49,7 +49,7 @@ from core.llm_retry import LLMHangError, is_daily_quota, is_transient, pop_event
 from core.workflow import build_zephyr_graph, build_devops_docker_cmd
 from core.baseline_pipelines import run_b1, run_b2, run_b3
 from core.llm_provider import set_provider, get_provider, set_single_model, is_single_model, get_model_name
-from graph_rag.hybrid_retriever import EMBEDDING_MODEL
+from graph_rag.hybrid_retriever import EMBEDDING_API_KEY_ENV, EMBEDDING_MODEL
 from tools.fault_injector import MUTATE_SCRIPT_HOST_PATH, MUTATE_SCRIPT_CONTAINER_PATH
 from tools.qemu_oracle import QemuOracle
 from tools.log_filter import LogFilter
@@ -616,6 +616,9 @@ def collect_run_meta() -> Dict[str, Any]:
         "model_provider": get_provider(),
         "single_model": is_single_model(),
         "models": {"fast": get_model_name("fast"), "pro": get_model_name("pro"), "embedding": EMBEDDING_MODEL},
+        # 只記錄 embedding 用的是哪一種金鑰，絕不記錄金鑰本身。
+        # Records only which kind of key embeddings use, never the key itself.
+        "embedding_key": "dedicated" if os.environ.get(EMBEDDING_API_KEY_ENV) else "default",
         # `docker image inspect zephyr-sandbox` 在這台 Docker (29.5.3) 上會回報
         # No such image，`docker images` 卻查得到，所以用後者。
         # `docker image inspect zephyr-sandbox` reports "No such image" on this
