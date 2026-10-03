@@ -110,6 +110,17 @@ def test_kernel_aborted_thread_message_is_not_host_abort():
     assert _run(log)["status"] == "success"
 
 
+def test_fault_swallowed_by_test_handler_then_pass_is_not_a_crash():
+    log = (HEAD + "START - test_essential_thread_abort\nASSERTION FAIL [!essential] @ ZEPHYR_BASE/kernel/sched.c:1442\n"
+           "aborted essential thread 0x8060d80\nPASS - test_essential_thread_abort in 0.001 seconds\n" + SUCCESS_TAIL)
+    assert _run(log)["status"] == "success"
+
+
+def test_fault_then_pass_of_other_test_stays_crash():
+    log = (HEAD + "START - test_a\nE: >>> ZEPHYR FATAL ERROR 3: Kernel oops\nPASS - test_b\n" + SUCCESS_TAIL)
+    assert _run(log)["status"] == "crash"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

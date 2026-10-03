@@ -478,6 +478,8 @@ class QemuOracle:
             
             captured_log = ""
             pending_crash = None  # deferrable crash signature awaiting ztest's verdict
+            current_test = None   # last "START - <test>" seen
+            pending_test = None   # test that was running when the pending fault appeared
             result = {"status": "unknown", "log": "", "error_signature": None}
             in_build_phase = False
 
@@ -574,6 +576,19 @@ class QemuOracle:
                             break
 
                         # 1. 檢查是否發生崩潰 (Check for crash)
+                        m_start = re.match(r"START - (\w+)", line)
+                        if m_start:
+                            current_test = m_start.group(1)
+                        if pending_crash:
+                            # 測試自己的 handler 攔下 fault/assert 而沒印 ztest 的 "Caught ..." 時，
+                            # 該測試接著印 PASS 就代表這個 fault 是預期內的 (例如 thread_apis 的
+                            # test_essential_thread_abort)。
+                            # A test-specific handler may swallow the fault without ztest's "Caught ...";
+                            # a PASS for the test that was running means the fault was expected.
+                            if pending_test and re.match(rf"PASS - {re.escape(pending_test)}\b", line):
+                                self.logger.info(f"Fault inside {pending_test} was expected (test passed)")
+                                pending_crash = None
+                                pending_test = None
                         if pending_crash:
                             if self.unexpected_fault_re.search(line):
                                 result["status"] = "crash"
@@ -592,7 +607,8 @@ class QemuOracle:
                                     # but is a definitive test failure; only kernel __ASSERT's uppercase form may be expected.
                                     is_ztest_assert = pattern.pattern == r"ASSERTION FAIL" and "ASSERTION FAIL" not in line
                                     if pattern.pattern in self.deferrable_crash_patterns and not is_ztest_assert:
-                                        pending_crash = pending_crash or pattern.pattern
+                                        if not pending_crash:
+                                            pending_crash, pending_test = pattern.pattern, current_test
                                         break
                                     self.logger.error(f"Runtime crash detected: {pattern.pattern}")
                                     result["status"] = "crash"
