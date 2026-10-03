@@ -160,6 +160,11 @@ def validate(case, oracle, logdir) -> dict:
         rec["notes"].append(f"target_test auto-picked ({'from injected file' if in_inj else 'first PASS in suite'})")
         chk["target_test_defined"] = tt in all_tests if tt else False
     rec["target_test"] = tt
+    if tt and not chk.get("target_test_defined") and tt in passed:
+        # 用其他巨集定義的測試 (grep 抓不到) 只要原始版本有 PASS 就算有定義
+        # Tests declared through other macros count as defined if they PASS on the original
+        chk["target_test_defined"] = True
+        rec["notes"].append("target_test found via PASS line (not matched by ZTEST grep)")
     chk["original_passes_target_test"] = orig["status"] == "success" and bool(tt) and tt in passed
     hard = ["app_exists", "files_exist", "target_test_defined", "mutation_applied", "reproduces_failure",
             "original_passes_target_test"]
