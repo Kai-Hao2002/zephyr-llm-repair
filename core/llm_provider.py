@@ -67,7 +67,12 @@ _DEFAULT_PROVIDER = "gemini"
 # OpenAI pick the model matching each role's intent (cheap & fast vs. the
 # main generation workhorse).
 _MODEL_BY_PROVIDER_AND_ROLE = {
-    "gemini": {"fast": "gemini-2.5-flash", "pro": "gemini-2.5-pro"},
+    # 2026-10-03 起 v3 評測改用 gemini-3.8-flash (寫死確切 ID，不用會自動改指向的
+    # gemini-flash-latest 別名)；v2 用的是 gemini-2.5-pro (已不再開放給新使用者)。
+    # From 2026-10-03 the v3 evaluation uses gemini-3.8-flash (pinned to the exact ID,
+    # not the gemini-flash-latest alias, which can be repointed); v2 used gemini-2.5-pro
+    # (no longer offered to new users).
+    "gemini": {"fast": "gemini-3.8-flash", "pro": "gemini-3.8-flash"},
     "anthropic": {"fast": "claude-haiku-4-5-20251001", "pro": "claude-sonnet-5"},
     "openai": {"fast": "gpt-5-mini", "pro": "gpt-5"},
 }
