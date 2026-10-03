@@ -21,6 +21,19 @@ from core.llm_retry import call_with_retry
 _LOG_PATH_PREFIX = "/zephyrproject/zephyr/"
 _LOG_EXT_PATH_RE = re.compile(re.escape(_LOG_PATH_PREFIX) + r"([\w\-./]+\.(?:c|h|conf|dts|dtsi|overlay))\b")
 _LOG_KCONFIG_PATH_RE = re.compile(re.escape(_LOG_PATH_PREFIX) + r"([\w\-./]+/Kconfig(?:\.\w+)?)\b")
+# 相對路徑寫法 (v3 起)：Zephyr 的 Kconfig 警告寫 "(defined at subsys/fs/fcb/Kconfig:10)"，
+# ztest/__ASSERT 訊息經 -fmacro-prefix-map 改寫成 "WEST_TOPDIR/zephyr/..." 或
+# "ZEPHYR_BASE/..."。v2 只認絕對路徑，kconfig 案例中有 14/20 的 log 寫出了注入檔
+# 卻沒被收進上下文，沒有檢索的 B3 因此 0/20 (見 eval_runs/v2/analysis/failure_report.html 3.4)。
+# Relative path forms (from v3): Kconfig's "(defined at subsys/fs/fcb/Kconfig:10)" and
+# macro-prefix-mapped "WEST_TOPDIR/zephyr/..." / "ZEPHYR_BASE/..." locations. v2 only took
+# absolute paths, so 14/20 kconfig logs named the injected file but it never reached the
+# context (B3, which has no retrieval, scored 0/20).
+_LOG_RELATIVE_PATH_RES = (
+    re.compile(r"\(defined at ([\w\-./]+):\d+\)"),
+    re.compile(r"\bWEST_TOPDIR/zephyr/([\w\-./]+?):\d+"),
+    re.compile(r"\bZEPHYR_BASE/([\w\-./]+?):\d+"),
+)
 
 # 若比對出來的檔案總大小仍然偏大 (例如 target_app 本身就是個檔案很多的大型
 # app)，設一個保守上限並截斷，寧可讓 Patch 用不完整的上下文重試，也不要
@@ -113,6 +126,8 @@ def collect_relevant_context_paths(workspace_path: str, target_app: str, error_l
     candidates = set()
     candidates.update(_LOG_EXT_PATH_RE.findall(error_log))
     candidates.update(_LOG_KCONFIG_PATH_RE.findall(error_log))
+    for rel_re in _LOG_RELATIVE_PATH_RES:
+        candidates.update(rel_re.findall(error_log))
     candidates.update(retrieved_files or [])
 
     target_app_dir = os.path.join(workspace_path, target_app)
