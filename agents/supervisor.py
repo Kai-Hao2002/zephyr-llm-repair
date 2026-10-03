@@ -86,7 +86,8 @@ def _compress_outcome_to_one_sentence(outcome_description: str) -> Tuple[str, Op
         chain = prompt | llm
         response = call_with_retry(lambda: chain.invoke({"outcome": outcome_description}), what="supervisor_compression")
         usage_entry = extract_usage(response, node="supervisor_compression", model=get_model_name("fast"))
-        first_line = response.content.strip().splitlines()[0] if response.content.strip() else ""
+        text = str(response.text)  # gemini-3.x: content may be a list of blocks
+        first_line = text.strip().splitlines()[0] if text.strip() else ""
         return (first_line or outcome_description[:200], usage_entry)
     except Exception as e:
         record_fallback("supervisor_compression", e)

@@ -231,7 +231,9 @@ Please start generating the patch blocks:""")
         "error_log": state.get("current_error_log", "")
     }), what="patch_expert")
 
-    patch_text = response.content
+    # gemini-3.x 的 content 可能是 content block 的 list (含 thinking/signature)，.text 只取文字部分
+    # gemini-3.x may return content as a list of blocks (thinking/signature); .text keeps only the text
+    patch_text = str(response.text)
     usage_entry = extract_usage(response, node="patch_expert", model=get_model_name("pro"))
     print("   ↳ Patch blocks generated successfully!")
     return {

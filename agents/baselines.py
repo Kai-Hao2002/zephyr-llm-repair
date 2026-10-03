@@ -140,7 +140,9 @@ def b2_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
     response = call_with_retry(lambda: chain.invoke({"error_log": error_log, "project_files": project_files_content}),
                                what="b2_single_agent_rag")
     usage_entry = extract_usage(response, node="b2_single_agent_rag", model=get_model_name(_PATCH_ROLE))
-    return response.content, usage_entry
+    # gemini-3.x 的 content 可能是 content block 的 list (含 thinking/signature)，.text 只取文字部分
+    # gemini-3.x may return content as a list of blocks (thinking/signature); .text keeps only the text
+    return str(response.text), usage_entry
 
 
 def b3_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, Dict[str, Any]]:
@@ -177,4 +179,6 @@ def b3_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
     response = call_with_retry(lambda: chain.invoke({"error_log": error_log, "project_files": project_files_content}),
                                what="b3_closed_loop")
     usage_entry = extract_usage(response, node="b3_closed_loop", model=get_model_name(_PATCH_ROLE))
-    return response.content, usage_entry
+    # gemini-3.x 的 content 可能是 content block 的 list (含 thinking/signature)，.text 只取文字部分
+    # gemini-3.x may return content as a list of blocks (thinking/signature); .text keeps only the text
+    return str(response.text), usage_entry
