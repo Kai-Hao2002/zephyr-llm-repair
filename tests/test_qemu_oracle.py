@@ -103,6 +103,13 @@ def test_host_abort_is_a_crash():
     assert _run(HEAD + "START - test_x\nAborted (core dumped)\n")["status"] == "crash"
 
 
+def test_kernel_aborted_thread_message_is_not_host_abort():
+    log = (HEAD + "START - test_essential_thread_abort\nASSERTION FAIL [!essential] @ ZEPHYR_BASE/kernel/sched.c:1442\n"
+           "aborted essential thread 0x8060d80\nCaught assert failed\nAssert error expected as part of test case.\n"
+           "PASS - test_essential_thread_abort\n" + SUCCESS_TAIL)
+    assert _run(log)["status"] == "success"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
