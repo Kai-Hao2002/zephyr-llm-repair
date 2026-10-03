@@ -51,10 +51,12 @@ def _docker_script(case, mutate: bool) -> (str, str):
     name = f"v3val_{case['id'][:40]}_{'mut' if mutate else 'orig'}_{uuid.uuid4().hex[:6]}"
     mounts = f"-v {MUTATE_SCRIPT_HOST_PATH}:{MUTATE_SCRIPT_CONTAINER_PATH}:ro "
     steps = []
+    # extra_files 是測試 app 的一部分 (例如新增的測試檔)，原始版本也要有；只有 mutation 是 bug
+    # extra_files are part of the test app (e.g. an added test), so the original run needs them too
+    for idx, (rel, host) in enumerate(_extra_files(case).items()):
+        mounts += f"-v {_resolve_extra_file_host_path(host)}:/tmp/extra_files/{idx}:ro "
+        steps.append(f"mkdir -p $(dirname /zephyrproject/zephyr/{rel}) && cp /tmp/extra_files/{idx} /zephyrproject/zephyr/{rel}")
     if mutate:
-        for idx, (rel, host) in enumerate(_extra_files(case).items()):
-            mounts += f"-v {_resolve_extra_file_host_path(host)}:/tmp/extra_files/{idx}:ro "
-            steps.append(f"mkdir -p $(dirname /zephyrproject/zephyr/{rel}) && cp /tmp/extra_files/{idx} /zephyrproject/zephyr/{rel}")
         for inj in _normalize_injections(case):
             steps.append(f"python3 {MUTATE_SCRIPT_CONTAINER_PATH} /zephyrproject/zephyr/{inj['target_file']} "
                          f"{_escape_operator(inj['operator'])}")
@@ -168,6 +170,8 @@ def validate(case, oracle, logdir) -> dict:
     chk["original_passes_target_test"] = orig["status"] == "success" and bool(tt) and tt in passed
     hard = ["app_exists", "files_exist", "target_test_defined", "mutation_applied", "reproduces_failure",
             "original_passes_target_test"]
+    if "failure_at_target_test" in chk:
+        hard.append("failure_at_target_test")
     rec["accepted"] = all(chk.get(k) for k in hard)
     if chk.get("failure_at_target_test") is False:
         rec["notes"].append(f"injected run fails at {rec.get('failing_test')}, not at target_test {tt}")
