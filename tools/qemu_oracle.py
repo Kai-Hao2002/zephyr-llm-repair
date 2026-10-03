@@ -367,6 +367,35 @@ class QemuOracle:
         # Compile patterns to regex for faster matching
         self.success_regex = [re.compile(p) for p in self.success_patterns]
         self.crash_regex = [re.compile(p, re.IGNORECASE) for p in self.crash_patterns]
+
+        # 預期內的 fault：userspace/保護機制測試會故意觸發 fault (例如
+        # syscall 參數檢查失敗 -> Kernel oops)，fault handler 照樣印出
+        # ">>> ZEPHYR FATAL ERROR"，接著 ztest 的 k_sys_fatal_error_handler 印
+        # "Caught system error -- reason N 1" + "Fatal error expected as part of
+        # test case." 後測試繼續跑。舊版看到 FATAL 那一行就直接判 crash，QEMU 上
+        # 有 userspace 的測試 (例如 tests/kernel/stack/stack 在 qemu_riscv32)
+        # 因此連原始版本都被誤判為 crash (2026-10-03 v3 pilot 發現)。
+        # 現在 fault handler 類的特徵先記為「待定」，看到 ztest 的預期內訊息就
+        # 取消；看到 "unexpected"、行程結束、或 fault_resolution_timeout 秒內
+        # 沒有新輸出，才判定 crash。
+        # Expected faults: userspace/protection tests deliberately fault; the fault
+        # handler still prints ">>> ZEPHYR FATAL ERROR", then ztest prints
+        # "Caught system error -- reason N 1" and the suite continues. Fault-handler
+        # signatures are now held as pending and cleared by ztest's expected-fault
+        # message; "unexpected", EOF, or no output for fault_resolution_timeout
+        # seconds turns them into a crash.
+        self.deferrable_crash_patterns = {
+            r"Kernel Panic", r"Fatal fault", r"ASSERTION FAIL", r"Usage Fault", r"Bus Fault",
+            r"CPU Page Fault", r"Illegal instruction", r"ZEPHYR FATAL ERROR",
+        }
+        self.expected_fault_re = re.compile(
+            r"Fatal error expected as part of test case|Assert error expected as part of test case"
+            r"|Caught system error -- reason \d+ 1\b|Caught system error -- reason \d+\s*$"
+        )
+        self.unexpected_fault_re = re.compile(
+            r"Fatal error was unexpected|Assert failed was unexpected|Caught system error -- reason \d+ 0\b"
+        )
+        self.fault_resolution_timeout = 30
         self.unsupported_regex = [re.compile(p) for p in self.unsupported_patterns]
         self.completion_success_regex = [re.compile(p) for p in self.completion_success_patterns]
 
@@ -444,6 +473,7 @@ class QemuOracle:
             child = pexpect.spawn(command, encoding='utf-8', timeout=self.timeout)
             
             captured_log = ""
+            pending_crash = None  # deferrable crash signature awaiting ztest's verdict
             result = {"status": "unknown", "log": "", "error_signature": None}
             in_build_phase = False
 
@@ -451,7 +481,7 @@ class QemuOracle:
             while True:
                 try:
                     # 每次讀取一行 (\r\n 處理跨平台換行)
-                    child.expect(r'\r?\n')
+                    child.expect(r'\r?\n', timeout=self.fault_resolution_timeout if pending_crash else -1)
                     line = child.before.strip()
                     if line:
                         captured_log += line + "\n"
@@ -540,12 +570,32 @@ class QemuOracle:
                             break
 
                         # 1. 檢查是否發生崩潰 (Check for crash)
-                        for pattern in self.crash_regex:
-                            if pattern.search(line):
-                                self.logger.error(f"Runtime crash detected: {pattern.pattern}")
+                        if pending_crash:
+                            if self.unexpected_fault_re.search(line):
                                 result["status"] = "crash"
-                                result["error_signature"] = pattern.pattern
-                                break
+                                result["error_signature"] = pending_crash
+                            elif self.expected_fault_re.search(line):
+                                self.logger.info(f"Expected fault in test case, continuing: {line}")
+                                pending_crash = None
+                                continue
+                        if result["status"] != "crash":
+                            for pattern in self.crash_regex:
+                                if pattern.search(line):
+                                    # ztest 的 "Assertion failed at" 也會被 ASSERTION FAIL (不分大小寫) 比對到，
+                                    # 但它是測試失敗本身，照舊立即判 crash；只有 kernel __ASSERT 的大寫
+                                    # "ASSERTION FAIL [...]" 才可能是預期內的。
+                                    # ztest's "Assertion failed at" also matches ASSERTION FAIL (case-insensitive)
+                                    # but is a definitive test failure; only kernel __ASSERT's uppercase form may be expected.
+                                    is_ztest_assert = pattern.pattern == r"ASSERTION FAIL" and "ASSERTION FAIL" not in line
+                                    if pattern.pattern in self.deferrable_crash_patterns and not is_ztest_assert:
+                                        pending_crash = pending_crash or pattern.pattern
+                                        break
+                                    self.logger.error(f"Runtime crash detected: {pattern.pattern}")
+                                    result["status"] = "crash"
+                                    result["error_signature"] = pattern.pattern
+                                    break
+                        if result["status"] == "crash":
+                            self.logger.error(f"Runtime crash detected: {result['error_signature']}")
                         
                         # 如果已經崩潰，跳出迴圈
                         if result["status"] == "crash":
@@ -560,13 +610,19 @@ class QemuOracle:
                         # 完成測試後往往不會自己結束。
                         suite_completed = False
                         for pattern in self.completion_success_regex:
+                            if pattern.search(line) and pending_crash:
+                                # 有未解決的 fault 卻印出成功：保守地照舊判 crash
+                                # Unresolved fault before a success summary: stay conservative (crash)
+                                result["status"] = "crash"
+                                result["error_signature"] = pending_crash
+                                break
                             if pattern.search(line):
                                 self.logger.info("ztest suite completed and passed!")
                                 result["status"] = "success"
                                 suite_completed = True
                                 break
 
-                        if suite_completed:
+                        if suite_completed or result["status"] == "crash":
                             break
 
                         # 2. 檢查是否成功啟動 (Check for success)
@@ -583,7 +639,11 @@ class QemuOracle:
                 except pexpect.TIMEOUT:
                     # 如果 QEMU 卡住且超過指定時間沒有新輸出
                     self.logger.warning(f"QEMU execution timed out ({self.timeout}s).")
-                    result["status"] = "timeout"
+                    if pending_crash:
+                        result["status"] = "crash"
+                        result["error_signature"] = pending_crash
+                    else:
+                        result["status"] = "timeout"
                     break
                 
                 except pexpect.EOF:
@@ -598,7 +658,10 @@ class QemuOracle:
                     # Otherwise this is the build-failed-before-QEMU-ever-
                     # started case, i.e. "eof_no_boot".
                     self.logger.info("Process exited.")
-                    if result["status"] != "success":
+                    if pending_crash:
+                        result["status"] = "crash"
+                        result["error_signature"] = pending_crash
+                    elif result["status"] != "success":
                         result["status"] = "eof_no_boot"
                     break
 

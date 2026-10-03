@@ -172,13 +172,57 @@ class LogFilter:
             extracted_lines.append(f"[... {dup_omitted} duplicate 'fatal error' lines omitted]")
 
         compressed_output = "\n".join(extracted_lines).strip()
-        
+
+        # 程式有開機執行 (看得到開機橫幅) 時，一律附上執行期的尾段：建置期規則
+        # 可能只命中無害的 Kconfig 警告 (例如 MAX_THREAD_BYTES/USERSPACE)，
+        # 舊版因此不再輸出尾段，v2 有 22 筆 runtime_crash 的 assertion 就這樣
+        # 被整段丟掉 (見 eval_runs/v2/analysis/failure_report.html 第 3.1 節)。
+        # When the program booted, always append the runtime tail: build-phase rules
+        # may match only a benign Kconfig warning, and the old code then dropped the
+        # tail - hiding the assertion in 22 v2 runtime_crash cases.
+        if compressed_output:
+            runtime_tail = self._runtime_tail(lines, ansi_escape)
+            if runtime_tail:
+                compressed_output += "\n\n[Runtime Log Tail]\n" + runtime_tail
+
         if not compressed_output:
             self.logger.warning("No standard patterns matched, returning tail.")
             fallback_lines = [ansi_escape.sub('', l).strip() for l in lines[-20:]]
             return "[Fallback Raw Tail]\n" + "\n".join(fallback_lines)
 
         return compressed_output
+
+    _BOOT_BANNER_RE = re.compile(r"\*\*\* Booting Zephyr OS")
+    _TEST_START_RE = re.compile(r"^START - \w+")
+    _FAILURE_RE = re.compile(r"Assertion failed|ASSERTION FAIL|^FAIL - |ZEPHYR FATAL ERROR|Segmentation fault|Fault")
+    runtime_tail_max_lines = 40
+
+    def _runtime_tail(self, lines: List[str], ansi_escape) -> str:
+        """開機橫幅之後的輸出：從最後一個 `START - <test>` 開始 (最多 40 行)，
+        沒有 ztest 輸出時取最後 20 行；沒開機則回傳空字串。
+        Output after the boot banner: from the last `START - <test>` line (max 40
+        lines), or the last 20 lines when there is no ztest output; '' if never booted."""
+        boot_idx = None
+        for i, l in enumerate(lines):
+            if self._BOOT_BANNER_RE.search(l):
+                boot_idx = i
+        if boot_idx is None:
+            return ""
+        run = [ansi_escape.sub('', l).strip() for l in lines[boot_idx:]]
+        run = [l for l in run if l]
+        # 有失敗訊息時，從第一個失敗之前最近的 START 開始；否則從最後一個 START 開始。
+        # With a failure marker, start at the START line preceding the first failure;
+        # otherwise at the last START line.
+        first_fail = next((i for i, l in enumerate(run) if self._FAILURE_RE.search(l)), None)
+        search_end = first_fail + 1 if first_fail is not None else len(run)
+        start = None
+        for i, l in enumerate(run[:search_end]):
+            if self._TEST_START_RE.match(l):
+                start = i
+        tail = run[start:] if start is not None else run[-20:]
+        if len(tail) > self.runtime_tail_max_lines:
+            tail = tail[:self.runtime_tail_max_lines // 2] + ["[...]"] + tail[-self.runtime_tail_max_lines // 2:]
+        return "\n".join(tail)
 
 
 # ==========================================

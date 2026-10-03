@@ -70,6 +70,53 @@ def test_plain_c_error_and_unrelated_error_line_behaviour_unchanged():
     assert "RPC failed" not in out
 
 
+BENIGN_KCONFIG_THEN_ASSERT = (
+    "warning: MAX_THREAD_BYTES (defined at arch/Kconfig:410) was assigned the value '3' but got the value\n"
+    "''. Check these unsatisfied dependencies: USERSPACE (=n). See\n"
+    "Parsing /zephyrproject/zephyr/Kconfig\n"
+    "[110/111] Running utility command for native_runner_executable\n"
+    "*** Booting Zephyr OS build v4.3.0-9263-g5286027c8594 ***\n"
+    "Running TESTSUITE semaphore\n"
+    "START - test_k_sem_correct_count_limit\n"
+    "Assertion failed at WEST_TOPDIR/zephyr/tests/kernel/semaphore/semaphore/src/main.c:776: "
+    "semaphore_test_k_sem_correct_count_limit: (_act not equal to _exp)\n"
+)
+
+
+def test_runtime_tail_kept_when_benign_kconfig_warning_matches():
+    # v2 bug: the warning matched, so the tail (with the assertion) was dropped.
+    out = LogFilter().compress_log(BENIGN_KCONFIG_THEN_ASSERT)
+    assert "MAX_THREAD_BYTES" in out
+    assert "[Runtime Log Tail]" in out
+    assert "START - test_k_sem_correct_count_limit" in out
+    assert "main.c:776" in out
+    assert "Running utility command" not in out
+
+
+def test_no_runtime_tail_for_build_failures():
+    out = LogFilter().compress_log(MISSING_HEADER + NINJA)
+    assert "[Runtime Log Tail]" not in out
+
+
+def test_runtime_tail_is_capped():
+    log = (BENIGN_KCONFIG_THEN_ASSERT
+           + "".join(f"E:      a{i}: 0000000{i}\n" for i in range(100))
+           + "E: >>> ZEPHYR FATAL ERROR 3: Kernel oops on CPU 0\n")
+    out = LogFilter().compress_log(log)
+    tail = out.split("[Runtime Log Tail]\n", 1)[1].splitlines()
+    assert len(tail) <= LogFilter.runtime_tail_max_lines + 1
+    assert tail[0].startswith("START - ") and "ZEPHYR FATAL ERROR" in tail[-1]
+
+
+def test_runtime_tail_starts_at_first_failing_test():
+    log = (BENIGN_KCONFIG_THEN_ASSERT + "FAIL - test_k_sem_correct_count_limit\n"
+           + "".join(f"START - test_{i}\nPASS - test_{i}\n" for i in range(5))
+           + "PROJECT EXECUTION FAILED\n")
+    tail = LogFilter().compress_log(log).split("[Runtime Log Tail]\n", 1)[1]
+    assert tail.startswith("START - test_k_sem_correct_count_limit")
+    assert "main.c:776" in tail
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
