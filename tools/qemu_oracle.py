@@ -166,7 +166,11 @@ class QemuOracle:
             r"Bus Fault",
             r"CPU Page Fault",
             r"Segmentation fault",
-            r"Aborted",
+            # 主機端 SIGABRT：bash 印 "Aborted (core dumped)" 或 "<行號>: <pid> Aborted ..."。
+            # 舊版的 r"Aborted" 不分大小寫，連 log 內文 "Enrollment aborted" 都會命中 (2026-10-03 v3 驗證發現)。
+            # Host-side SIGABRT only ("Aborted (core dumped)" / "<pid> Aborted ..."); the old bare,
+            # case-insensitive r"Aborted" also matched log text such as "Enrollment aborted".
+            r"(?:^|\d\s+)Aborted\b",
             r"Illegal instruction",
             r"PROJECT EXECUTION FAILED",
             # 20th systemic pipeline bug: 上面六個具名硬體錯誤字串

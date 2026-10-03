@@ -91,6 +91,18 @@ def test_kernel_assert_with_expected_hook_continues():
     assert _run(log)["status"] == "success"
 
 
+def test_aborted_in_log_text_is_not_a_crash():
+    log = (HEAD + "START - test_capture_timeout\n<inf> biometrics_emul: Enrollment aborted\n"
+           "PASS - test_capture_timeout\n" + SUCCESS_TAIL)
+    assert _run(log)["status"] == "success"
+
+
+def test_host_abort_is_a_crash():
+    log = HEAD + "START - test_x\nbash: line 1:  42 Aborted                 (core dumped) ./zephyr.exe\n"
+    assert _run(log)["status"] == "crash"
+    assert _run(HEAD + "START - test_x\nAborted (core dumped)\n")["status"] == "crash"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
