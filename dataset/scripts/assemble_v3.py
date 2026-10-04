@@ -25,12 +25,14 @@ from tools.log_filter import LogFilter  # noqa: E402
 V = "dataset/v3/"
 CANDIDATE_FILES = sorted(glob.glob(V + "candidates/*.json"))
 VALIDATION_FILES = [V + "validation/pilot_validation.json", V + "validation/pilot_validation_fixed.json",
-                    V + "validation/migrated_validation.json", V + "validation/new_validation.json"]
+                    V + "validation/migrated_validation.json", V + "validation/new_validation.json",
+                    V + "validation/fix_validation.json"]
 LOG_DIRS = [os.path.expanduser(p) for p in ("~/zephyr-eval-work/v3_pilot/logs_fixed", "~/zephyr-eval-work/v3_pilot/logs",
-                                             "~/zephyr-eval-work/v3_migrate/logs", "~/zephyr-eval-work/v3_new/logs")]
+                                             "~/zephyr-eval-work/v3_migrate/logs", "~/zephyr-eval-work/v3_new/logs",
+                                             "~/zephyr-eval-work/v3_fix/logs")]
 FAIL_MARK = re.compile(r"Assertion failed|FAIL - |ZEPHYR FATAL|Segmentation fault|Fault|Aborted", re.I)
 KEEP = ("id", "category", "broken_commit", "fixed_commit", "target_app", "board", "injection", "injections",
-        "extra_files", "v2_source", "source", "retry_of")
+        "extra_files", "v2_source", "source", "retry_of", "fix_reason")
 
 
 def injections(c):
@@ -59,6 +61,10 @@ def main():
             for r in json.load(open(f)):
                 if r.get("accepted"):
                     accepted[r["id"]] = r  # later files (fixed re-runs) win
+    # 通過驗證的重試/修正版 (retry_of) 取代原案例 / an accepted retry or fix supersedes its original
+    superseded = {cands[cid].get("retry_of") for cid in accepted if cands.get(cid, {}).get("retry_of")}
+    for cid in superseded & set(accepted):
+        del accepted[cid]
     out, problems = [], []
     for cid, r in sorted(accepted.items()):
         c = cands[cid]
