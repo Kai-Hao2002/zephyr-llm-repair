@@ -30,11 +30,22 @@
 3. `gold_patch_check.py`：把注入檔換回原始內容後，走 `prepare_broken_workspace` → 受保護檔案 →
    `evaluate_repair_attempt`，119/119 判為 resolved。
 
-## 已知限制與缺陷（2026-10-04 稽核）
+## 稽核與修正（2026-10-04）
 
-見 `final_dataset_v3.json` 的稽核報告（對話紀錄 / 指導教授報告）。摘要：
-- 6 筆 `dts_break_phandle` 把標籤改成 `<label>_broken_ref`，錯誤訊息直接露出這個字尾。
-- 5 筆 v2 自製測試的名稱含 `offbyone` / `oob`，透露錯誤類型。
-- kconfig 與 compound 的 Kconfig 部分全部是 `kconfig_invert_depends`（`depends on !X`），c_syntax 有 14/19 是刪右大括號。
-- 19 筆 runtime 案例依賴排程/時序（`c_api_substitute`、`thread_priority_swap`），注入版本只重現過一次，未量測 flakiness。
-- 模組固定為 image 快照（2026-08），早期 commit 搭配的不是當時的模組版本；只涵蓋 2026-03-17 之後（SDK 1.0 限制）。
+| 問題 | 處理 | 結果 |
+|---|---|---|
+| 6 筆 `dts_break_phandle` 的 `_broken_ref` 字尾出現在 dtc 錯誤訊息 | 改成自然的拼字錯誤標籤（`dts_break_phandle:<label>=><typo>`） | 已修，log 中不再出現 |
+| 5 筆 v2 自製測試名稱含 `offbyone`/`oob` | v3 專用副本 `scripts/injection_assets_v3/`，改成中性名稱（v2 原檔不動） | 已修 |
+| Kconfig 部分全是 `depends on !X`；c_syntax 14/19 刪右大括號 | 新增 `kconfig_typo_depends`、`c_typo_identifier`、`c_remove_semicolon` 指定敘述句；改 16 筆 | Kconfig 部分 14/5/4，c_syntax 7/6/4/2 |
+| 19 筆時序/排程類 runtime 案例可能不穩定 | `tools/flaky_check.py`：注入版跑 3 次、原始版再跑 2 次 | 19/19 穩定（`stability/flaky_check.json`） |
+
+修正後的 27 筆以 `_fx` 結尾（`retry_of` 指回原案例，`fix_reason` 記錄原因），全部重新驗證並通過標準答案檢查。
+最終 119 筆的標準答案檢查：119/119 resolved（`gold/gold_check.json`）。
+
+## 仍存在的限制
+
+- `c_typo_identifier` 的錯誤會出現 gcc 的 `did you mean '...'?` 建議，屬於真實編譯器行為，但這幾筆較容易。
+- compound 的 Kconfig 部分仍全為 `kconfig_invert_depends`（8 筆）。
+- 類別比例略少於目標（kconfig 15/16、compound 12/13）。
+- 模組固定為 image 快照（2026-08），只涵蓋 2026-03-17 之後的 commit（SDK 1.0 限制），ARM 只在 2026-05-07 之後。
+- 非時序類的 runtime 案例（44 筆）注入版本只各重現 1 次（驗證）+ 評測時的 repro 檢查；未另外量測穩定性。
