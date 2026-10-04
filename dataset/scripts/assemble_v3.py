@@ -23,10 +23,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from tools.log_filter import LogFilter  # noqa: E402
 
 V = "dataset/v3/"
-CANDIDATE_FILES = sorted(glob.glob(V + "*candidates*.json") + glob.glob(V + "migrated_batch*.json")
-                         + glob.glob(V + "migrated_retry*.json") + glob.glob(V + "new_retry*.json"))
-VALIDATION_FILES = [V + "pilot_validation.json", V + "pilot_validation_fixed.json",
-                    V + "migrated_validation.json", V + "new_validation.json"]
+CANDIDATE_FILES = sorted(glob.glob(V + "candidates/*.json"))
+VALIDATION_FILES = [V + "validation/pilot_validation.json", V + "validation/pilot_validation_fixed.json",
+                    V + "validation/migrated_validation.json", V + "validation/new_validation.json"]
 LOG_DIRS = [os.path.expanduser(p) for p in ("~/zephyr-eval-work/v3_pilot/logs_fixed", "~/zephyr-eval-work/v3_pilot/logs",
                                              "~/zephyr-eval-work/v3_migrate/logs", "~/zephyr-eval-work/v3_new/logs")]
 FAIL_MARK = re.compile(r"Assertion failed|FAIL - |ZEPHYR FATAL|Segmentation fault|Fault|Aborted", re.I)

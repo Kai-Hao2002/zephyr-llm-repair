@@ -20,10 +20,10 @@ import sys
 import networkx as nx
 
 V2 = "dataset/cases/final_dataset.json"
-PILOT = "dataset/v3/pilot_validation.json"
-PILOT_FIXED = "dataset/v3/pilot_validation_fixed.json"
-PILOT_CANDS = ["dataset/v3/pilot_candidates.json", "dataset/v3/pilot_candidates_r2.json",
-               "dataset/v3/pilot_candidates_r3.json"]
+PILOT = "dataset/v3/validation/pilot_validation.json"
+PILOT_FIXED = "dataset/v3/validation/pilot_validation_fixed.json"
+PILOT_CANDS = ["dataset/v3/candidates/pilot_candidates.json", "dataset/v3/candidates/pilot_candidates_r2.json",
+               "dataset/v3/candidates/pilot_candidates_r3.json"]
 TARGET = {"dts": 10, "compound": 13, "kconfig": 16, "c_syntax": 19, "runtime_crash": 62}
 WEIGHT = {"dts": -10, "compound": -8, "kconfig": -6, "c_syntax": -2, "runtime_crash": -3}
 QEMU_BOARDS = ["qemu_x86", "qemu_riscv32", "qemu_cortex_m3"]
