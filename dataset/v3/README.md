@@ -42,10 +42,17 @@
 修正後的 27 筆以 `_fx` 結尾（`retry_of` 指回原案例，`fix_reason` 記錄原因），全部重新驗證並通過標準答案檢查。
 最終 119 筆的標準答案檢查：119/119 resolved（`gold/gold_check.json`）。
 
+## 2026-10-04 晚間補強
+
+- 非時序類 44 筆 runtime 也做了穩定性檢查（注入版 3 次、原始版 1 次）：runtime 全部 63/63 穩定。
+- 模組版本抽樣（6 筆，`west update` 對齊 case commit 的 manifest，2–41 個模組版本不同）：結果全部相同（`stability/module_check.json`）。
+- compound 的 Kconfig 部分改 4 筆為 `kconfig_typo_depends`；補 kconfig adt7420、compound dma_emul。
+- 依使用者要求把 dts、compound 各補到 18 筆（新 app：gpio_hogs、pwm_api、adc_rescale、flow_meter、hc-sr04、rtc/shell、led_api、ina228；
+  regulator、gnss_api、eeprom/shell、can/shell、comparator/shell）。多出的 1 筆備用 dts 列在 `validation/excluded.json`。
+- 最終 134 筆：runtime 63、c_syntax 19、compound 18、dts 18、kconfig 16；QEMU 27.6%；標準答案檢查 134/134。
+
 ## 仍存在的限制
 
-- `c_typo_identifier` 的錯誤會出現 gcc 的 `did you mean '...'?` 建議，屬於真實編譯器行為，但這幾筆較容易。
-- compound 的 Kconfig 部分仍全為 `kconfig_invert_depends`（8 筆）。
-- 類別比例略少於目標（kconfig 15/16、compound 12/13）。
-- 模組固定為 image 快照（2026-08），只涵蓋 2026-03-17 之後的 commit（SDK 1.0 限制），ARM 只在 2026-05-07 之後。
-- 非時序類的 runtime 案例（44 筆）注入版本只各重現 1 次（驗證）+ 評測時的 repro 檢查；未另外量測穩定性。
+- `c_typo_identifier` 的錯誤會出現 gcc 的 `did you mean '...'?` 建議（4 筆，屬真實編譯器行為，視為簡單組）。
+- 模組固定為 image 快照（2026-08），只涵蓋 2026-03-17 之後的 commit（SDK 1.0 限制），ARM 只在 2026-05-07 之後；抽樣顯示不影響結果。
+- 新增的 dts/compound 多為 native_sim 上的 fake/emul 驅動，QEMU 比例因此降到 27.6%。
