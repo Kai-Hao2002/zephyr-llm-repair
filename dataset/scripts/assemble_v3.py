@@ -26,10 +26,13 @@ V = "dataset/v3/"
 CANDIDATE_FILES = sorted(glob.glob(V + "candidates/*.json"))
 VALIDATION_FILES = [V + "validation/pilot_validation.json", V + "validation/pilot_validation_fixed.json",
                     V + "validation/migrated_validation.json", V + "validation/new_validation.json",
-                    V + "validation/fix_validation.json"]
+                    V + "validation/fix_validation.json", V + "validation/expand_validation.json"]
+# 刻意不收的已通過案例 (例如超出類別目標的備用案例)：{"id": "reason"}
+# Accepted cases deliberately left out (e.g. spares beyond a category target): {"id": "reason"}
+EXCLUDED_FILE = V + "validation/excluded.json"
 LOG_DIRS = [os.path.expanduser(p) for p in ("~/zephyr-eval-work/v3_pilot/logs_fixed", "~/zephyr-eval-work/v3_pilot/logs",
                                              "~/zephyr-eval-work/v3_migrate/logs", "~/zephyr-eval-work/v3_new/logs",
-                                             "~/zephyr-eval-work/v3_fix/logs")]
+                                             "~/zephyr-eval-work/v3_fix/logs", "~/zephyr-eval-work/v3_expand/logs")]
 FAIL_MARK = re.compile(r"Assertion failed|FAIL - |ZEPHYR FATAL|Segmentation fault|Fault|Aborted", re.I)
 KEEP = ("id", "category", "broken_commit", "fixed_commit", "target_app", "board", "injection", "injections",
         "extra_files", "v2_source", "source", "retry_of", "fix_reason")
@@ -65,6 +68,9 @@ def main():
     superseded = {cands[cid].get("retry_of") for cid in accepted if cands.get(cid, {}).get("retry_of")}
     for cid in superseded & set(accepted):
         del accepted[cid]
+    if os.path.exists(EXCLUDED_FILE):
+        for cid in json.load(open(EXCLUDED_FILE)):
+            accepted.pop(cid, None)
     out, problems = [], []
     for cid, r in sorted(accepted.items()):
         c = cands[cid]
