@@ -38,6 +38,7 @@ from tools.log_filter import LogFilter  # noqa: E402
 from tools.qemu_oracle import QemuOracle  # noqa: E402
 
 _ZTEST_RE = re.compile(r"\bZTEST(?:_USER|_F|_USER_F|_EXPECT_FAIL|_EXPECT_SKIP)?\s*\(\s*\w+\s*,\s*(\w+)")
+WEST_UPDATE = False
 _CRASH_MARKERS = re.compile(r"Assertion failed|FAIL - |FATAL ERROR|>>> ZEPHYR FATAL|Segmentation fault|Bus Fault|Hard Fault|panic", re.I)
 
 
@@ -60,7 +61,12 @@ def _docker_script(case, mutate: bool) -> (str, str):
         for inj in _normalize_injections(case):
             steps.append(f"python3 {MUTATE_SCRIPT_CONTAINER_PATH} /zephyrproject/zephyr/{inj['target_file']} "
                          f"{_escape_operator(inj['operator'])}")
-    script = (f"cd /zephyrproject/zephyr && git checkout -q {case['broken_commit']} && "
+    # --west-update：先把模組對齊到該 commit 的 manifest (只用於驗證「模組快照不影響結果」，
+    # 評測本身一律用 image 內的模組快照)。
+    # --west-update: align modules with the commit's manifest first (only to check that the
+    # image's module snapshot does not change outcomes; evaluation always uses the snapshot).
+    west_update = "west update --narrow -o=--depth=1 > /tmp/west_update.log 2>&1 && " if WEST_UPDATE else ""
+    script = (f"cd /zephyrproject/zephyr && git checkout -q {case['broken_commit']} && " + west_update
               + "".join(s + " && " for s in steps)
               + f"cd /zephyrproject/zephyr/{case['target_app']} && "
               f"west build -b {case['board']} -d /tmp/build -p always -t run .")
@@ -184,7 +190,11 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--logs", default=os.path.expanduser("~/zephyr-eval-work/v3_pilot/logs"))
     ap.add_argument("--only", nargs="*")
+    ap.add_argument("--west-update", action="store_true",
+                    help="align modules with the case commit's manifest before building (module-snapshot check)")
     args = ap.parse_args()
+    global WEST_UPDATE
+    WEST_UPDATE = args.west_update
     os.makedirs(args.logs, exist_ok=True)
     cases = json.load(open(args.candidates))
     if args.only:
