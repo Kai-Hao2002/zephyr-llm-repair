@@ -30,6 +30,7 @@ from the start rather than retrofitted:
 import argparse
 import json
 import logging
+import hashlib
 import os
 import re
 import shutil
@@ -622,6 +623,11 @@ def collect_run_meta() -> Dict[str, Any]:
         # Docker (29.5.3) while `docker images` finds it, so use the latter.
         "docker_image_id": _command_output(["docker", "images", "zephyr-sandbox", "--no-trunc", "--format", "{{.ID}}"]),
         "strict_fallbacks": True,
+        # 用了哪把 Gemini 金鑰 (只記 SHA-256 前 8 碼，不記金鑰本身)；額度用完會換金鑰
+        # (tools/run_with_key_rotation.sh)。Which Gemini key was used (first 8 hex of its
+        # SHA-256 only, never the key); keys rotate when a daily quota runs out.
+        "gemini_key_fingerprint": (hashlib.sha256(os.environ["GEMINI_API_KEY"].encode()).hexdigest()[:8]
+                                   if os.environ.get("GEMINI_API_KEY") else None),
         "sdk_versions": {p: _version(p) for p in ("langchain-core", "langgraph", "langchain-google-genai",
                                                    "google-genai", "langchain-anthropic", "langchain-openai")},
     }
