@@ -65,6 +65,24 @@ def _kconfig_remove_select(content: str, hint: Optional[str] = None) -> Optional
     return new_content if n else None
 
 
+def _kconfig_typo_depends(content: str, hint: Optional[str] = None) -> Optional[str]:
+    """(v3) 把 `config <BLOCK>` 區塊內第一個 `depends on <SYM>` 的符號拼錯 (未定義的符號視為 n，
+    依賴無法滿足)。hint="<BLOCK>=><TYPO_SYM>"。
+    (v3) Misspell the symbol of the first `depends on <SYM>` in `config <BLOCK>` (an undefined
+    symbol evaluates to n). hint="<BLOCK>=><TYPO_SYM>"."""
+    if not hint or "=>" not in hint:
+        return None
+    block_name, typo = hint.split("=>", 1)
+    block = _find_config_block(content, block_name)
+    if block is None:
+        return None
+    start, end = block
+    m = re.compile(r'^([ \t]*depends on\s+)([A-Za-z0-9_]+)', re.MULTILINE).search(content, start, end)
+    if not m:
+        return None
+    return content[:m.start(2)] + typo + content[m.end(2):]
+
+
 def _kconfig_invert_depends(content: str, hint: Optional[str] = None) -> Optional[str]:
     """把 `depends on <SYMBOL>` 反轉成 `depends on !<SYMBOL>`，讓原本能被
     滿足的依賴關係變成無法被滿足。有給 hint 時，hint 是要鎖定的
@@ -108,6 +126,16 @@ def _dts_break_phandle(content: str, hint: Optional[str] = None) -> Optional[str
     """把 `&label` phandle 參照改成一個不存在的標籤，模擬節點參照錯誤。有給
     hint 時只鎖定 `&hint` 這個特定的參照，沒給 hint 時退回原本「抓第一個」
     的行為。"""
+    # hint="<label>=><new_label>" (v3)：改成指定的錯誤標籤 (例如自然的拼字錯誤)。預設的
+    # "_broken_ref" 字尾會直接出現在 dtc 錯誤訊息裡，等於把答案告訴 agent。
+    # hint="<label>=><new_label>" (v3): use the given wrong label (e.g. a natural typo). The
+    # default "_broken_ref" suffix shows up verbatim in dtc's error and gives the fix away.
+    if hint and "=>" in hint:
+        old, new = hint.split("=>", 1)
+        m = re.search(r'&(' + re.escape(old) + r')\b', content)
+        if not m:
+            return None
+        return content[:m.start()] + f"&{new}" + content[m.end():]
     label_pattern = re.escape(hint) if hint else r'[A-Za-z_][A-Za-z0-9_]*'
     pattern = re.compile(r'&(' + label_pattern + r')\b')
     m = pattern.search(content)
@@ -357,7 +385,21 @@ def _dts_reg_offbyone(content: str, hint: Optional[str] = None) -> Optional[str]
 # ============================================================
 
 def _c_remove_semicolon(content: str, hint: Optional[str] = None) -> Optional[str]:
-    """刪掉第一個以 `);` 結尾的函式呼叫敘述句的分號，製造編譯期語法錯誤。"""
+    """刪掉第一個以 `);` 結尾的函式呼叫敘述句的分號，製造編譯期語法錯誤。
+
+    hint="<text ending in ;>[#N]" (v3)：刪掉指定敘述句 (第 N 次出現) 的分號。預設會抓到
+    檔案層級的 K_THREAD_DEFINE(...); 之類巨集，刪了分號仍能編譯。
+    hint="<text ending in ;>[#N]" (v3): drop the ';' of that exact statement (Nth occurrence).
+    The default can hit file-scope macros such as K_THREAD_DEFINE(...); that still compile."""
+    if hint:
+        text, n = _parse_occurrence_suffix(hint)
+        if not text.endswith(";"):
+            return None
+        idx = _find_nth_occurrence(content, text, n, 0, len(content))
+        if idx == -1:
+            return None
+        end = idx + len(text)
+        return content[:end - 1] + content[end:]
     pattern = re.compile(r'(\)\s*);(\s*\n)')
     m = pattern.search(content)
     if not m:
@@ -381,6 +423,22 @@ def _c_typo_macro(content: str, hint: Optional[str] = None) -> Optional[str]:
     if not m:
         return None
     return content[:m.start()] + "DT_NODELABE" + content[m.end():]
+
+
+def _c_typo_identifier(content: str, hint: Optional[str] = None) -> Optional[str]:
+    """(v3) 把指定的識別字 (通常是函式呼叫) 改成拼錯的名稱，製造 implicit declaration /
+    undeclared 編譯錯誤。hint="<old>[#N]:<new>"，old/new 都是完整識別字。
+    (v3) Misspell an identifier (usually a function call) -> implicit declaration / undeclared
+    error. hint="<old>[#N]:<new>" with whole identifiers."""
+    if not hint or ":" not in hint:
+        return None
+    old_part, new = hint.split(":", 1)
+    old, n = _parse_occurrence_suffix(old_part)
+    matches = list(re.finditer(r'\b' + re.escape(old) + r'\b', content))
+    if len(matches) < n:
+        return None
+    m = matches[n - 1]
+    return content[:m.start()] + new + content[m.end():]
 
 
 # ============================================================
@@ -983,6 +1041,7 @@ def _c_api_substitute(content: str, hint: Optional[str] = None) -> Optional[str]
 MUTATION_OPERATORS: Dict[str, Callable[..., Optional[str]]] = {
     "kconfig_remove_select": _kconfig_remove_select,
     "kconfig_invert_depends": _kconfig_invert_depends,
+    "kconfig_typo_depends": _kconfig_typo_depends,
     "dts_remove_compatible": _dts_remove_compatible,
     "dts_break_phandle": _dts_break_phandle,
     "dts_redirect_phandle": _dts_redirect_phandle,
@@ -992,6 +1051,7 @@ MUTATION_OPERATORS: Dict[str, Callable[..., Optional[str]]] = {
     "c_remove_semicolon": _c_remove_semicolon,
     "c_remove_closing_brace": _c_remove_closing_brace,
     "c_typo_macro": _c_typo_macro,
+    "c_typo_identifier": _c_typo_identifier,
     "runtime_off_by_one": _runtime_off_by_one,
     "runtime_remove_null_check": _runtime_remove_null_check,
     "runtime_double_free": _runtime_double_free,
