@@ -35,6 +35,15 @@ def test_kconfig_typo_depends_only_in_block():
     assert out.endswith("config OTHER\n\tdepends on FLASH_MAP\n")
 
 
+def test_restore_blob_replaces_whole_file():
+    import base64, gzip
+    pre = "int f(int *p)\n{\n\treturn *p;\n}\n"
+    blob = base64.b64encode(gzip.compress(pre.encode())).decode()
+    assert OPERATORS["restore_blob"]("int f(int *p)\n{\n\treturn p ? *p : 0;\n}\n", blob) == pre
+    assert OPERATORS["restore_blob"](pre, blob) is None  # no-op
+    assert OPERATORS["restore_blob"](pre, "not base64!") is None
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):

@@ -19,9 +19,10 @@
 | `gold/gold_check_first_attempt_failures.json` | 兩筆第一次因環境失敗、重跑通過的紀錄 | 同上 |
 | `candidates/compound_replace.json`、`candidates/relabel_ltc2959.json` | 2026-10-05 稽核：取代 4 筆單一注入的 compound、ltc2959 重新驗證 | 手動 |
 | `gold/compound_fix_gold.json` | 上述 5 筆的標準答案檢查 | `tools/gold_patch_check.py` |
+| `candidates/real_bug_candidates.json`、`validation/real_bug_validation.json`、`gold/real_bug_gold.json`、`stability/real_bug_flaky_check.json` | 真實 bug 對照集（見下） | 手動挖掘 + 同上工具 |
 | `eval/eval_pilot_cases.json` | 正式評測試跑用的 2 筆 | 手動 |
 
-原始 build/run log 不在 repo 內：`~/zephyr-eval-work/v3_{pilot,migrate,new,fix,expand,qemucfg,compfix}/logs/`。
+原始 build/run log 不在 repo 內：`~/zephyr-eval-work/v3_{pilot,migrate,new,fix,expand,qemucfg,compfix,real}/logs/`。
 `assemble_v3.py` 會從這些 log 重新壓縮 `initial_error_log`。
 
 ## 驗證流程（每筆都通過）
@@ -73,6 +74,23 @@
 
 compound 現在 19 筆全部是 Kconfig + DTS 雙注入、全部在建置期失敗：
 typo+remove_compatible 8、invert+remove_compatible 6、typo+break_phandle 3、invert+break_phandle 1、invert+corrupt_reg 1。
+
+## 真實 bug 對照集（2026-10-05）
+
+`dataset/cases/real_bugs_v3.json`，11 筆，由 `dataset/scripts/assemble_real_v3.py` 產生。用途是外部效度對照
+（合成注入上的 pipeline 排名在真實 bug 上是否一致），**不併入主資料集**，主資料集維持 100% 合成注入。
+
+- 來源：image 內 git 歷史 2026-03-17..08-30 中，同時修改原始碼（≤2 個 .c/.h、≤40 行）與測試的修正 commit
+  共 34 個，篩掉 pytest/console harness、unit_testing、build-only、功能新增、近乎重複的 BT controller 修正後
+  15 個做預檢，11 個重現（3 個修正前後結果相同，1 個板子不適用）。
+- 案例構成（Defects4J 式）：`broken_commit` = 上游修正 commit F；注入 = `restore_blob`（`tools/mutate_inject.py`）
+  把 F 修改的原始碼換回 F^ 的內容，測試維持 F 的版本（含回歸測試）；標準答案 = F；`upstream` 欄位記錄 F、F^、標題。
+  category 一律為 `real_bug`。
+- 驗證：`validate_v3_cases.py` 雙向驗證 11/11（失敗都在 target_test，即修正 commit 新增/修改的測試）；
+  標準答案 11/11（`gold/real_bug_gold.json`）；穩定性 11/11（`stability/real_bug_flaky_check.json`）。
+- 組成：native_sim 8、qemu_x86 3；assertion 9、Segmentation fault 1（video）、kernel panic 1（CAP）；
+  初始 log 含被修檔案路徑 1/11。
+- 限制：數量小，只能看趨勢；修正是公開的，模型可能看過（以 B1 結果輔助說明）。
 
 ## 仍存在的限制
 

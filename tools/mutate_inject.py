@@ -19,6 +19,8 @@ can distinguish "this operator doesn't apply to this file" from "the
 mutation took effect and genuinely broke the build/run".
 """
 import argparse
+import base64
+import gzip
 import re
 import shutil
 import sys
@@ -1038,6 +1040,22 @@ def _c_api_substitute(content: str, hint: Optional[str] = None) -> Optional[str]
     return content[:idx] + new_call + content[idx + len(old_call):]
 
 
+def _restore_blob(content: str, hint: Optional[str] = None) -> Optional[str]:
+    """(v3 真實 bug 對照集) 把整個檔案換成 hint 給的內容：hint = base64(gzip(修正前檔案))。
+    案例的 broken_commit 是上游的修正 commit，這個 operator 把被修的原始碼換回修正前版本
+    (測試維持修正後，含回歸測試)。內容與目前相同時視為不適用。
+    (v3 real-bug control set) Replace the whole file with hint = base64(gzip(pre-fix file)).
+    broken_commit is the upstream fix commit; this restores the pre-fix source while the tests
+    stay at the fix (including its regression test). A no-op replacement counts as no match."""
+    if not hint:
+        return None
+    try:
+        restored = gzip.decompress(base64.b64decode(hint, validate=True)).decode("utf-8")
+    except Exception:
+        return None
+    return None if restored == content else restored
+
+
 MUTATION_OPERATORS: Dict[str, Callable[..., Optional[str]]] = {
     "kconfig_remove_select": _kconfig_remove_select,
     "kconfig_invert_depends": _kconfig_invert_depends,
@@ -1058,6 +1076,7 @@ MUTATION_OPERATORS: Dict[str, Callable[..., Optional[str]]] = {
     "runtime_buffer_shrink": _runtime_buffer_shrink,
     "thread_priority_swap": _thread_priority_swap,
     "c_api_substitute": _c_api_substitute,
+    "restore_blob": _restore_blob,
 }
 
 
