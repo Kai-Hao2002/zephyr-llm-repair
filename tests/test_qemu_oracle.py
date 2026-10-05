@@ -126,3 +126,11 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("ok", name)
+
+
+def test_build_assert_failure_is_not_a_crash():
+    log = ("-- west build: generating a build system\n"
+           "/zephyrproject/zephyr/include/zephyr/toolchain/gcc.h:87:36: error: static assertion failed: "
+           "\"No adi,ltc2959 node in DT for tests\"\n"
+           "ninja: build stopped: subcommand failed.\n")
+    assert _run(log)["status"] == "eof_no_boot"

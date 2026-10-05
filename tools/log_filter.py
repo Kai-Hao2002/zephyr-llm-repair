@@ -1,6 +1,7 @@
 # tools/log_filter
 import re
 import logging
+from collections import deque
 from typing import List
 
 class LogFilter:
@@ -69,6 +70,11 @@ class LogFilter:
         self.link_symbol_re = re.compile(r"(?:undefined reference to|multiple definition of)\s+[`'\"]?([^'`\"\s]+)")
         self.link_error_max_symbols = 15
 
+        # 8. 去重後的 C/C++ 編譯錯誤上限：保留前 c_error_max_head 筆與最後 c_error_max_tail 筆。
+        # Cap on distinct C/C++ compilation errors: keep the first head and the last tail entries.
+        self.c_error_max_head = 15
+        self.c_error_max_tail = 5
+
     def compress_log(self, raw_log: str) -> str:
         """
         輸入原始編譯日誌字串，回傳高密度的錯誤摘要。
@@ -88,6 +94,8 @@ class LogFilter:
         link_symbols = set()
         link_omitted = 0
         dup_omitted = 0
+        c_error_count = 0
+        c_error_tail = deque(maxlen=self.c_error_max_tail)
 
         for line in lines:
             # 清除顏色代碼並去除前後空白
@@ -123,14 +131,23 @@ class LogFilter:
                 capturing_cmake_stack = True
             
             elif self.c_error_re.match(clean_line):
-                # 同一個缺標頭錯誤會隨每個編譯單元重複出現，只留第一次
-                if "fatal error" in clean_line.lower():
-                    if clean_line in seen_dedupe:
-                        dup_omitted += 1
-                        continue
-                    seen_dedupe.add(clean_line)
-                extracted_lines.append("\n[C/C++ Compilation Error Detected]")
-                extracted_lines.append(clean_line)
+                # 同一行錯誤 (缺標頭、標頭內的同一個巨集展開錯誤) 會隨每個編譯單元或每個
+                # 呼叫點重複出現，只留第一次。
+                # The same error line repeats per compilation unit / call site; keep the first.
+                if clean_line in seen_dedupe:
+                    dup_omitted += 1
+                    continue
+                seen_dedupe.add(clean_line)
+                c_error_count += 1
+                block = ["\n[C/C++ Compilation Error Detected]", clean_line]
+                if c_error_count <= self.c_error_max_head:
+                    extracted_lines.extend(block)
+                else:
+                    # 少一個右大括號會讓後面每個函式都報錯 (v3_c_heap_kasan_brace: 446 筆、91 KB)；
+                    # 保留前段與最後幾筆 (gcc 最後的 "expected ... at end of input" 才指出真正位置)。
+                    # A missing brace cascades into hundreds of errors; keep the head and the last
+                    # few (gcc's final "expected ... at end of input" points at the real location).
+                    c_error_tail.append(block)
             
             elif self.dts_error_re.match(clean_line):
                 extracted_lines.append("\n[DeviceTree Error Detected]")
@@ -166,10 +183,16 @@ class LogFilter:
                 extracted_lines.append("\n[Ninja Build Stopped]")
                 extracted_lines.append(clean_line)
 
+        if c_error_count > self.c_error_max_head:
+            omitted = c_error_count - self.c_error_max_head - len(c_error_tail)
+            if omitted:
+                extracted_lines.append(f"\n[... {omitted} more distinct compilation errors omitted]")
+            for block in c_error_tail:
+                extracted_lines.extend(block)
         if link_omitted:
             extracted_lines.append(f"[... {link_omitted} more distinct link errors omitted]")
         if dup_omitted:
-            extracted_lines.append(f"[... {dup_omitted} duplicate 'fatal error' lines omitted]")
+            extracted_lines.append(f"[... {dup_omitted} duplicate compilation error lines omitted]")
 
         compressed_output = "\n".join(extracted_lines).strip()
 

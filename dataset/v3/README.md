@@ -1,6 +1,6 @@
 # v3 資料集工作目錄
 
-最終資料集：`dataset/cases/final_dataset_v3.json`（119 筆，由 `dataset/scripts/assemble_v3.py` 產生）。
+最終資料集：`dataset/cases/final_dataset_v3.json`（139 筆，由 `dataset/scripts/assemble_v3.py` 產生）。
 這個目錄放的是產生它的過程檔，全部可由腳本重現。
 
 ## 檔案
@@ -17,9 +17,11 @@
 | `validation/*_rejected_attempts.json` | 被拒的嘗試與原因（保留作紀錄） | 同上 |
 | `gold/gold_check.json` | 標準答案 patch 走完整評測流程的結果（119/119 resolved） | `tools/gold_patch_check.py` |
 | `gold/gold_check_first_attempt_failures.json` | 兩筆第一次因環境失敗、重跑通過的紀錄 | 同上 |
+| `candidates/compound_replace.json`、`candidates/relabel_ltc2959.json` | 2026-10-05 稽核：取代 4 筆單一注入的 compound、ltc2959 重新驗證 | 手動 |
+| `gold/compound_fix_gold.json` | 上述 5 筆的標準答案檢查 | `tools/gold_patch_check.py` |
 | `eval/eval_pilot_cases.json` | 正式評測試跑用的 2 筆 | 手動 |
 
-原始 build/run log 不在 repo 內：`~/zephyr-eval-work/v3_{pilot,migrate,new}/logs/`。
+原始 build/run log 不在 repo 內：`~/zephyr-eval-work/v3_{pilot,migrate,new,fix,expand,qemucfg,compfix}/logs/`。
 `assemble_v3.py` 會從這些 log 重新壓縮 `initial_error_log`。
 
 ## 驗證流程（每筆都通過）
@@ -61,12 +63,27 @@
   compound reset/mmio（qemu_cortex_m3）。coredump 類測試會刻意 crash、ext2/littlefs/flash_common 需要 tests.yaml 的額外設定，不適用。
 - 最終 139 筆：runtime 63、c_syntax 19、kconfig 19、dts 19、compound 19；QEMU 30.2%；標準答案 139/139。
 
+## 2026-10-05 稽核修正
+
+| 問題 | 處理 |
+|---|---|
+| compound 中 4 筆只有單一 DTS 注入、執行期失敗（device_power_domains、devicetree/api pinctrl、power_states_api、uac2），與其他 15 筆 Kconfig+DTS 雙注入不同 | 列入 `validation/excluded.json`，換成 4 個新 app 的雙注入案例：akm09918c、bmi160、gpio_keys、gpio_kbd_matrix（sbs_gauge 因 tests.yaml 需要 `CONFIG_EMUL` 被拒） |
+| ltc2959 的建置期 `static assertion failed` 被 oracle 的 `ASSERTION FAIL`（不分大小寫）判成 crash | `QemuOracle` 不再對編譯器診斷行（`file:line:col: error:`、internal compiler error）比對 crash 特徵；重新驗證後為 `eof_no_boot` |
+| `v3_c_heap_kasan_brace` 的初始 log 過濾後仍有 91 KB（少一個右大括號引發 446 筆連鎖錯誤） | `LogFilter` 對完全相同的編譯錯誤行去重，相異錯誤超過 20 筆時保留前 15 筆與最後 5 筆（gcc 最後的 `expected ... at end of input` 指出真正位置）；現在 4.8 KB。另有 7 筆的 log 因去重變短，內容沒有遺失 |
+
+compound 現在 19 筆全部是 Kconfig + DTS 雙注入、全部在建置期失敗：
+typo+remove_compatible 8、invert+remove_compatible 6、typo+break_phandle 3、invert+break_phandle 1、invert+corrupt_reg 1。
+
 ## 仍存在的限制
 
 - 30 筆 runtime 的錯誤在測試程式本身（時序、優先權、double free），修的是測試碼而非 RTOS 程式碼。
-- 編譯期類別有 67 筆 target_test 是自動挑的（防刪測試用，與錯誤不直接相關）。
-- 初始 log 是否寫出注入檔：c_syntax 11/19、kconfig 少數、dts/compound 少數、runtime 0/63，各類別難度不能直接比。
-- `c_typo_identifier` 的錯誤會出現 gcc 的 `did you mean '...'?`（4 筆，簡單組）。
+- 非 runtime 的 76 筆 target_test 全部是自動挑的（套件中第一個 PASS 的測試，防刪測試用，與錯誤不直接相關）。
+- 初始 log 是否寫出注入檔完整路徑：runtime 22/63（其中 19 筆是注入在測試檔、assertion 行本身印出路徑）、
+  c_syntax 11/19、kconfig 7/19、dts 4/19、compound 4/19，各類別難度不能直接比；分析時從資料重算，不要抄這裡。
+- gcc 的 `did you mean '...'?` 提示出現在 14 筆（c_syntax 6、compound 4、kconfig 2、dts 2），不只 `c_typo_identifier`。
+- QEMU 案例集中在 runtime（42 筆 QEMU 中 28 筆）；compound/dts/kconfig 幾乎都在 native_sim，板子效應無法與類別分開分析。
+- runtime 的 operator 以 off-by-one 為主（23/63）。
+- 少數 runtime 的初始訊號很弱（只有暫存器傾印或只有 `Segmentation fault`，看不到 assertion）。
 - 設定類在 QEMU 上只有 6 筆（測試附帶的 QEMU overlay 很少）。
 - 模組固定為 image 快照，時間範圍 2026-03-17 之後（ARM 2026-05-07 之後）；抽樣顯示不影響結果。
 - 全部為人工注入，沒有真實的歷史 bug；8 筆依賴我們自己寫的測試檔。

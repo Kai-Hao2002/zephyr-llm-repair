@@ -400,6 +400,12 @@ class QemuOracle:
             r"Fatal error was unexpected|Assert failed was unexpected|Caught system error -- reason \d+ 0\b"
         )
         self.fault_resolution_timeout = 30
+        # 編譯器診斷行 (gcc 的 "file:line:col: error: ..."、internal compiler error) 不是執行期 crash：
+        # BUILD_ASSERT 失敗會印 "error: static assertion failed: ..."，被不分大小寫的
+        # "ASSERTION FAIL" 命中，建置失敗因此被判成 crash (v3 ltc2959 compound 案例，2026-10-05 發現)。
+        # Compiler diagnostics are not runtime crashes: a failed BUILD_ASSERT prints
+        # "error: static assertion failed: ...", which the case-insensitive "ASSERTION FAIL" matched.
+        self.compiler_diagnostic_re = re.compile(r":\d+:\d+:\s+(?:fatal\s+)?error:\s|internal compiler error")
         self.unsupported_regex = [re.compile(p) for p in self.unsupported_patterns]
         self.completion_success_regex = [re.compile(p) for p in self.completion_success_patterns]
 
@@ -597,7 +603,7 @@ class QemuOracle:
                                 self.logger.info(f"Expected fault in test case, continuing: {line}")
                                 pending_crash = None
                                 continue
-                        if result["status"] != "crash":
+                        if result["status"] != "crash" and not self.compiler_diagnostic_re.search(line):
                             for pattern in self.crash_regex:
                                 if pattern.search(line):
                                     # ztest 的 "Assertion failed at" 也會被 ASSERTION FAIL (不分大小寫) 比對到，

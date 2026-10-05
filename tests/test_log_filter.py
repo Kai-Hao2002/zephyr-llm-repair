@@ -122,3 +122,21 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("ok", name)
+
+
+def test_identical_c_errors_deduplicated():
+    line = "/zephyrproject/zephyr/include/zephyr/devicetree.h:350:40: error: 'DT_N_X' undeclared\n"
+    out = LogFilter().compress_log(line * 5 + NINJA)
+    assert out.count("'DT_N_X' undeclared") == 1
+    assert "4 duplicate compilation error lines omitted" in out
+
+
+def test_cascading_c_errors_keep_head_and_last():
+    many = "".join(f"src/main.c:{i}:1: error: invalid storage class for function 'f{i}'\n" for i in range(1, 300))
+    last = "src/main.c:1324:1: error: expected declaration or statement at end of input\n"
+    out = LogFilter().compress_log(many + last + NINJA)
+    f = LogFilter()
+    assert out.count("[C/C++ Compilation Error Detected]") == f.c_error_max_head + f.c_error_max_tail
+    assert "'f1'" in out and "'f15'" in out and "'f16'" not in out
+    assert "expected declaration or statement at end of input" in out
+    assert "280 more distinct compilation errors omitted" in out
