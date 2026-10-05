@@ -51,8 +51,22 @@
   regulator、gnss_api、eeprom/shell、can/shell、comparator/shell）。多出的 1 筆備用 dts 列在 `validation/excluded.json`。
 - 最終 134 筆：runtime 63、c_syntax 19、compound 18、dts 18、kconfig 16；QEMU 27.6%；標準答案檢查 134/134。
 
+## 2026-10-05 補強
+
+- **測試完整性檢查**：30 筆 runtime 的注入點在測試程式本身（豁免還原），agent 可刪 assertion 或改 skip 來通過。
+  `core/protected_files.check_test_integrity` 在評分時比對 assertion 與 skip/pass 數量，削弱即判 `test_integrity_violation`。
+  v2 離線稽核：沒有任何修好的案例做過這種事。作弊測試（刪掉 early_sleep 的 4 個 assertion）原本整個套件會通過，現在被擋下；
+  30 筆標準答案在新檢查下仍 30/30 修好。
+- **QEMU 上的設定類案例**：新增 kconfig nvs/zms（qemu_x86）、mem_attr_heap（qemu_cortex_m3）、dts settings/retention、
+  compound reset/mmio（qemu_cortex_m3）。coredump 類測試會刻意 crash、ext2/littlefs/flash_common 需要 tests.yaml 的額外設定，不適用。
+- 最終 139 筆：runtime 63、c_syntax 19、kconfig 19、dts 19、compound 19；QEMU 30.2%；標準答案 139/139。
+
 ## 仍存在的限制
 
-- `c_typo_identifier` 的錯誤會出現 gcc 的 `did you mean '...'?` 建議（4 筆，屬真實編譯器行為，視為簡單組）。
-- 模組固定為 image 快照（2026-08），只涵蓋 2026-03-17 之後的 commit（SDK 1.0 限制），ARM 只在 2026-05-07 之後；抽樣顯示不影響結果。
-- 新增的 dts/compound 多為 native_sim 上的 fake/emul 驅動，QEMU 比例因此降到 27.6%。
+- 30 筆 runtime 的錯誤在測試程式本身（時序、優先權、double free），修的是測試碼而非 RTOS 程式碼。
+- 編譯期類別有 67 筆 target_test 是自動挑的（防刪測試用，與錯誤不直接相關）。
+- 初始 log 是否寫出注入檔：c_syntax 11/19、kconfig 少數、dts/compound 少數、runtime 0/63，各類別難度不能直接比。
+- `c_typo_identifier` 的錯誤會出現 gcc 的 `did you mean '...'?`（4 筆，簡單組）。
+- 設定類在 QEMU 上只有 6 筆（測試附帶的 QEMU overlay 很少）。
+- 模組固定為 image 快照，時間範圍 2026-03-17 之後（ARM 2026-05-07 之後）；抽樣顯示不影響結果。
+- 全部為人工注入，沒有真實的歷史 bug；8 筆依賴我們自己寫的測試檔。
