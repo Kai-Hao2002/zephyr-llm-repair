@@ -11,7 +11,8 @@ for name in ("GEMINI_API_KEY", "GEMINI_API_KEY2"):
     if not env.get(name):
         continue
     try:
-        genai.Client(api_key=env[name]).models.generate_content(model=model, contents="Reply OK.")
+        client = genai.Client(api_key=env[name])  # keep a reference; an inline client gets closed before the call
+        client.models.generate_content(model=model, contents="Reply OK.")
         print(f"{name}: ok")
         sys.exit(0)
     except Exception as e:
