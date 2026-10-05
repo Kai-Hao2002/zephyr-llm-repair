@@ -25,7 +25,7 @@ import os
 from collections import Counter
 
 DATASET_PATH = os.path.join(os.path.dirname(__file__), "..", "cases", "verified_zephyr_bugs.json")
-FINAL_PATH = os.path.join(os.path.dirname(__file__), "..", "cases", "final_dataset.json")
+FINAL_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "cases", "final_dataset.json")
 
 # Session 46 part 45 (2026-08-27) 稽核決定的排除清單：
 # Session 46 part 45 (2026-08-27) audit-driven exclusion list:

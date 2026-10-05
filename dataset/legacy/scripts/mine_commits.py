@@ -2017,9 +2017,9 @@ INJECTION_CATALOG = [
         "board": "qemu_riscv32",
         "extra_files": {
             "tests/drivers/gpio/gpio_mmio_latch/boards/qemu_riscv32.overlay":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "gpio_mmio_latch_riscv32", "qemu_riscv32.overlay"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "gpio_mmio_latch_riscv32", "qemu_riscv32.overlay"),
             "tests/drivers/gpio/gpio_mmio_latch/tests.yaml":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "gpio_mmio_latch_riscv32", "tests.yaml"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "gpio_mmio_latch_riscv32", "tests.yaml"),
         },
     },
     # qemu_x86：既有的 tests/drivers/firmware/qemu_fwcfg 測試本來就有
@@ -2332,7 +2332,7 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "extra_files": {
             "tests/drivers/adc/adc_emul/src/main.c":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "adc_emul_invalid_channel_test", "main.c"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "adc_emul_invalid_channel_test", "main.c"),
         },
     },
     # runtime_off_by_one's fifth tests/drivers entry, drivers/rtc/rtc_emul.c
@@ -2386,9 +2386,9 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "extra_files": {
             "tests/drivers/rtc/rtc_api/src/test_alarm.c":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "rtc_emul_alarm_invalid_id_test", "test_alarm.c"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "rtc_emul_alarm_invalid_id_test", "test_alarm.c"),
             "tests/drivers/rtc/rtc_api/prj.conf":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "rtc_emul_alarm_invalid_id_test", "prj.conf"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "rtc_emul_alarm_invalid_id_test", "prj.conf"),
         },
     },
     # runtime_off_by_one's sixth tests/drivers entry, drivers/i2c/i2c_emul.c
@@ -2446,11 +2446,11 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "extra_files": {
             "tests/drivers/i2c/i2c_emul/src/test_forwarding_buf.cpp":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "i2c_emul_overflow_by_one_test", "test_forwarding_buf.cpp"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "i2c_emul_overflow_by_one_test", "test_forwarding_buf.cpp"),
             "tests/drivers/i2c/i2c_emul/prj.conf":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "i2c_emul_overflow_by_one_test", "prj.conf"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "i2c_emul_overflow_by_one_test", "prj.conf"),
             "tests/drivers/i2c/i2c_emul/boards/native_sim.overlay":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "i2c_emul_overflow_by_one_test", "native_sim.overlay"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "i2c_emul_overflow_by_one_test", "native_sim.overlay"),
         },
     },
     # runtime_off_by_one's first tests/subsys entry via drivers/video/
@@ -2506,7 +2506,7 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "extra_files": {
             "tests/subsys/video/api/src/video_emul.c":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "video_emul_rx_too_small_test", "video_emul.c"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "video_emul_rx_too_small_test", "video_emul.c"),
         },
     },
     # runtime_off_by_one's second tests/subsys entry, via a sensor emulator
@@ -2548,7 +2548,7 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "extra_files": {
             "tests/subsys/sensing/src/main.c":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "bmi160_emul_reg_oob_test", "main.c"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "bmi160_emul_reg_oob_test", "main.c"),
         },
     },
     # runtime_off_by_one's third tests/subsys entry (session 46 continued):
@@ -2604,7 +2604,7 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "extra_files": {
             "tests/subsys/storage/stream/stream_flash/src/main.c":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "stream_flash_available_offbyone_test", "main.c"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "stream_flash_available_offbyone_test", "main.c"),
         },
     },
     # runtime_remove_null_check's first tests/subsys entry (session 46
@@ -2688,7 +2688,7 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "extra_files": {
             "tests/subsys/storage/flash_map/src/main.c":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "flash_map_bounds_offbyone_test", "main.c"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "flash_map_bounds_offbyone_test", "main.c"),
         },
     },
     # runtime_off_by_one's fifth tests/subsys entry (session 46
@@ -2738,7 +2738,7 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "extra_files": {
             "tests/subsys/dfu/mcuboot/src/main.c":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "mcuboot_header_size_offbyone_test", "main.c"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "mcuboot_header_size_offbyone_test", "main.c"),
         },
     },
     # runtime_off_by_one's first tests/subsys/rtio entry (session 46
@@ -2792,7 +2792,7 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "extra_files": {
             "tests/subsys/rtio/rtio_api/src/test_rtio_api.c":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "rtio_sqe_copy_in_offbyone_test", "test_rtio_api.c"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "rtio_sqe_copy_in_offbyone_test", "test_rtio_api.c"),
         },
     },
     # runtime_remove_null_check's second tests/subsys entry (session 46
@@ -2839,7 +2839,7 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "extra_files": {
             "tests/subsys/rtio/rtio_i2c/src/main.cpp":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "i2c_rtio_copy_pool_exhausted_test", "main.cpp"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "i2c_rtio_copy_pool_exhausted_test", "main.cpp"),
         },
     },
     # runtime_remove_null_check's third tests/subsys entry (session 46
@@ -2882,7 +2882,7 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "extra_files": {
             "tests/subsys/rtio/workq/src/main.c":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "rtio_workq_null_req_test", "main.c"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "rtio_workq_null_req_test", "main.c"),
         },
     },
     # c_api_substitute's second tests/subsys entry (session 46
@@ -2997,11 +2997,11 @@ INJECTION_CATALOG = [
         "board": "native_sim",
         "extra_files": {
             "tests/subsys/nvmem/api/src/main.c":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "nvmem_cell_bounds_offbyone_test", "main.c"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "nvmem_cell_bounds_offbyone_test", "main.c"),
             "tests/subsys/nvmem/api/boards/native_sim.overlay":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "nvmem_cell_bounds_offbyone_test", "native_sim.overlay"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "nvmem_cell_bounds_offbyone_test", "native_sim.overlay"),
             "tests/subsys/nvmem/api/prj.conf":
-                os.path.join(os.path.dirname(__file__), "injection_assets", "nvmem_cell_bounds_offbyone_test", "prj.conf"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "injection_assets", "nvmem_cell_bounds_offbyone_test", "prj.conf"),
         },
     },
     # c_api_substitute's third tests/subsys entry (session 46 continued),

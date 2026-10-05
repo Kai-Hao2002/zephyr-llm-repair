@@ -10,7 +10,7 @@ import concurrent.futures
 # 引入自訂工具
 import sys
 # 確保能讀取到專案根目錄的 tools 模組
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 from tools.log_filter import LogFilter
 from tools.qemu_oracle import QemuOracle, extract_failing_test_name
 from tools.fault_injector import FaultInjector
