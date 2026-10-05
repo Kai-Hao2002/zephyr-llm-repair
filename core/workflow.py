@@ -39,7 +39,7 @@ from agents.supervisor import (
 )
 from tools.static_checker import StaticChecker
 from core.trajectory import build_trajectory
-from core.protected_files import pop_restored, restore as restore_protected_files
+from core.protected_files import check_test_integrity, pop_restored, restore as restore_protected_files
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -163,7 +163,7 @@ def _compute_failure_final_status(current_iter: int, max_iterations: int) -> str
 # ("build-failed-before-QEMU-ever-started"). RQ1/RQ3's Bounded Compilation
 # Success Rate (Pass@k) is derived from this, a metric independent of
 # Functional Pass Rate (= resolved).
-_COMPILED_STATUSES = frozenset({"crash", "missing_required_test", "success"})
+_COMPILED_STATUSES = frozenset({"crash", "missing_required_test", "test_integrity_violation", "success"})
 
 
 def _proposed_trajectory(state: ZephyrAgentState, stage: str, status: str, **fields) -> Dict[str, Any]:
@@ -221,6 +221,18 @@ def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
         return {"status": "missing_required_test", "resolved": False, "compiled": compiled, "log": compressed_log}
 
     if eval_result["status"] == "success":
+        # 被注入的測試檔若被刪了 assertion 或加了 skip，套件「通過」不算修好 (見 core/protected_files.py)
+        # A pass obtained by deleting assertions / adding skips in the injected test file is not a fix
+        # 給 agent 的訊息不含檔名：被注入的檔案清單不能讓 agent 知道；細節只寫進評測端 log。
+        # The agent-facing message names no file (the injected-file list must stay hidden);
+        # details go to the evaluator's log only.
+        violations = check_test_integrity(workspace_path)
+        if violations:
+            logging.getLogger(__name__).warning("Test integrity violation: %s", "; ".join(violations))
+            return {"status": "test_integrity_violation", "resolved": False, "compiled": True,
+                    "log": "[Verdict: FAILED. The suite passed, but test code was weakened (assertions removed "
+                           "or tests skipped/forced to pass), so this does not count as a fix. Fix the code "
+                           "under test instead of the tests.]"}
         return {"status": "success", "resolved": True, "compiled": compiled, "log": "Zephyr OS successfully booted."}
 
     return {"status": eval_result["status"], "resolved": False, "compiled": compiled,

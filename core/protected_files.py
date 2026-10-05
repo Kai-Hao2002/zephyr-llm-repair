@@ -30,8 +30,28 @@ exempt list equals the injected-file list, which the agent must never see.
 import filecmp
 import logging
 import os
+import re
 import shutil
 from typing import Dict, Iterable, List
+
+# 測試完整性 (2026-10-05)：被注入的檔案若是 target_app 底下的測試原始碼，它必須能被 agent 修改
+# (豁免還原)，但這也讓 agent 能直接刪掉失敗的 assertion 或改成 skip。登記時記下這些檔案的
+# assertion / skip 數量，評分時若 assertion 變少或 skip/pass 呼叫變多，就不算修好。
+# Test integrity (2026-10-05): an injected file that is test source under target_app must stay
+# editable (exempt from restore), which also lets an agent delete the failing assertion or skip
+# the test. Registration records its assertion/skip counts; grading rejects fewer assertions or
+# more skip/pass calls.
+_ASSERT_RE = re.compile(r"\b(?:zassert|zexpect|zassume)_\w+\s*\(")
+_SKIP_RE = re.compile(r"\bztest_test_(?:skip|pass)\s*\(")
+_TEST_SOURCE_EXT = (".c", ".cpp", ".cc", ".h")
+
+
+def _integrity_counts(path: str) -> tuple:
+    try:
+        text = open(path, encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return (0, 0)
+    return (len(_ASSERT_RE.findall(text)), len(_SKIP_RE.findall(text)))
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +98,32 @@ def register(workspace_path: str, target_app: str, exempt_files: Iterable[str], 
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         shutil.copy2(os.path.join(app_dir, rel), dest)
         count += 1
-    _registry[workspace_path] = {"app_dir": app_dir, "app_rel": app_rel, "snapshot_dir": snapshot_dir, "exempt": exempt}
+    integrity = {
+        rel: _integrity_counts(os.path.join(workspace_path, rel))
+        for rel in exempt
+        if rel.startswith(app_rel + os.sep) and rel.endswith(_TEST_SOURCE_EXT)
+    }
+    _registry[workspace_path] = {"app_dir": app_dir, "app_rel": app_rel, "snapshot_dir": snapshot_dir,
+                                 "exempt": exempt, "integrity": integrity}
     return count
+
+
+def check_test_integrity(workspace_path: str) -> List[str]:
+    """
+    被注入的測試原始碼若 assertion 比登記時少、或 ztest_test_skip/pass 呼叫比登記時多，回傳說明
+    (每個檔案一行)；沒有問題或 workspace 沒登記時回傳空 list。
+    Returns one message per injected test source whose assertion count dropped or whose
+    ztest_test_skip/pass calls increased since registration; [] if clean or unregistered.
+    """
+    entry = _registry.get(os.path.abspath(workspace_path))
+    if entry is None:
+        return []
+    problems = []
+    for rel, (asserts0, skips0) in sorted(entry.get("integrity", {}).items()):
+        asserts, skips = _integrity_counts(os.path.join(os.path.abspath(workspace_path), rel))
+        if asserts < asserts0 or skips > skips0:
+            problems.append(f"{rel}: assertions {asserts0}->{asserts}, skip/pass calls {skips0}->{skips}")
+    return problems
 
 
 def unregister(workspace_path: str) -> None:
