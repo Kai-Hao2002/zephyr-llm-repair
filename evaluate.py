@@ -46,6 +46,7 @@ from dotenv import load_dotenv
 from core.state import create_initial_state, ZephyrAgentState
 from core.trajectory import clip_text
 from core.protected_files import register as register_protected_files, unregister as unregister_protected_files
+from core import llm_retry
 from core.llm_retry import LLMHangError, is_daily_quota, is_transient, pop_events, set_strict_fallbacks
 from core.workflow import build_zephyr_graph, build_devops_docker_cmd
 from core.baseline_pipelines import run_b1, run_b2, run_b3
@@ -623,6 +624,7 @@ def collect_run_meta() -> Dict[str, Any]:
         # Docker (29.5.3) while `docker images` finds it, so use the latter.
         "docker_image_id": _command_output(["docker", "images", "zephyr-sandbox", "--no-trunc", "--format", "{{.ID}}"]),
         "strict_fallbacks": True,
+        "free_tier_retry_policy": llm_retry.FREE_TIER,
         # 用了哪把 Gemini 金鑰 (只記 SHA-256 前 8 碼，不記金鑰本身)；額度用完會換金鑰
         # (tools/run_with_key_rotation.sh)。Which Gemini key was used (first 8 hex of its
         # SHA-256 only, never the key); keys rotate when a daily quota runs out.

@@ -29,6 +29,7 @@ api_events, so transient errors' effect on results is visible instead of
 silently mixed into the numbers.
 """
 import logging
+import os
 import random
 import re
 import time
@@ -36,7 +37,12 @@ from typing import Any, Callable, Dict, List
 
 logger = logging.getLogger(__name__)
 
-_BACKOFF_SECONDS = (30, 60, 120, 240, 480)
+# FREE_TIER=1 (免費層金鑰)：503 也算進每日額度 (gemini-3.8-flash 免費層每專案每天 20 次)，
+# 改成只重試 2 次、間隔拉長，避免一次 503 就耗掉好幾次額度。付費金鑰不設這個變數，行為不變。
+# FREE_TIER=1 (free-tier keys): 503s count toward the daily quota (20/day/project for
+# gemini-3.8-flash), so retry only twice with longer waits. Unset for paid keys (unchanged).
+FREE_TIER = os.environ.get("FREE_TIER") == "1"
+_BACKOFF_SECONDS = (120, 600) if FREE_TIER else (30, 60, 120, 240, 480)
 _TRANSIENT_HTTP_CODES = frozenset({408, 429, 500, 502, 503, 504, 529})
 _TRANSIENT_MESSAGE_RE = re.compile(
     r"\b(408|429|500|502|503|504|529)\b|UNAVAILABLE|RESOURCE_EXHAUSTED|DEADLINE_EXCEEDED|overloaded|"
