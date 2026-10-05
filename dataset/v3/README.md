@@ -80,20 +80,23 @@ typo+remove_compatible 8、invert+remove_compatible 6、typo+break_phandle 3、i
 
 ## 真實 bug 對照集（2026-10-05）
 
-`dataset/cases/real_bugs_v3.json`，11 筆，由 `dataset/scripts/assemble_real_v3.py` 產生。用途是外部效度對照
+`dataset/cases/real_bugs_v3.json`，13 筆，由 `dataset/scripts/assemble_real_v3.py` 產生。用途是外部效度對照
 （合成注入上的 pipeline 排名在真實 bug 上是否一致），**不併入主資料集**，主資料集維持 100% 合成注入。
 
 - 來源：image 內 git 歷史 2026-03-17..08-30 中，同時修改原始碼（≤2 個 .c/.h、≤40 行）與測試的修正 commit
   共 34 個，篩掉 pytest/console harness、unit_testing、build-only、功能新增、近乎重複的 BT controller 修正後
-  15 個做預檢，11 個重現（3 個修正前後結果相同，1 個板子不適用）。
+  15 個做預檢，11 個重現（3 個修正前後結果相同，1 個板子不適用）。第二輪放寬條件（修改檔案數／行數、允許
+  migration guide 等文件）再看被篩掉的 13 個：排除型別重構、只改 mock 的 2 個，4 個（5 組 app）預檢，
+  zperf、fuel_gauge 重現；hostname 的新測試只在 testcase.yaml 額外設定下執行、video 需要相機板子，不收。
+  沒有附回歸測試的修正 commit 不考慮：修正前的程式碼能通過 CI 合併，代表既有測試抓不到該 bug。
 - 案例構成（Defects4J 式）：`broken_commit` = 上游修正 commit F；注入 = `restore_blob`（`tools/mutate_inject.py`）
   把 F 修改的原始碼換回 F^ 的內容，測試維持 F 的版本（含回歸測試）；標準答案 = F；`upstream` 欄位記錄 F、F^、標題。
   category 一律為 `real_bug`。
-- 驗證：`validate_v3_cases.py` 雙向驗證 11/11（失敗都在 target_test，即修正 commit 新增/修改的測試）；
-  標準答案 11/11（`gold/real_bug_gold.json`）；穩定性 11/11（`stability/real_bug_flaky_check.json`）。
-- 組成：native_sim 8、qemu_x86 3；assertion 9、Segmentation fault 1（video）、kernel panic 1（CAP）；
-  初始 log 含被修檔案路徑 1/11。
-- 限制：數量小，只能看趨勢；修正是公開的，模型可能看過（以 B1 結果輔助說明）。
+- 驗證：`validate_v3_cases.py` 雙向驗證 13/13（失敗都在 target_test，即修正 commit 新增/修改的測試）；
+  標準答案 13/13、穩定性 13/13（`gold/real_bug_gold.json` + `real_bug_add2_gold.json`、`stability/real_bug_*flaky_check.json`）。
+- 組成：native_sim 10、qemu_x86 3；assertion 11、Segmentation fault 1（video）、kernel panic 1（CAP）；
+  初始 log 含被修檔案路徑 1/13。fuel_gauge 的 app（tests/drivers/fuel_gauge/bq27z746）也出現在主資料集的一筆 compound，兩者錯誤不同、分屬不同資料集。
+- 限制：數量小（在固定環境與時間範圍內帶回歸測試的修正 commit 只有 34 個），只能看趨勢、不做顯著性宣稱；修正是公開的，模型可能看過（以 B1 結果輔助說明）。
 
 ## 仍存在的限制
 
