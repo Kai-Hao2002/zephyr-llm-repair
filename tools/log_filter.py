@@ -75,6 +75,9 @@ class LogFilter:
         self.c_error_max_head = 15
         self.c_error_max_tail = 5
 
+        # 9. Docker Desktop CLI 的提示行 / Docker Desktop CLI hint lines
+        self.docker_hint_re = re.compile(r"^What's next:\s*$|Debug this container error with Gordon|^\s*docker ai\b")
+
     def compress_log(self, raw_log: str) -> str:
         """
         輸入原始編譯日誌字串，回傳高密度的錯誤摘要。
@@ -86,7 +89,10 @@ class LogFilter:
         # 新增：用於清除 ANSI 顏色代碼的正則表達式
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         
-        lines = raw_log.splitlines()
+        # Docker Desktop CLI 在容器非 0 結束時附加的提示 ("What's next:" + "Debug this container error
+        # with Gordon → docker ai ...")，與 Zephyr 無關，先整行拿掉。
+        # Docker Desktop CLI hint appended when a container exits non-zero; unrelated to Zephyr.
+        lines = [l for l in raw_log.splitlines() if not self.docker_hint_re.search(ansi_escape.sub('', l))]
         extracted_lines: List[str] = []
         capturing_cmake_stack = False
         kconfig_warning_lines_left = 0

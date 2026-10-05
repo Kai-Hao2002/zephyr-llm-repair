@@ -140,3 +140,13 @@ def test_cascading_c_errors_keep_head_and_last():
     assert "'f1'" in out and "'f15'" in out and "'f16'" not in out
     assert "expected declaration or statement at end of input" in out
     assert "280 more distinct compilation errors omitted" in out
+
+
+def test_docker_desktop_hint_is_dropped():
+    log = ("START - test_x\nSegmentation fault\n"
+           "FATAL ERROR: command exited with status 1: /usr/bin/cmake --build /tmp/build --target run\n"
+           "\x1b[1mWhat's next:\x1b[0m\n"
+           "Debug this container error with Gordon → docker ai \"help me fix this container error\"\n")
+    out = LogFilter().compress_log(log)
+    assert "Segmentation fault" in out
+    assert "Gordon" not in out and "What's next" not in out

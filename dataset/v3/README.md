@@ -72,6 +72,9 @@
 | ltc2959 的建置期 `static assertion failed` 被 oracle 的 `ASSERTION FAIL`（不分大小寫）判成 crash | `QemuOracle` 不再對編譯器診斷行（`file:line:col: error:`、internal compiler error）比對 crash 特徵；重新驗證後為 `eof_no_boot` |
 | `v3_c_heap_kasan_brace` 的初始 log 過濾後仍有 91 KB（少一個右大括號引發 446 筆連鎖錯誤） | `LogFilter` 對完全相同的編譯錯誤行去重，相異錯誤超過 20 筆時保留前 15 筆與最後 5 筆（gcc 最後的 `expected ... at end of input` 指出真正位置）；現在 4.8 KB。另有 7 筆的 log 因去重變短，內容沒有遺失 |
 
+另外，`LogFilter` 會濾掉 Docker Desktop CLI 在容器非 0 結束時附加的提示（`What's next:` / `Debug this container error with Gordon → docker ai ...`）；
+重組後主資料集 6 筆、真實 bug 對照集 1 筆的初始 log 少了這兩行，其他欄位不變。
+
 compound 現在 19 筆全部是 Kconfig + DTS 雙注入、全部在建置期失敗：
 typo+remove_compatible 8、invert+remove_compatible 6、typo+break_phandle 3、invert+break_phandle 1、invert+corrupt_reg 1。
 
