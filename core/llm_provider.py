@@ -113,9 +113,20 @@ def is_single_model() -> bool:
     return _single_model
 
 
+# 環境變數 ZEPHYR_GEMINI_MODEL 有設定時，gemini 的 fast/pro 兩個角色都改用這個模型
+# (2026-10-07：v3 先用 gemini-2.5-flash 跑一輪，之後再用 gemini-3.8-flash)。實際用的
+# 模型經 get_model_name() 記進 run_meta.models。未設定時維持上面的對照表。
+# When ZEPHYR_GEMINI_MODEL is set, both gemini roles use that model (2026-10-07: v3 runs
+# once with gemini-2.5-flash, later with gemini-3.8-flash). The model actually used is
+# recorded in run_meta.models via get_model_name(). Unset keeps the table above.
+_gemini_model_override = os.environ.get("ZEPHYR_GEMINI_MODEL", "").strip()
+
+
 def _model_for_role(role: str) -> str:
     if role not in ("fast", "pro"):
         raise ValueError(f"unknown role '{role}', expected 'fast' or 'pro'")
+    if _provider == "gemini" and _gemini_model_override:
+        return _gemini_model_override
     models = _MODEL_BY_PROVIDER_AND_ROLE[_provider]
     return models["pro"] if _single_model else models[role]
 
