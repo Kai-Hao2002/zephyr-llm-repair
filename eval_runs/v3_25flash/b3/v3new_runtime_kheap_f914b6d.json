@@ -1,0 +1,223 @@
+[
+  {
+    "case_id": "v3new_runtime_kheap_f914b6d",
+    "category": "runtime_crash",
+    "pipeline": "b3",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 5,
+    "ttr_seconds": 1330.9872262477875,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b3_closed_loop",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 7084,
+            "output_tokens": 9219
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "The `Segmentation fault` occurring during `test_k_heap_calloc` suggests a memory corruption issue. In Zephyr's Ztest framework, if a test suite does not define setup and teardown functions, global resources like `k_heap_test` are not reset between individual test cases.\n\nThe `test_k_heap_aligned_alloc` test case explicitly triggers an `__ASSERT` for an invalid alignment value (3). While `ztest_set_fault_valid(true)` ensures this assertion is caught and the test passes, the `k_heap_test` object might be left in an inconsistent or corrupted state if the assertion occurs during an internal modification of the heap's data structures.\n\nWhen `test_k_heap_calloc` subsequently runs, it operates on this potentially corrupted heap, leading to a `Segmentation fault` when attempting memory operations.\n\nThe fix is to add a setup function to the `k_heap_api` test suite that re-initializes `k_heap_test` before each test case. This ensures that every test starts with a clean heap, preventing state leakage and corruption from previous tests.\n\n**Reasoning for the fix:**\n1.  **Heap Corruption:** The `test_k_heap_aligned_alloc` test, by design, triggers an `__ASSERT` within `k_heap_aligned_alloc` due to an invalid alignment. Even though `ztest_set_fault_valid(true)` handles this gracefully for the test's pass/fail status, the `k_heap_test` object itself might be left in an undefined or corrupted state if the assertion fires mid-operation.\n2.  **Lack of Reset:** The `ZTEST_SUITE(k_heap_api, NULL, NULL, NULL, NULL, NULL);` line indicates that no setup or teardown functions are used for the suite. This means `k_heap_test`, being a global `K_HEAP_DEFINE`'d object, retains its state (including any corruption) from one test to the next.\n3.  **Sequential Execution:** Ztest runs tests alphabetically. `test_k_heap_aligned_alloc` would run before `test_k_heap_calloc`. If `test_k_heap_aligned_alloc` corrupts the heap, `test_k_heap_calloc` will then operate on that corrupted heap, leading to unpredictable behavior like a `Segmentation fault`.\n4.  **Solution:** By adding a `k_heap_api_setup` function that calls `k_heap_init` on `k_heap_test`, we ensure that the heap is always in a known, clean state at the beginning of each test, mitigating the risk of inter-test corruption.\n\n---\ntests/kernel/mem_heap/k_heap_api/src/main.c\n<<<<<<<< SEARCH\n#include <zephyr/ztest.h>\n\n/**\n * @brief Kernel Heap API Tests\n *\n * @defgroup k_heap_api_tests Kernel Heap Tests\n *\n * @ingroup all_tests\n * @{\n * @}\n */\n/*test case main entry*/\nZTEST_SUITE(k_heap_api, NULL, NULL, NULL, NULL, NULL);\n========\n#include <zephyr/ztest.h>\n\n/* Forward declaration for the test suite setup function */\nextern void k_heap_api_setup(void);\n\n/**\n * @brief Kernel Heap API Tests\n *\n * @defgroup k_heap_api_tests Kernel Heap Tests\n *\n * @ingroup all_tests\n * @{\n * @}\n */\n/*test case main entry*/\nZTEST_SUITE(k_heap_api, NULL, k_heap_api_setup, NULL, NULL, NULL);\n>>>>>>>> REPLACE\n\n--- tests/kernel/mem_heap/k_heap_api/src/test_kheap_api.c ---\n<<<<<<<< SEARCH\n/*test cases*/\n\n/* These need to be adjacent in BSS */\nvolatile uint32_t heap_guard0;\nK_HEAP_DEFINE(tiny_heap, 1);\nvolatile uint32_t heap_guard1;\n========\n/*test cases*/\n\nstatic void k_heap_api_setup(void)\n{\n\t/* Re-initialize the heap before each test */\n\tk_heap_init(&k_heap_test, k_heap_test.heap_buffer, k_heap_test.heap_size);\n}\n\n/* These need to be adjacent in BSS */\nvolatile uint32_t heap_guard0;\nK_HEAP_DEFINE(tiny_heap, 1);\nvolatile uint32_t heap_guard1;\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "tests/kernel/mem_heap/k_heap_api/src/main.c"
+          ],
+          "apply_error": "TargetFileNotFound: Target file '--- tests/kernel/mem_heap/k_heap_api/src/test_kheap_api.c ---' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 2,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b3_closed_loop",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 6858,
+            "output_tokens": 2016
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "tests/kernel/mem_heap/k_heap_api/src/test_kheap_api.c\n<<<<<<<< SEARCH\n#include <zephyr/irq_offload.h>\n#include <zephyr/ztest_error_hook.h>\n#include \"test_kheap.h\"\n\n#define STACK_SIZE (512 + CONFIG_TEST_EXTRA_STACK_SIZE)\nK_THREAD_STACK_DEFINE(tstack, STACK_SIZE);\nstruct k_thread tdata;\n\nK_HEAP_DEFINE(k_heap_test, HEAP_SIZE);\n========\n#include <zephyr/irq_offload.h>\n#include <zephyr/ztest_error_hook.h>\n#include \"test_kheap.h\"\n\n/* Define HEAP_SIZE and TIMEOUT, which are used in this file but not defined in the provided context.\n * HEAP_SIZE is inferred from test cases expecting allocations up to 1536 and failures at 2049.\n * TIMEOUT is a common value for test scenarios.\n */\n#define HEAP_SIZE 2048\n#define TIMEOUT 2000 /* microseconds */\n\n#define STACK_SIZE (512 + CONFIG_TEST_EXTRA_STACK_SIZE)\nK_THREAD_STACK_DEFINE(tstack, STACK_SIZE);\nstruct k_thread tdata;\n\nK_HEAP_DEFINE(k_heap_test, HEAP_SIZE);\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "tests/kernel/mem_heap/k_heap_api/src/test_kheap_api.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nSTART - test_k_heap_alloc_size[sizes/4]\nPASS - test_k_heap_alloc_size[sizes/4] in 0.000 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/5]\nPASS - test_k_heap_alloc_size[sizes/5] in 0.000 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/6]\nPASS - test_k_heap_alloc_size[sizes/6] in 0.000 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/7]\nPASS - test_k_heap_alloc_size[sizes/7] in 0.030 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/8]\nPASS - test_k_heap_alloc_size[sizes/8] in 0.030 seconds\n===================================================================\nSTART - test_k_heap_array_get\nPASS - test_k_heap_array_get in 0.000 seconds\n===================================================================\nSTART - test_k_heap_calloc\nSegmentation fault",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/kernel/mem_heap/k_heap_api/src/main.c",
+            "tests/kernel/mem_heap/k_heap_api/src/test_kheap_api.c"
+          ]
+        }
+      },
+      {
+        "iteration": 3,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b3_closed_loop",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 7084,
+            "output_tokens": 9219
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "The `Segmentation fault` occurring during `test_k_heap_calloc` suggests a memory corruption issue. In Zephyr's Ztest framework, if a test suite does not define setup and teardown functions, global resources like `k_heap_test` are not reset between individual test cases.\n\nThe `test_k_heap_aligned_alloc` test case explicitly triggers an `__ASSERT` for an invalid alignment value (3). While `ztest_set_fault_valid(true)` ensures this assertion is caught and the test passes, the `k_heap_test` object might be left in an inconsistent or corrupted state if the assertion occurs during an internal modification of the heap's data structures.\n\nWhen `test_k_heap_calloc` subsequently runs, it operates on this potentially corrupted heap, leading to a `Segmentation fault` when attempting memory operations.\n\nThe fix is to add a setup function to the `k_heap_api` test suite that re-initializes `k_heap_test` before each test case. This ensures that every test starts with a clean heap, preventing state leakage and corruption from previous tests.\n\n**Reasoning for the fix:**\n1.  **Heap Corruption:** The `test_k_heap_aligned_alloc` test, by design, triggers an `__ASSERT` within `k_heap_aligned_alloc` due to an invalid alignment. Even though `ztest_set_fault_valid(true)` handles this gracefully for the test's pass/fail status, the `k_heap_test` object itself might be left in an undefined or corrupted state if the assertion fires mid-operation.\n2.  **Lack of Reset:** The `ZTEST_SUITE(k_heap_api, NULL, NULL, NULL, NULL, NULL);` line indicates that no setup or teardown functions are used for the suite. This means `k_heap_test`, being a global `K_HEAP_DEFINE`'d object, retains its state (including any corruption) from one test to the next.\n3.  **Sequential Execution:** Ztest runs tests alphabetically. `test_k_heap_aligned_alloc` would run before `test_k_heap_calloc`. If `test_k_heap_aligned_alloc` corrupts the heap, `test_k_heap_calloc` will then operate on that corrupted heap, leading to unpredictable behavior like a `Segmentation fault`.\n4.  **Solution:** By adding a `k_heap_api_setup` function that calls `k_heap_init` on `k_heap_test`, we ensure that the heap is always in a known, clean state at the beginning of each test, mitigating the risk of inter-test corruption.\n\n---\ntests/kernel/mem_heap/k_heap_api/src/main.c\n<<<<<<<< SEARCH\n#include <zephyr/ztest.h>\n\n/**\n * @brief Kernel Heap API Tests\n *\n * @defgroup k_heap_api_tests Kernel Heap Tests\n *\n * @ingroup all_tests\n * @{\n * @}\n */\n/*test case main entry*/\nZTEST_SUITE(k_heap_api, NULL, NULL, NULL, NULL, NULL);\n========\n#include <zephyr/ztest.h>\n\n/* Forward declaration for the test suite setup function */\nextern void k_heap_api_setup(void);\n\n/**\n * @brief Kernel Heap API Tests\n *\n * @defgroup k_heap_api_tests Kernel Heap Tests\n *\n * @ingroup all_tests\n * @{\n * @}\n */\n/*test case main entry*/\nZTEST_SUITE(k_heap_api, NULL, k_heap_api_setup, NULL, NULL, NULL);\n>>>>>>>> REPLACE\n\n--- tests/kernel/mem_heap/k_heap_api/src/test_kheap_api.c ---\n<<<<<<<< SEARCH\n/*test cases*/\n\n/* These need to be adjacent in BSS */\nvolatile uint32_t heap_guard0;\nK_HEAP_DEFINE(tiny_heap, 1);\nvolatile uint32_t heap_guard1;\n========\n/*test cases*/\n\nstatic void k_heap_api_setup(void)\n{\n\t/* Re-initialize the heap before each test */\n\tk_heap_init(&k_heap_test, k_heap_test.heap_buffer, k_heap_test.heap_size);\n}\n\n/* These need to be adjacent in BSS */\nvolatile uint32_t heap_guard0;\nK_HEAP_DEFINE(tiny_heap, 1);\nvolatile uint32_t heap_guard1;\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "tests/kernel/mem_heap/k_heap_api/src/main.c"
+          ],
+          "apply_error": "TargetFileNotFound: Target file '--- tests/kernel/mem_heap/k_heap_api/src/test_kheap_api.c ---' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 4,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b3_closed_loop",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 6858,
+            "output_tokens": 2479
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "tests/kernel/mem_heap/k_heap_api/src/test_kheap_api.c\n<<<<<<<< SEARCH\n\tztest_test_fail();\n}\n\n/*\n * should be run last because the double-freeing corrupts memory\n * (hence the prefix z_ in the test's name)\n */\n/**\n * @brief Test k_heap_free() API double free edge case.\n *\n========\n\tztest_test_fail();\n\tztest_set_fault_valid(false); /* Reset fault handling */\n}\n\n/*\n * should be run last because the double-freeing corrupts memory\n * (hence the prefix z_ in the test's name)\n */\n/**\n * @brief Test k_heap_free() API double free edge case.\n *\n>>>>>>>> REPLACE\ntests/kernel/mem_heap/k_heap_api/src/test_kheap_api.c\n<<<<<<<< SEARCH\n\t * If calling k_heap_free twice on the same buffer didn't result in an assert\n\t * then the API isn't working as expected, and the test shall fail.\n\t */\n\tztest_test_fail();\n}\n\n/**\n * @brief Test initializing a memory heap at run time over a provided region\n========\n\t * If calling k_heap_free twice on the same buffer didn't result in an assert\n\t * then the API isn't working as expected, and the test shall fail.\n\t */\n\tztest_test_fail();\n\tztest_set_fault_valid(false); /* Reset fault handling */\n}\n\n/**\n * @brief Test initializing a memory heap at run time over a provided region\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "tests/kernel/mem_heap/k_heap_api/src/test_kheap_api.c",
+            "tests/kernel/mem_heap/k_heap_api/src/test_kheap_api.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nSTART - test_k_heap_alloc_size[sizes/4]\nPASS - test_k_heap_alloc_size[sizes/4] in 0.000 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/5]\nPASS - test_k_heap_alloc_size[sizes/5] in 0.000 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/6]\nPASS - test_k_heap_alloc_size[sizes/6] in 0.000 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/7]\nPASS - test_k_heap_alloc_size[sizes/7] in 0.030 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/8]\nPASS - test_k_heap_alloc_size[sizes/8] in 0.030 seconds\n===================================================================\nSTART - test_k_heap_array_get\nPASS - test_k_heap_array_get in 0.000 seconds\n===================================================================\nSTART - test_k_heap_calloc\nSegmentation fault",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/kernel/mem_heap/k_heap_api/src/main.c",
+            "tests/kernel/mem_heap/k_heap_api/src/test_kheap_api.c"
+          ]
+        }
+      },
+      {
+        "iteration": 5,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b3_closed_loop",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 7084,
+            "output_tokens": 9219
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "The `Segmentation fault` occurring during `test_k_heap_calloc` suggests a memory corruption issue. In Zephyr's Ztest framework, if a test suite does not define setup and teardown functions, global resources like `k_heap_test` are not reset between individual test cases.\n\nThe `test_k_heap_aligned_alloc` test case explicitly triggers an `__ASSERT` for an invalid alignment value (3). While `ztest_set_fault_valid(true)` ensures this assertion is caught and the test passes, the `k_heap_test` object might be left in an inconsistent or corrupted state if the assertion occurs during an internal modification of the heap's data structures.\n\nWhen `test_k_heap_calloc` subsequently runs, it operates on this potentially corrupted heap, leading to a `Segmentation fault` when attempting memory operations.\n\nThe fix is to add a setup function to the `k_heap_api` test suite that re-initializes `k_heap_test` before each test case. This ensures that every test starts with a clean heap, preventing state leakage and corruption from previous tests.\n\n**Reasoning for the fix:**\n1.  **Heap Corruption:** The `test_k_heap_aligned_alloc` test, by design, triggers an `__ASSERT` within `k_heap_aligned_alloc` due to an invalid alignment. Even though `ztest_set_fault_valid(true)` handles this gracefully for the test's pass/fail status, the `k_heap_test` object itself might be left in an undefined or corrupted state if the assertion fires mid-operation.\n2.  **Lack of Reset:** The `ZTEST_SUITE(k_heap_api, NULL, NULL, NULL, NULL, NULL);` line indicates that no setup or teardown functions are used for the suite. This means `k_heap_test`, being a global `K_HEAP_DEFINE`'d object, retains its state (including any corruption) from one test to the next.\n3.  **Sequential Execution:** Ztest runs tests alphabetically. `test_k_heap_aligned_alloc` would run before `test_k_heap_calloc`. If `test_k_heap_aligned_alloc` corrupts the heap, `test_k_heap_calloc` will then operate on that corrupted heap, leading to unpredictable behavior like a `Segmentation fault`.\n4.  **Solution:** By adding a `k_heap_api_setup` function that calls `k_heap_init` on `k_heap_test`, we ensure that the heap is always in a known, clean state at the beginning of each test, mitigating the risk of inter-test corruption.\n\n---\ntests/kernel/mem_heap/k_heap_api/src/main.c\n<<<<<<<< SEARCH\n#include <zephyr/ztest.h>\n\n/**\n * @brief Kernel Heap API Tests\n *\n * @defgroup k_heap_api_tests Kernel Heap Tests\n *\n * @ingroup all_tests\n * @{\n * @}\n */\n/*test case main entry*/\nZTEST_SUITE(k_heap_api, NULL, NULL, NULL, NULL, NULL);\n========\n#include <zephyr/ztest.h>\n\n/* Forward declaration for the test suite setup function */\nextern void k_heap_api_setup(void);\n\n/**\n * @brief Kernel Heap API Tests\n *\n * @defgroup k_heap_api_tests Kernel Heap Tests\n *\n * @ingroup all_tests\n * @{\n * @}\n */\n/*test case main entry*/\nZTEST_SUITE(k_heap_api, NULL, k_heap_api_setup, NULL, NULL, NULL);\n>>>>>>>> REPLACE\n\n--- tests/kernel/mem_heap/k_heap_api/src/test_kheap_api.c ---\n<<<<<<<< SEARCH\n/*test cases*/\n\n/* These need to be adjacent in BSS */\nvolatile uint32_t heap_guard0;\nK_HEAP_DEFINE(tiny_heap, 1);\nvolatile uint32_t heap_guard1;\n========\n/*test cases*/\n\nstatic void k_heap_api_setup(void)\n{\n\t/* Re-initialize the heap before each test */\n\tk_heap_init(&k_heap_test, k_heap_test.heap_buffer, k_heap_test.heap_size);\n}\n\n/* These need to be adjacent in BSS */\nvolatile uint32_t heap_guard0;\nK_HEAP_DEFINE(tiny_heap, 1);\nvolatile uint32_t heap_guard1;\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "tests/kernel/mem_heap/k_heap_api/src/main.c"
+          ],
+          "apply_error": "TargetFileNotFound: Target file '--- tests/kernel/mem_heap/k_heap_api/src/test_kheap_api.c ---' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_k_heap_alloc_size[sizes/4]\nPASS - test_k_heap_alloc_size[sizes/4] in 0.000 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/5]\nPASS - test_k_heap_alloc_size[sizes/5] in 0.000 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/6]\nPASS - test_k_heap_alloc_size[sizes/6] in 0.000 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/7]\nPASS - test_k_heap_alloc_size[sizes/7] in 0.030 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/8]\nPASS - test_k_heap_alloc_size[sizes/8] in 0.030 seconds\n===================================================================\nSTART - test_k_heap_array_get\nPASS - test_k_heap_array_get in 0.000 seconds\n===================================================================\nSTART - test_k_heap_calloc\nSegmentation fault",
+    "protected_file_count": 6,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b3/v3new_runtime_kheap_f914b6d",
+    "api_events": [
+      {
+        "kind": "retry",
+        "what": "b3_closed_loop",
+        "attempt": 1,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 115
+      },
+      {
+        "kind": "retry",
+        "what": "b3_closed_loop",
+        "attempt": 1,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 141
+      },
+      {
+        "kind": "retry",
+        "what": "b3_closed_loop",
+        "attempt": 2,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 684
+      }
+    ],
+    "started_at": "2026-10-10T05:58:23+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
