@@ -1,0 +1,79 @@
+[
+  {
+    "case_id": "v3new_runtime_min_heap_134e694",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 132.43764424324036,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 581,
+            "output_tokens": 11535
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": {
+            "filepath": "tests/lib/min_heap/src/test_min_heap.c",
+            "content": "#include <zephyr/ztest.h>\n#include <zephyr/sys/min_heap.h>\n#include <zephyr/sys/heap.h>\n#include <zephyr/kernel.h>\n#include <errno.h>\n\n#define NUM_ELEMENTS 100\n#define HEAP_NODE_SIZE (sizeof(sys_dnode_t) + sizeof(int))\n\n/*\n * Increase heap size to ensure enough memory for NUM_ELEMENTS.\n * The original size was likely too small, causing -ENOMEM during allocation.\n * Add some buffer for heap overhead.\n */\n#define TEST_HEAP_SIZE (NUM_ELEMENTS * HEAP_NODE_SIZE + 256)\n\nK_HEAP_DEFINE(test_heap_mem, TEST_HEAP_SIZE);\n\nstruct test_node {\n    sys_dnode_t node;\n    int value;\n};\n\nstatic struct sys_min_heap min_heap;\n\nstatic void *alloc_node(int value)\n{\n    struct test_node *node = sys_heap_alloc(&test_heap_mem, sizeof(struct test_node));\n    if (node) {\n        node->value = value;\n    }\n    return node;\n}\n\nstatic void free_node(void *node)\n{\n    sys_heap_free(&test_heap_mem, node);\n}\n\nstatic void test_min_heap_setup(void)\n{\n    sys_min_heap_init(&min_heap);\n    /* The K_HEAP_DEFINE creates a global heap. The teardown should free all nodes. */\n}\n\nstatic void test_min_heap_teardown(void)\n{\n    /* Free all remaining nodes in the heap to clean up for the next test */\n    struct test_node *node;\n    while ((node = (struct test_node *)sys_min_heap_get_min(&min_heap)) != NULL) {\n        sys_min_heap_remove(&min_heap, &node->node);\n        free_node(node);\n    }\n}\n\nvoid min_heap_api_test_insert(void)\n{\n    struct test_node *nodes[NUM_ELEMENTS];\n    int ret = 0; /* Initialize ret to 0 (success) */\n\n    /* Insert elements with varying values */\n    for (int i = 0; i < NUM_ELEMENTS; i++) {\n        nodes[i] = alloc_node(NUM_ELEMENTS - i); /* Insert in reverse order to test heap property */\n        if (nodes[i] == NULL) {\n            ret = -ENOMEM; /* Set ret to -ENOMEM on allocation failure */\n            /* If allocation fails, we can stop inserting, but the assertion will catch it. */\n            break; /* Exit loop to prevent further operations on NULL nodes */\n        } else {\n            sys_min_heap_insert(&min_heap, &nodes[i]->node);\n        }\n    }\n\n    /* This is the assertion that failed at line 131: (ret not equal to -ENOMEM) */\n    zassert_not_equal(ret, -ENOMEM, \"Allocation failed unexpectedly, ret was %d\", ret);\n\n    /* If allocation succeeded, proceed with other checks */\n    if (ret == 0) {\n        /* Verify size */\n        zassert_equal(sys_min_heap_size(&min_heap), NUM_ELEMENTS, \"Heap size mismatch\");\n\n        /* Verify min element */\n        struct test_node *min_node = (struct test_node *)sys_min_heap_peek_min(&min_heap);\n        zassert_not_null(min_node, \"Peek min returned NULL\");\n        zassert_equal(min_node->value, 1, \"Min element value incorrect\"); /* Smallest value is 1 */\n\n        /* Remove and verify elements in order */\n        for (int i = 0; i < NUM_ELEMENTS; i++) {\n            min_node = (struct test_node *)sys_min_heap_get_min(&min_heap);\n            zassert_not_null(min_node, \"Get min returned NULL at iteration %d\", i);\n            zassert_equal(min_node->value, i + 1, \"Removed element value incorrect at iteration %d\", i);\n            free_node(min_node);\n        }\n\n        zassert_true(sys_min_heap_is_empty(&min_heap), \"Heap not empty after removing all elements\");\n        zassert_equal(sys_min_heap_size(&min_heap), 0, \"Heap size not zero after removing all elements\");\n    }\n}\n\nvoid test_find_and_remove(void)\n{\n    struct test_node *n1 = alloc_node(10);\n    struct test_node *n2 = alloc_node(20);\n    struct test_node *n3 = alloc_node(5);\n    struct test_node *n4 = alloc_node(15);\n\n    zassert_not_null(n1, \"Failed to allocate n1\");\n    zassert_not_null(n2, \"Failed to allocate n2\");\n    zassert_not_null(n3, \"Failed to allocate n3\");\n    zassert_not_null(n4, \"Failed to allocate n4\");\n\n    sys_min_heap_insert(&min_heap, &n1->node);\n    sys_min_heap_insert(&min_heap, &n2->node);\n    sys_min_heap_insert(&min_heap, &n3->node);\n    sys_min_heap_insert(&min_heap, &n4->node);\n\n    zassert_equal(sys_min_heap_size(&min_heap), 4, \"Heap size mismatch\");\n    zassert_equal(((struct test_node *)sys_min_heap_peek_min(&min_heap))->value, 5, \"Min value incorrect\");\n\n    /* Remove n2 (value 20) */\n    sys_min_heap_remove(&min_heap, &n2->node);\n    free_node(n2);\n    zassert_equal(sys_min_heap_size(&min_heap), 3, \"Heap size mismatch after remove\");\n    zassert_equal(((struct test_node *)sys_min_heap_peek_min(&min_heap))->value, 5, \"Min value incorrect after remove\");\n\n    /* Remove n3 (value 5) */\n    sys_min_heap_remove(&min_heap, &n3->node);\n    free_node(n3);\n    zassert_equal(sys_min_heap_size(&min_heap), 2, \"Heap size mismatch after remove\");\n    zassert_equal(((struct test_node *)sys_min_heap_peek_min(&min_heap))->value, 10, \"Min value incorrect after remove\");\n\n    /* Remove n1 (value 10) */\n    sys_min_heap_remove(&min_heap, &n1->node);\n    free_node(n1);\n    zassert_equal(sys_min_heap_size(&min_heap), 1, \"Heap size mismatch after remove\");\n    zassert_equal(((struct test_node *)sys_min_heap_peek_min(&min_heap))->value, 15, \"Min value incorrect after remove\");\n\n    /* Remove n4 (value 15) */\n    sys_min_heap_remove(&min_heap, &n4->node);\n    free_node(n4);\n    zassert_true(sys_min_heap_is_empty(&min_heap), \"Heap not empty\");\n}\n\nvoid test_empty_heap(void)\n{\n    zassert_true(sys_min_heap_is_empty(&min_heap), \"Heap not empty initially\");\n    zassert_equal(sys_min_heap_size(&min_heap), 0, \"Heap size not zero initially\");\n    zassert_is_null(sys_min_heap_peek_min(&min_heap), \"Peek min on empty heap should be NULL\");\n    zassert_is_null(sys_min_heap_get_min(&min_heap), \"Get min on empty heap should be NULL\");\n}\n\nvoid test_single_element(void)\n{\n    struct test_node *n1 = alloc_node(100);\n    zassert_not_null(n1, \"Failed to allocate n1\");\n\n    sys_min_heap_insert(&min_heap, &n1->node);\n    zassert_equal(sys_min_heap_size(&min_heap), 1, \"Heap size mismatch\");\n    zassert_equal(((struct test_node *)sys_min_heap_peek_min(&min_heap))->value, 100, \"Min value incorrect\");\n\n    struct test_node *removed_node = (struct test_node *)sys_min_heap_get_min(&min_heap);\n    zassert_equal(removed_node->value, 100, \"Removed value incorrect\");\n    free_node(removed_node);\n\n    zassert_true(sys_min_heap_is_empty(&min_heap), \"Heap not empty\");\n}\n\n\nZTEST_SUITE(min_heap_api, NULL, test_min_heap_setup, NULL, test_min_heap_teardown, NULL);\n\nZTEST(min_heap_api, test_insert) { min_heap_api_test_insert(); }\nZTEST(min_heap_api, test_find_and_remove) { test_find_and_remove(); }\nZTEST(min_heap_api, test_empty_heap) { test_empty_heap(); }\nZTEST(min_heap_api, test_single_element) { test_single_element(); }\n"
+          },
+          "applied_files": [
+            "tests/lib/min_heap/src/test_min_heap.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\n[130/136] Linking C executable zephyr/zephyr_pre0.elf\n[131/136] Generating linker.cmd\n[132/136] Generating isr_tables.c, isr_tables_vt.ld, isr_tables_swi.ld\n[133/136] Building C object zephyr/CMakeFiles/zephyr_final.dir/misc/empty_file.c.obj\n[134/136] Building C object zephyr/CMakeFiles/zephyr_final.dir/isr_tables.c.obj\n[135/136] Linking C executable zephyr/zephyr.elf\nMemory region         Used Size  Region Size  %age Used\nRAM:       52208 B       256 MB      0.02%\nIDT_LIST:           0 B         4 KB      0.00%\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: qemu_riscv32/qemu_virt_riscv32\n[135/136] To exit from QEMU enter: 'CTRL+a, x'[QEMU] CPU: rv32i,i=on,m=on,a=on,f=on,d=on,c=on,zicsr=on,zifencei=on,pmp=on,u=on\nqemu-system-riscv32: warning: No satp mode set. Defaulting to 'bare'\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE min_heap_api\n===================================================================\nSTART - test_find_and_remove\nPASS - test_find_and_remove in 0.001 seconds\n===================================================================\nSTART - test_insert\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/min_heap/src/test_min_heap.c:131: min_heap_api_test_insert: (ret not equal to -ENOMEM)",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/lib/min_heap/src/test_min_heap.c"
+          ]
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[130/136] Linking C executable zephyr/zephyr_pre0.elf\n[131/136] Generating linker.cmd\n[132/136] Generating isr_tables.c, isr_tables_vt.ld, isr_tables_swi.ld\n[133/136] Building C object zephyr/CMakeFiles/zephyr_final.dir/misc/empty_file.c.obj\n[134/136] Building C object zephyr/CMakeFiles/zephyr_final.dir/isr_tables.c.obj\n[135/136] Linking C executable zephyr/zephyr.elf\nMemory region         Used Size  Region Size  %age Used\nRAM:       52208 B       256 MB      0.02%\nIDT_LIST:           0 B         4 KB      0.00%\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: qemu_riscv32/qemu_virt_riscv32\n[135/136] To exit from QEMU enter: 'CTRL+a, x'[QEMU] CPU: rv32i,i=on,m=on,a=on,f=on,d=on,c=on,zicsr=on,zifencei=on,pmp=on,u=on\nqemu-system-riscv32: warning: No satp mode set. Defaulting to 'bare'\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE min_heap_api\n===================================================================\nSTART - test_find_and_remove\nPASS - test_find_and_remove in 0.001 seconds\n===================================================================\nSTART - test_insert\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/min_heap/src/test_min_heap.c:131: min_heap_api_test_insert: (ret not equal to -ENOMEM)",
+    "protected_file_count": 4,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3new_runtime_min_heap_134e694",
+    "api_events": [],
+    "started_at": "2026-10-08T06:35:52+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

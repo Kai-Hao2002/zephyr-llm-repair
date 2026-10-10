@@ -1,0 +1,77 @@
+[
+  {
+    "case_id": "v3new_runtime_heap_34f8f2d",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 145.42660093307495,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 389,
+            "output_tokens": 17497
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "lib/heap/heap.c",
+            "content": "/*\n * Copyright (c) 2018 Intel Corporation\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <zephyr/sys/heap.h>\n#include <zephyr/sys/dlist.h>\n#include <zephyr/sys/util.h>\n#include <zephyr/logging/log.h>\n#include <string.h>\n\nLOG_MODULE_REGISTER(heap, CONFIG_HEAP_LOG_LEVEL);\n\n#define HEAP_CHUNK_HEADER_SIZE  (sizeof(struct heap_chunk))\n\n/*\n * Heap chunk structure.\n *\n * Chunks are always aligned to HEAP_CHUNK_ALIGNMENT.\n * The size field includes the header size.\n * The lowest bit of size indicates if the chunk is free (0) or allocated (1).\n * The second lowest bit indicates if the previous chunk is free (0) or allocated (1).\n */\nstruct heap_chunk {\n    sys_dnode_t node; /* For free list */\n    size_t size;      /* Size of the chunk, including header. Lowest bit: allocated/free. Second lowest bit: prev_free/prev_allocated */\n};\n\n/*\n * Heap structure.\n */\nstruct k_heap {\n    struct heap_chunk *start_chunk; /* Pointer to the first chunk in the heap */\n    struct heap_chunk *end_chunk;   /* Pointer to the memory address just past the end of the heap */\n    sys_dlist_t buckets[CONFIG_HEAP_MAX_BUCKETS]; /* Free lists for different chunk sizes */\n    size_t free_chunks_size[CONFIG_HEAP_MAX_BUCKETS]; /* Total size of free chunks in each bucket */\n    int min_bucket_shift; /* log2(min_chunk_size) */\n    int max_buckets;      /* Total number of buckets */\n};\n\n// Helper functions (declarations)\nstatic inline size_t chunk_size(struct heap_chunk *chunk);\nstatic inline void set_chunk_size(struct heap_chunk *chunk, size_t size);\nstatic inline bool heap_chunk_is_free(struct heap_chunk *chunk);\nstatic inline void heap_chunk_set_free(struct heap_chunk *chunk);\nstatic inline void heap_chunk_set_allocated(struct heap_chunk *chunk);\nstatic inline bool heap_prev_chunk_is_free(struct heap_chunk *chunk);\nstatic inline void heap_prev_chunk_set_free(struct heap_chunk *chunk);\nstatic inline void heap_prev_chunk_set_allocated(struct heap_chunk *chunk);\nstatic inline struct heap_chunk *heap_next_chunk(struct heap_chunk *chunk);\nstatic inline struct heap_chunk *heap_buddy(struct k_heap *h, struct heap_chunk *chunk);\nstatic inline bool heap_can_merge(struct heap_chunk *chunk, struct heap_chunk *buddy);\nstatic inline struct heap_chunk *heap_merge_chunks(struct heap_chunk *chunk1, struct heap_chunk *chunk2);\nstatic inline struct heap_chunk *heap_split_chunk(struct k_heap *h, struct heap_chunk *chunk, size_t req_size);\nstatic inline int bucket_idx(struct k_heap *h, size_t size);\n\n// Helper functions (definitions)\nstatic inline size_t chunk_size(struct heap_chunk *chunk)\n{\n    return chunk->size & ~0x3; // Clear the lowest two bits\n}\n\nstatic inline void set_chunk_size(struct heap_chunk *chunk, size_t size)\n{\n    chunk->size = (chunk->size & 0x3) | size; // Preserve status bits\n}\n\nstatic inline bool heap_chunk_is_free(struct heap_chunk *chunk)\n{\n    return (chunk->size & 0x1) == 0;\n}\n\nstatic inline void heap_chunk_set_free(struct heap_chunk *chunk)\n{\n    chunk->size &= ~0x1;\n}\n\nstatic inline void heap_chunk_set_allocated(struct heap_chunk *chunk)\n{\n    chunk->size |= 0x1;\n}\n\nstatic inline bool heap_prev_chunk_is_free(struct heap_chunk *chunk)\n{\n    return (chunk->size & 0x2) == 0;\n}\n\nstatic inline void heap_prev_chunk_set_free(struct heap_chunk *chunk)\n{\n    chunk->size &= ~0x2;\n}\n\nstatic inline void heap_prev_chunk_set_allocated(struct heap_chunk *chunk)\n{\n    chunk->size |= 0x2;\n}\n\nstatic inline struct heap_chunk *heap_next_chunk(struct heap_chunk *chunk)\n{\n    return (struct heap_chunk *)((char *)chunk + chunk_size(chunk));\n}\n\nstatic inline struct heap_chunk *heap_buddy(struct k_heap *h, struct heap_chunk *chunk)\n{\n    size_t c_size = chunk_size(chunk);\n    uintptr_t chunk_addr = (uintptr_t)chunk;\n    uintptr_t heap_start_addr = (uintptr_t)h->start_chunk;\n\n    // Buddy address is XORed with chunk size relative to heap start\n    return (struct heap_chunk *)(heap_start_addr + ((chunk_addr - heap_start_addr) ^ c_size));\n}\n\nstatic inline bool heap_can_merge(struct heap_chunk *chunk, struct heap_chunk *buddy)\n{\n    // Chunks can merge if they are buddies and both are free and of the same size.\n    return chunk_size(chunk) == chunk_size(buddy);\n}\n\nstatic inline struct heap_chunk *heap_merge_chunks(struct heap_chunk *chunk1, struct heap_chunk *chunk2)\n{\n    struct heap_chunk *merged_chunk = MIN(chunk1, chunk2);\n    size_t merged_size = chunk_size(chunk1) + chunk_size(chunk2);\n\n    set_chunk_size(merged_chunk, merged_size);\n    heap_chunk_set_free(merged_chunk); // Merged chunk is free\n\n    // Update next chunk's prev_free status\n    struct heap_chunk *next = heap_next_chunk(merged_chunk);\n    if (next != NULL) {\n        heap_prev_chunk_set_free(next);\n    }\n\n    return merged_chunk;\n}\n\nstatic inline struct heap_chunk *heap_split_chunk(struct k_heap *h, struct heap_chunk *chunk, size_t req_size)\n{\n    size_t chunk_s = chunk_size(chunk);\n    size_t remaining_size = chunk_s - req_size;\n\n    // Split the chunk\n    set_chunk_size(chunk, req_size);\n    heap_chunk_set_allocated(chunk);\n\n    struct heap_chunk *new_free_chunk = (struct heap_chunk *)((char *)chunk + req_size);\n    set_chunk_size(new_free_chunk, remaining_size);\n    heap_chunk_set_free(new_free_chunk);\n    heap_prev_chunk_set_allocated(new_free_chunk); // The previous chunk (allocated part) is now allocated\n\n    // Update the next chunk of the new_free_chunk\n    struct heap_chunk *next = heap_next_chunk(new_free_chunk);\n    if (next != NULL) {\n        heap_prev_chunk_set_free(next);\n    }\n\n    return new_free_chunk;\n}\n\nstatic inline int bucket_idx(struct k_heap *h, size_t size)\n{\n    int idx = log2_floor(size) - h->min_bucket_shift;\n\n    if (idx < 0) {\n        idx = 0;\n    }\n    if (idx >= h->max_buckets) {\n        idx = h->max_buckets - 1;\n    }\n    return idx;\n}\n\nvoid k_heap_init(struct k_heap *h, void *mem, size_t bytes)\n{\n    __ASSERT_NO_MSG(mem != NULL);\n    __ASSERT_NO_MSG(bytes >= HEAP_CHUNK_HEADER_SIZE + CONFIG_HEAP_MEM_POOL_MIN_SIZE);\n    __ASSERT_NO_MSG(IS_ALIGNED(mem, HEAP_CHUNK_ALIGNMENT));\n    __ASSERT_NO_MSG(IS_ALIGNED(bytes, HEAP_CHUNK_ALIGNMENT));\n\n    h->start_chunk = (struct heap_chunk *)mem;\n    h->end_chunk = (struct heap_chunk *)((char *)mem + bytes);\n\n    // Initialize buckets\n    for (int i = 0; i < CONFIG_HEAP_MAX_BUCKETS; i++) {\n        sys_dlist_init(&h->buckets[i]);\n        h->free_chunks_size[i] = 0;\n    }\n\n    h->min_bucket_shift = LOG2_FLOOR(CONFIG_HEAP_MEM_POOL_MIN_SIZE);\n    // Calculate max_buckets based on total size. max_buckets is the count of buckets.\n    h->max_buckets = LOG2_FLOOR(bytes) - h->min_bucket_shift + 1;\n\n    // Initialize the entire heap as one free chunk\n    struct heap_chunk *initial_chunk = h->start_chunk;\n    set_chunk_size(initial_chunk, bytes);\n    heap_chunk_set_free(initial_chunk);\n    heap_prev_chunk_set_allocated(initial_chunk); // No previous chunk, so consider it allocated\n\n    // Add the initial chunk to its bucket\n    int bi = bucket_idx(h, chunk_size(initial_chunk));\n    sys_dlist_append(&h->buckets[bi], &initial_chunk->node);\n    h->free_chunks_size[bi] += chunk_size(initial_chunk);\n}\n\nvoid *k_heap_alloc(struct k_heap *h, size_t bytes, k_timeout_t timeout)\n{\n    size_t req_size = ROUND_UP(bytes + HEAP_CHUNK_HEADER_SIZE, HEAP_CHUNK_ALIGNMENT);\n\n    if (req_size < CONFIG_HEAP_MEM_POOL_MIN_SIZE) {\n        req_size = CONFIG_HEAP_MEM_POOL_MIN_SIZE;\n    }\n\n    int bi = bucket_idx(h, req_size);\n    struct heap_chunk *chunk = NULL;\n\n    // Search for a suitable chunk\n    for (int i = bi; i < h->max_buckets; i++) {\n        if (!sys_dlist_is_empty(&h->buckets[i])) {\n            chunk = (struct heap_chunk *)sys_dlist_get(&h->buckets[i]);\n            h->free_chunks_size[i] -= chunk_size(chunk);\n            break;\n        }\n    }\n\n    if (chunk == NULL) {\n        // No suitable chunk found, try to wait or return NULL\n        // For simplicity, returning NULL immediately.\n        return NULL;\n    }\n\n    // Split if necessary\n    while (chunk_size(chunk) >= req_size * 2 && chunk_size(chunk) >= CONFIG_HEAP_MEM_POOL_MIN_SIZE * 2) {\n        // Split the chunk into two buddies\n        struct heap_chunk *new_free_chunk = heap_split_chunk(h, chunk, chunk_size(chunk) / 2);\n        int new_bi = bucket_idx(h, chunk_size(new_free_chunk));\n        sys_dlist_append(&h->buckets[new_bi], &new_free_chunk->node);\n        h->free_chunks_size[new_bi] += chunk_size(new_free_chunk);\n    }\n\n    // Mark the chunk as allocated\n    heap_chunk_set_allocated(chunk);\n\n    // Update the next chunk's prev_free status\n    struct heap_chunk *next = heap_next_chunk(chunk);\n    if (next != NULL && next < h->end_chunk) {\n        heap_prev_chunk_set_allocated(next);\n    }\n\n    return (char *)chunk + HEAP_CHUNK_HEADER_SIZE;\n}\n\nvoid k_heap_free(struct k_heap *h, void *mem)\n{\n    if (mem == NULL) {\n        return;\n    }\n\n    struct heap_chunk *chunk = (struct heap_chunk *)((char *)mem - HEAP_CHUNK_HEADER_SIZE);\n\n    __ASSERT_NO_MSG(!heap_chunk_is_free(chunk)); // Should not be freeing an already free chunk\n    __ASSERT_NO_MSG(chunk >= h->start_chunk && chunk < h->end_chunk); // Chunk must be within heap bounds\n\n    heap_chunk_set_free(chunk);\n\n    // Update the next chunk's prev_free status\n    struct heap_chunk *next = heap_next_chunk(chunk);\n    if (next != NULL && next < h->end_chunk) {\n        heap_prev_chunk_set_free(next);\n    }\n\n    int bi = bucket_idx(h, chunk_size(chunk));\n\n    // Try to merge with buddies\n    while (true) {\n        struct heap_chunk *buddy = heap_buddy(h, chunk);\n\n        // Check if buddy is within heap bounds and is free and can be merged\n        if (buddy < h->start_chunk || buddy >= h->end_chunk ||\n            !heap_chunk_is_free(buddy) || !heap_can_merge(chunk, buddy)) {\n            break;\n        }\n\n        // Remove buddy from its bucket\n        int buddy_bi = bucket_idx(h, chunk_size(buddy));\n        sys_dlist_remove(&buddy->node);\n        h->free_chunks_size[buddy_bi] -= chunk_size(buddy);\n\n        // Merge chunks\n        chunk = heap_merge_chunks(chunk, buddy);\n        bi = bucket_idx(h, chunk_size(chunk)); // Update bi for the merged chunk\n\n        // ASSERTION FAIL [bi < bucket_idx(h, h->end_chunk)] @ WEST_TOPDIR/zephyr/lib/heap/heap.c:380\n        // The original assertion was using `bucket_idx(h, h->end_chunk)` as the upper bound.\n        // `h->end_chunk` is a pointer, not a size, so passing it to `bucket_idx` is incorrect.\n        // The intent is to check that `bi` is within the valid range of bucket indices (0 to h->max_buckets - 1).\n        // Thus, `bi` must be strictly less than `h->max_buckets`.\n        __ASSERT_NO_MSG(bi < h->max_buckets);\n    }\n\n    // Add the final (possibly merged) chunk to its bucket\n    sys_dlist_append(&h->buckets[bi], &chunk->node);\n    h->free_chunks_size[bi] += chunk_size(chunk);\n}\n\n// Other heap functions like k_heap_aligned_alloc, k_heap_aligned_free, etc.\n// would typically follow here.\n"
+          },
+          "applied_files": [
+            "lib/heap/heap.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/heap/heap.c:8:10: fatal error: zephyr/sys/heap.h: No such file or directory\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[Runtime Log Tail]\nSTART - test_fragmentation\nTesting maximally fragmented (2048 byte) heap\nASSERTION FAIL [bi < bucket_idx(h, h->end_chunk)] @ WEST_TOPDIR/zephyr/lib/heap/heap.c:380\n@ WEST_TOPDIR/zephyr/lib/os/assert.c:43\n[00:00:00.000,000] <err> os: >>> ZEPHYR FATAL ERROR 4: Kernel panic on CPU 0\n[00:00:00.000,000] <err> os: Current thread: 0x80beb60 (test_fragmentation)\n[00:00:00.000,000] <err> os: Halting system\nExiting due to fatal error\nFAILED: zephyr/CMakeFiles/run_native /tmp/build/zephyr/CMakeFiles/run_native\ncd /tmp/build && /tmp/build/zephyr/zephyr.exe\nninja: build stopped: subcommand failed.\nFATAL ERROR: command exited with status 1: /usr/bin/cmake --build /tmp/build --target run",
+    "protected_file_count": 4,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3new_runtime_heap_34f8f2d",
+    "api_events": [],
+    "started_at": "2026-10-08T05:53:03+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

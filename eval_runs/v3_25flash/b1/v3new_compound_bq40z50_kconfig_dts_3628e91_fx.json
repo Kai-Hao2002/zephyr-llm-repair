@@ -1,0 +1,77 @@
+[
+  {
+    "case_id": "v3new_compound_bq40z50_kconfig_dts_3628e91_fx",
+    "category": "compound",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 113.39046597480774,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 223,
+            "output_tokens": 10143
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "drivers/i2c/i2c_emul.c",
+            "content": "/*\n * Copyright (c) 2019-2021 Nordic Semiconductor ASA\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#define DT_DRV_COMPAT zephyr_i2c_emul_controller\n\n#include <zephyr/drivers/i2c.h>\n#include <zephyr/drivers/i2c_emul.h>\n#include <zephyr/kernel.h>\n#include <zephyr/device.h>\n#include <zephyr/sys/util.h>\n#include <zephyr/logging/log.h>\n\nLOG_MODULE_REGISTER(i2c_emul, CONFIG_I2C_LOG_LEVEL);\n\nstruct i2c_emul_data {\n\tstruct k_mutex mutex;\n\tconst struct i2c_emul *emul_list;\n\tsize_t emul_list_len;\n};\n\nstruct i2c_emul_config {\n\tuint32_t bus_speed;\n};\n\nstatic int i2c_emul_transfer(const struct device *dev, struct i2c_msg *msgs,\n\t\t\t     uint8_t num_msgs, uint16_t slave_address)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\tint rc;\n\n\tk_mutex_lock(&data->mutex, K_FOREVER);\n\n\tfor (size_t i = 0; i < data->emul_list_len; i++) {\n\t\tif (data->emul_list[i].addr == slave_address) {\n\t\t\trc = data->emul_list[i].api->transfer(\n\t\t\t\tdata->emul_list[i].target, msgs, num_msgs,\n\t\t\t\tslave_address);\n\t\t\tk_mutex_unlock(&data->mutex);\n\t\t\treturn rc;\n\t\t}\n\t}\n\n\tLOG_ERR(\"No emulator for slave address 0x%02x\", slave_address);\n\tk_mutex_unlock(&data->mutex);\n\treturn -ENODEV;\n}\n\nstatic int i2c_emul_get_config(const struct device *dev, uint32_t *config)\n{\n\tconst struct i2c_emul_config *cfg = dev->config;\n\n\t*config = I2C_MODE_MASTER | I2C_SPEED_SET(cfg->bus_speed);\n\treturn 0;\n}\n\nstatic int i2c_emul_configure(const struct device *dev, uint32_t dev_config)\n{\n\tconst struct i2c_emul_config *cfg = dev->config;\n\tuint32_t speed = I2C_SPEED_GET(dev_config);\n\n\tif ((dev_config & I2C_MODE_MASTER) == 0U) {\n\t\treturn -EINVAL;\n\t}\n\n\tif (speed != I2C_SPEED_GET(cfg->bus_speed)) {\n\t\treturn -EINVAL;\n\t}\n\n\treturn 0;\n}\n\nstatic const struct i2c_driver_api i2c_emul_api = {\n\t.configure = i2c_emul_configure,\n\t.transfer = i2c_emul_transfer,\n\t.get_config = i2c_emul_get_config,\n};\n\nstatic int i2c_emul_init(const struct device *dev)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\n\tk_mutex_init(&data->mutex);\n\treturn 0;\n}\n\n/*\n * Device tree definitions for I2C emulator controllers.\n *\n * Each instance of 'zephyr,i2c-emul-controller' in the device tree\n * defines an I2C bus that can host emulated I2C devices.\n */\n\n#define Z_I2C_EMUL_LIST_INIT(inst) \\\n\t{ \\\n\t\tDT_INST_FOREACH_CHILD_STATUS_OKAY(inst, Z_I2C_EMUL_ITEM_INIT) \\\n\t}\n\n#define Z_I2C_EMUL_ITEM_INIT(node_id) \\\n\t{ \\\n\t\t.addr = DT_REG_ADDR(node_id), \\\n\t\t.api = (const struct i2c_emul_api *) \\\n\t\t\tDT_PROP(node_id, i2c_emul_api), \\\n\t\t.target = (void *)DT_PROP(node_id, i2c_emul_target), \\\n\t},\n\n#define I2C_EMUL_CONTROLLER_DEFINE(inst) \\\n\tstatic const struct i2c_emul i2c_emul_list_##inst[] = \\\n\t\tZ_I2C_EMUL_LIST_INIT(inst); \\\n\t\\\n\tstatic struct i2c_emul_data i2c_emul_data_##inst = { \\\n\t\t.emul_list = i2c_emul_list_##inst, \\\n\t\t.emul_list_len = ARRAY_SIZE(i2c_emul_list_##inst), \\\n\t}; \\\n\t\\\n\tstatic const struct i2c_emul_config i2c_emul_config_##inst = { \\\n\t\t.bus_speed = DT_INST_PROP(inst, clock_frequency), \\\n\t}; \\\n\t\\\n\tDEVICE_DT_DEFINE(DT_INST(inst, DT_DRV_COMPAT), \\\n\t\t\t    i2c_emul_init, \\\n\t\t\t    NULL, \\\n\t\t\t    &i2c_emul_data_##inst, \\\n\t\t\t    &i2c_emul_config_##inst, \\\n\t\t\t    POST_KERNEL, CONFIG_I2C_INIT_PRIORITY, \\\n\t\t\t    &i2c_emul_api);\n\nDT_INST_FOREACH_STATUS_OKAY(DT_DRV_COMPAT, I2C_EMUL_CONTROLLER_DEFINE)\n"
+          },
+          "applied_files": [
+            "drivers/i2c/i2c_emul.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_emul.c:55:19: error: ‘I2C_MODE_MASTER’ undeclared (first use in this function); did you mean ‘SPI_OP_MODE_MASTER’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_emul.c:64:27: error: ‘I2C_MODE_MASTER’ undeclared (first use in this function); did you mean ‘SPI_OP_MODE_MASTER’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_emul.c:130:70: error: macro \"DT_INST_FOREACH_STATUS_OKAY\" passed 2 arguments, but takes just 1\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_emul.c:130:1: error: expected ‘=’, ‘,’, ‘;’, ‘asm’ or ‘__attribute__’ at end of input\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Linker Error Detected]\n/usr/bin/ld: /tmp/build/zephyr/NSI/tmp/build/zephyr/zephyr.elf.loc_cpusw.o:/zephyrproject/zephyr/drivers/i2c/i2c_emul.c:341:(.rodata.emuls_0+0x0): undefined reference to `__device_dts_ord_32'\ncollect2: error: ld returned 1 exit status\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+    "protected_file_count": 6,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3new_compound_bq40z50_kconfig_dts_3628e91_fx",
+    "api_events": [],
+    "started_at": "2026-10-08T02:23:13+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

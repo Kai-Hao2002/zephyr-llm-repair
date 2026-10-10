@@ -1,0 +1,75 @@
+[
+  {
+    "case_id": "v3_runtime_clock_getres_nullcheck_34f8f2d",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 37.35642409324646,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 702,
+            "output_tokens": 8175
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": {
+            "filepath": "lib/posix/clock.c",
+            "content": "#include <zephyr/posix/time.h>\n#include <zephyr/kernel.h>\n#include <errno.h>\n#include <zephyr/sys/util.h>\n\n/*\n * The POSIX clock functions (clock_getres, clock_gettime, clock_settime, nanosleep)\n * are implemented here.\n */\n\nint clock_getres(clockid_t clock_id, struct timespec *res)\n{\n    if (res == NULL) {\n        errno = EFAULT;\n        return -1;\n    }\n\n    switch (clock_id) {\n    case CLOCK_MONOTONIC:\n    case CLOCK_REALTIME:\n        res->tv_sec = 0;\n        /*\n         * The resolution of CLOCK_MONOTONIC and CLOCK_REALTIME\n         * is tied to the system clock tick.\n         * CONFIG_SYS_CLOCK_TICKS_PER_SEC defines the number of ticks per second.\n         * The resolution in nanoseconds is NSEC_PER_SEC / CONFIG_SYS_CLOCK_TICKS_PER_SEC.\n         * Ensure CONFIG_SYS_CLOCK_TICKS_PER_SEC is positive to avoid division by zero.\n         */\n        if (CONFIG_SYS_CLOCK_TICKS_PER_SEC > 0) {\n            res->tv_nsec = NSEC_PER_SEC / CONFIG_SYS_CLOCK_TICKS_PER_SEC;\n        } else {\n            /* Fallback for unusual configurations, e.g., 1ms resolution */\n            res->tv_nsec = 1000000; /* 1 millisecond */\n        }\n        break;\n#ifdef CONFIG_POSIX_CLOCK_MONOTONIC_RAW\n    case CLOCK_MONOTONIC_RAW:\n        /*\n         * For raw monotonic clock, resolution might be higher,\n         * but for simplicity, we can use the same system tick resolution\n         * or a more precise hardware timer resolution if available.\n         * For now, assume system tick resolution.\n         */\n        res->tv_sec = 0;\n        if (CONFIG_SYS_CLOCK_TICKS_PER_SEC > 0) {\n            res->tv_nsec = NSEC_PER_SEC / CONFIG_SYS_CLOCK_TICKS_PER_SEC;\n        } else {\n            res->tv_nsec = 1000000;\n        }\n        break;\n#endif /* CONFIG_POSIX_CLOCK_MONOTONIC_RAW */\n    case CLOCK_BOOTTIME:\n    case CLOCK_PROCESS_CPUTIME_ID:\n    case CLOCK_THREAD_CPUTIME_ID:\n        /* These clocks are not typically fully supported or have specific\n         * hardware dependencies. Return ENOSYS for now.\n         */\n        errno = ENOSYS;\n        return -1;\n    default:\n        errno = EINVAL;\n        return -1;\n    }\n\n    return 0;\n}\n\nint clock_gettime(clockid_t clock_id, struct timespec *ts)\n{\n    if (ts == NULL) {\n        errno = EFAULT;\n        return -1;\n    }\n\n    switch (clock_id) {\n    case CLOCK_MONOTONIC:\n    case CLOCK_REALTIME: {\n        /* k_uptime_get() returns milliseconds (s64_t) */\n        s64_t ms = k_uptime_get();\n\n        ts->tv_sec = ms / 1000;\n        ts->tv_nsec = (ms % 1000) * 1000000;\n        break;\n    }\n#ifdef CONFIG_POSIX_CLOCK_MONOTONIC_RAW\n    case CLOCK_MONOTONIC_RAW:\n        /* For raw monotonic clock, use a hardware counter if available,\n         * otherwise fallback to system uptime.\n         * For now, let's use system uptime.\n         */\n        {\n            s64_t ms = k_uptime_get();\n            ts->tv_sec = ms / 1000;\n            ts->tv_nsec = (ms % 1000) * 1000000;\n        }\n        break;\n#endif /* CONFIG_POSIX_CLOCK_MONOTONIC_RAW */\n    case CLOCK_BOOTTIME:\n    case CLOCK_PROCESS_CPUTIME_ID:\n    case CLOCK_THREAD_CPUTIME_ID:\n        errno = ENOSYS;\n        return -1;\n    default:\n        errno = EINVAL;\n        return -1;\n    }\n\n    return 0;\n}\n\nint clock_settime(clockid_t clock_id, const struct timespec *ts)\n{\n    /* Zephyr does not typically allow setting CLOCK_MONOTONIC or CLOCK_REALTIME\n     * directly from user space in a simple way.\n     * CLOCK_REALTIME might be settable if there's an RTC driver.\n     * For now, return ENOSYS for most cases.\n     */\n\n    if (ts == NULL) {\n        errno = EFAULT;\n        return -1;\n    }\n\n    switch (clock_id) {\n    case CLOCK_REALTIME:\n        /* If an RTC driver is available and supports setting time, implement it here.\n         * For now, assume not supported.\n         */\n        errno = ENOSYS;\n        return -1;\n    case CLOCK_MONOTONIC:\n    case CLOCK_MONOTONIC_RAW:\n    case CLOCK_BOOTTIME:\n    case CLOCK_PROCESS_CPUTIME_ID:\n    case CLOCK_THREAD_CPUTIME_ID:\n        errno = ENOSYS; /* These clocks are not settable */\n        return -1;\n    default:\n        errno = EINVAL;\n        return -1;\n    }\n}\n\nint nanosleep(const struct timespec *rqtp, struct timespec *rmtp)\n{\n    if (rqtp == NULL) {\n        errno = EFAULT;\n        return -1;\n    }\n\n    if (rqtp->tv_sec < 0 || rqtp->tv_nsec < 0 || rqtp->tv_nsec >= NSEC_PER_SEC) {\n        errno = EINVAL;\n        return -1;\n    }\n\n    /* Convert timespec to milliseconds for k_sleep. */\n    s64_t total_ms = (s64_t)rqtp->tv_sec * 1000 + rqtp->tv_nsec / 1000000;\n\n    /* Handle potential overflow if rqtp->tv_sec is very large,\n     * or if the total_ms calculation results in a negative value due to overflow.\n     * k_sleep takes k_timeout_t, which is s32_t for K_MSEC.\n     * If total_ms exceeds S32_MAX, it will be capped by K_MSEC.\n     */\n    if (total_ms < 0) {\n        total_ms = K_FOREVER; /* Sleep indefinitely or max possible */\n    }\n\n    k_sleep(K_MSEC(total_ms));\n\n    if (rmtp != NULL) {\n        /* Zephyr's k_sleep is blocking and does not typically return remaining time.\n         * For simplicity, assume full sleep completed.\n         */\n        rmtp->tv_sec = 0;\n        rmtp->tv_nsec = 0;\n    }\n\n    return 0;\n}\n"
+          },
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file 'lib/posix/clock.c' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[Runtime Log Tail]\nSTART - test_clock_getres\nE: Page fault at address 0x8 (error code 0x2)\nE: Linear address not present in page tables\nE: Access violation: supervisor thread not allowed to write\nE: PTE: not present\nE: EAX: 0x00000000, EBX: 0x00000000, ECX: 0x00000000, EDX: 0x00000000\nE: ESI: 0x0013ff3c, EDI: 0x0013ff48, EBP: 0x0013ff28, ESP: 0x0013ff28\nE: EFLAGS: 0x00010246 CS: 0x0008 CR3: 0x0011c000\nE: EIP: 0x001065ba\nE: call trace:\nE:      0: 0x00100e60\nE:      1: 0x00107d8a\nE:      2: 0x00104726\nE: >>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0\nE: Current thread: 0x125840 (test_clock_getres)\nE: Halting system\nFAILED: zephyr/CMakeFiles/run_qemu /tmp/build/zephyr/CMakeFiles/run_qemu\ncd /tmp/build && /opt/toolchains/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-i386 -m 32 -cpu qemu32,+nx,+pae -machine q35 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot -machine acpi=off -pidfile qemu.pid -chardev stdio,id=con,mux=on -serial chardev:con -mon chardev=con,mode=readline -nographic -icount shift=5,align=off,sleep=off -rtc clock=vm -net none -kernel /tmp/build/zephyr/zephyr.elf\nninja: build stopped: subcommand failed.\nFATAL ERROR: command exited with status 1: /usr/bin/cmake --build /tmp/build --target run",
+    "protected_file_count": 9,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3_runtime_clock_getres_nullcheck_34f8f2d",
+    "api_events": [],
+    "started_at": "2026-10-07T20:34:45+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

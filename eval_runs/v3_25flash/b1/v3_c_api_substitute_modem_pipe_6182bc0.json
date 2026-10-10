@@ -1,0 +1,77 @@
+[
+  {
+    "case_id": "v3_c_api_substitute_modem_pipe_6182bc0",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 109.16710925102234,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 562,
+            "output_tokens": 9959
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/subsys/modem/modem_pipe/src/main.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n#include <zephyr/drivers/modem/modem_pipe.h>\n#include <zephyr/sys/atomic.h>\n\n/* Define test events as bits in an atomic variable */\n#define TEST_MODEM_PIPE_EVENT_OPEN_READY_BIT    0\n#define TEST_MODEM_PIPE_EVENT_CLOSED_BIT        1\n#define TEST_MODEM_PIPE_EVENT_TRANSMIT_IDLE_BIT 2\n#define TEST_MODEM_PIPE_EVENT_RECEIVE_READY_BIT 3\n#define TEST_MODEM_PIPE_EVENT_ERROR_BIT         4\n\nstatic atomic_t test_state;\nstatic struct modem_pipe *test_pipe;\nstatic K_SEM_DEFINE(pipe_event_sem, 0, 1); /* Semaphore to signal any event */\n\n/* Callbacks for the modem pipe */\nstatic void pipe_open_ready_cb(struct modem_pipe *pipe, int status)\n{\n    ARG_UNUSED(pipe);\n    ARG_UNUSED(status);\n    atomic_set_bit(&test_state, TEST_MODEM_PIPE_EVENT_OPEN_READY_BIT);\n    k_sem_give(&pipe_event_sem);\n}\n\nstatic void pipe_closed_cb(struct modem_pipe *pipe, int status)\n{\n    ARG_UNUSED(pipe);\n    ARG_UNUSED(status);\n    atomic_set_bit(&test_state, TEST_MODEM_PIPE_EVENT_CLOSED_BIT);\n    k_sem_give(&pipe_event_sem);\n}\n\nstatic void pipe_transmit_idle_cb(struct modem_pipe *pipe, int status)\n{\n    ARG_UNUSED(pipe);\n    ARG_UNUSED(status);\n    atomic_set_bit(&test_state, TEST_MODEM_PIPE_EVENT_TRANSMIT_IDLE_BIT);\n    k_sem_give(&pipe_event_sem);\n}\n\nstatic void pipe_receive_ready_cb(struct modem_pipe *pipe, int status)\n{\n    ARG_UNUSED(pipe);\n    ARG_UNUSED(status);\n    atomic_set_bit(&test_state, TEST_MODEM_PIPE_EVENT_RECEIVE_READY_BIT);\n    k_sem_give(&pipe_event_sem);\n}\n\nstatic void pipe_error_cb(struct modem_pipe *pipe, int status)\n{\n    ARG_UNUSED(pipe);\n    ARG_UNUSED(status);\n    atomic_set_bit(&test_state, TEST_MODEM_PIPE_EVENT_ERROR_BIT);\n    k_sem_give(&pipe_event_sem);\n}\n\nstatic const struct modem_pipe_cb test_pipe_callbacks = {\n    .open_ready = pipe_open_ready_cb,\n    .closed = pipe_closed_cb,\n    .transmit_idle = pipe_transmit_idle_cb,\n    .receive_ready = pipe_receive_ready_cb,\n    .error = pipe_error_cb,\n};\n\nstatic void test_modem_pipe_setup(void)\n{\n    test_pipe = modem_pipe_get_default(); /* Assuming a default pipe exists for testing */\n    zassert_not_null(test_pipe, \"Failed to get default modem pipe\");\n    modem_pipe_set_cb(test_pipe, &test_pipe_callbacks);\n    atomic_set(&test_state, 0);\n    k_sem_reset(&pipe_event_sem);\n}\n\n/* Test cases */\n\nstatic void test_async_open_close(void)\n{\n    int ret;\n\n    test_modem_pipe_setup();\n\n    /* Open pipe */\n    ret = modem_pipe_open(test_pipe, K_SECONDS(5));\n    zassert_equal(ret, 0, \"modem_pipe_open failed\");\n\n    /* Wait for open_ready callback */\n    ret = k_sem_take(&pipe_event_sem, K_SECONDS(5));\n    zassert_equal(ret, 0, \"Timed out waiting for open_ready\");\n    zassert_true(atomic_test_bit(&test_state, TEST_MODEM_PIPE_EVENT_OPEN_READY_BIT),\n                 \"Open ready bit not set\");\n\n    /* Close pipe */\n    atomic_clear_bit(&test_state, TEST_MODEM_PIPE_EVENT_OPEN_READY_BIT);\n    k_sem_reset(&pipe_event_sem);\n    ret = modem_pipe_close(test_pipe, K_SECONDS(5));\n    zassert_equal(ret, 0, \"modem_pipe_close failed\");\n\n    /* Wait for closed callback */\n    ret = k_sem_take(&pipe_event_sem, K_SECONDS(5));\n    zassert_equal(ret, 0, \"Timed out waiting for closed\");\n    zassert_true(atomic_test_bit(&test_state, TEST_MODEM_PIPE_EVENT_CLOSED_BIT),\n                 \"Closed bit not set\");\n}\n\nstatic void test_async_transmit(void)\n{\n    int ret;\n    uint8_t tx_buf[] = \"Hello Zephyr\";\n\n    test_modem_pipe_setup();\n\n    /* Open pipe first */\n    ret = modem_pipe_open(test_pipe, K_SECONDS(5));\n    zassert_equal(ret, 0, \"modem_pipe_open failed\");\n    ret = k_sem_take(&pipe_event_sem, K_SECONDS(5));\n    zassert_equal(ret, 0, \"Timed out waiting for open_ready\");\n    zassert_true(atomic_test_bit(&test_state, TEST_MODEM_PIPE_EVENT_OPEN_READY_BIT),\n                 \"Open ready bit not set\");\n\n    /* Clear state for transmit test */\n    atomic_set(&test_state, 0);\n    k_sem_reset(&pipe_event_sem);\n\n    /* Transmit data asynchronously */\n    ret = modem_pipe_transmit_async(test_pipe, tx_buf, sizeof(tx_buf));\n    zassert_equal(ret, 0, \"modem_pipe_transmit_async failed\");\n\n    /* Wait for transmit_idle callback */\n    ret = k_sem_take(&pipe_event_sem, K_SECONDS(5)); /* This is the crucial wait */\n    zassert_equal(ret, 0, \"Timed out waiting for transmit_idle\");\n\n    /* Now check the state. The original assertion was likely here. */\n    zassert_equal(atomic_get(&test_state), BIT(TEST_MODEM_PIPE_EVENT_TRANSMIT_IDLE_BIT),\n                  \"Expected only TRANSMIT_IDLE_BIT to be set\");\n\n    /* Close pipe */\n    atomic_set(&test_state, 0);\n    k_sem_reset(&pipe_event_sem);\n    ret = modem_pipe_close(test_pipe, K_SECONDS(5));\n    zassert_equal(ret, 0, \"modem_pipe_close failed\");\n    ret = k_sem_take(&pipe_event_sem, K_SECONDS(5));\n    zassert_equal(ret, 0, \"Timed out waiting for closed\");\n    zassert_true(atomic_test_bit(&test_state, TEST_MODEM_PIPE_EVENT_CLOSED_BIT),\n                 \"Closed bit not set\");\n}\n\n/* Define test suite */\nZTEST_SUITE(modem_pipe, NULL, NULL, NULL, NULL, NULL);\n\nZTEST_UNIT(modem_pipe, test_async_open_close);\nZTEST_UNIT(modem_pipe, test_async_transmit);\n"
+          },
+          "applied_files": [
+            "tests/subsys/modem/modem_pipe/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/modem/modem_pipe/src/main.c:3:10: fatal error: zephyr/drivers/modem/modem_pipe.h: No such file or directory\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[103/113] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[104/113] Building C object zephyr/kernel/CMakeFiles/kernel.dir/events.c.obj\n[105/113] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[106/113] Building C object zephyr/kernel/CMakeFiles/kernel.dir/sched.c.obj\n[107/113] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[108/113] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[109/113] Linking C static library zephyr/kernel/libkernel.a\n[110/113] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[111/113] Building native simulator runner, and linking final executable\n[112/113] Running utility command for native_runner_executable\n[112/113] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.0-rc3 ***\nRunning TESTSUITE modem_pipe\n===================================================================\nSTART - test_async_open_close\nPASS - test_async_open_close in 0.040 seconds\n===================================================================\nSTART - test_async_transmit\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/modem/modem_pipe/src/main.c:279: test_pipe_async_transmit: (atomic_get(&test_state) not equal to BIT(TEST_MODEM_PIPE_EVENT_TRANSMIT_IDLE_BIT))",
+    "protected_file_count": 3,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3_c_api_substitute_modem_pipe_6182bc0",
+    "api_events": [],
+    "started_at": "2026-10-07T16:23:41+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

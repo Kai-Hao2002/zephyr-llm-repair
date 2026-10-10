@@ -1,0 +1,77 @@
+[
+  {
+    "case_id": "v3new_c_syntax_mbox_usage_34f8f2d_r_fx",
+    "category": "c_syntax",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 127.09590601921082,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 163,
+            "output_tokens": 14212
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/kernel/mbox/mbox_usage/src/main.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n#include <string.h>\n#include <errno.h>\n\n#define STACK_SIZE 512\n#define MSG_SIZE 16\n\nK_MBOX_DEFINE(test_mbox);\n\nstruct k_msg {\n    uint32_t id;\n    uint8_t data[MSG_SIZE];\n};\n\nK_THREAD_STACK_DEFINE(sender_stack, STACK_SIZE);\nK_THREAD_STACK_DEFINE(receiver_stack, STACK_SIZE);\n\nstatic struct k_thread sender_thread_data;\nstatic struct k_thread receiver_thread_data;\n\nstatic struct k_msg tx_msg;\nstatic struct k_msg rx_msg;\n\nstatic void sender_entry(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    tx_msg.id = 0xDEADBEEF;\n    memcpy(tx_msg.data, \"Hello Mbox!\", 12);\n\n    k_mbox_put(&test_mbox, &tx_msg, K_NO_WAIT);\n    k_thread_suspend(k_current_get());\n}\n\nstatic void receiver_entry(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    k_mbox_get(&test_mbox, &rx_msg, K_FOREVER);\n    k_thread_suspend(k_current_get());\n}\n\nstatic void *mbox_setup(void)\n{\n    struct k_mbox_msg_t dummy_msg;\n    /* Drain any pending messages from previous tests */\n    while (k_mbox_get(&test_mbox, &dummy_msg, K_NO_WAIT) == 0) {\n        /* Message drained, continue */\n    }\n    memset(&tx_msg, 0, sizeof(tx_msg));\n    memset(&rx_msg, 0, sizeof(rx_msg));\n    return NULL;\n}\n\nstatic void mbox_teardown(void *data)\n{\n    ARG_UNUSED(data);\n    /* Threads created within a ZTEST_DMEM test function are typically\n     * aborted by the ztest framework itself or expected to terminate.\n     */\n}\n\nZTEST_DMEM static void test_mbox_send_receive(void)\n{\n    k_tid_t sender_tid, receiver_tid;\n\n    sender_tid = k_thread_create(&sender_thread_data, sender_stack,\n                                 K_THREAD_STACK_SIZEOF(sender_stack),\n                                 sender_entry, NULL, NULL, NULL,\n                                 K_PRIO_PREEMPT(7), 0, K_NO_WAIT);\n\n    receiver_tid = k_thread_create(&receiver_thread_data, receiver_stack,\n                                   K_THREAD_STACK_SIZEOF(receiver_stack),\n                                   receiver_entry, NULL, NULL, NULL,\n                                   K_PRIO_PREEMPT(7), 0, K_NO_WAIT);\n\n    k_thread_start(sender_tid);\n    k_thread_start(receiver_tid);\n\n    k_msleep(100); /* Give threads time to run */\n\n    zassert_equal(tx_msg.id, rx_msg.id, \"Message ID mismatch\");\n    zassert_mem_equal(tx_msg.data, rx_msg.data, 12, \"Message data mismatch\");\n}\n\nstatic void sender_timeout_entry(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    tx_msg.id = 0xCAFEBABE;\n    memcpy(tx_msg.data, \"Timeout Test\", 12);\n\n    int ret = k_mbox_put(&test_mbox, &tx_msg, K_MSEC(10));\n    zassert_equal(ret, -EAGAIN, \"Sender put should timeout\");\n    k_thread_suspend(k_current_get());\n}\n\nZTEST_DMEM static void test_mbox_send_timeout(void)\n{\n    k_tid_t sender_tid;\n\n    sender_tid = k_thread_create(&sender_thread_data, sender_stack,\n                                 K_THREAD_STACK_SIZEOF(sender_stack),\n                                 sender_timeout_entry, NULL, NULL, NULL,\n                                 K_PRIO_PREEMPT(7), 0, K_NO_WAIT);\n\n    k_thread_start(sender_tid);\n    k_msleep(200); /* Give thread time to run and timeout */\n\n    k_thread_abort(sender_tid);\n}\n\nstatic void receiver_timeout_entry(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    struct k_msg local_rx_msg;\n    int ret = k_mbox_get(&test_mbox, &local_rx_msg, K_MSEC(10));\n    zassert_equal(ret, -EAGAIN, \"Receiver get should timeout\");\n    k_thread_suspend(k_current_get());\n}\n\nZTEST_DMEM static void test_mbox_receive_timeout(void)\n{\n    k_tid_t receiver_tid;\n\n    receiver_tid = k_thread_create(&receiver_thread_data, receiver_stack,\n                                   K_THREAD_STACK_SIZEOF(receiver_stack),\n                                   receiver_timeout_entry, NULL, NULL, NULL,\n                                   K_PRIO_PREEMPT(7), 0, K_NO_WAIT);\n\n    k_thread_start(receiver_tid);\n    k_msleep(200); /* Give thread time to run and timeout */\n\n    k_thread_abort(receiver_tid);\n}\n\nZTEST_SUITE(mbox_usage, mbox_setup, mbox_teardown, NULL, NULL, NULL);\n"
+          },
+          "applied_files": [
+            "tests/kernel/mbox/mbox_usage/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/sys/clock.h:125:28: error: incompatible type for argument 3 of ‘k_mbox_get’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/mbox/mbox_usage/src/main.c:44:5: error: too few arguments to function ‘k_mbox_get’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/mbox/mbox_usage/src/main.c:50:25: error: storage size of ‘dummy_msg’ isn’t known\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/sys/clock.h:119:32: error: incompatible type for argument 3 of ‘k_mbox_get’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/mbox/mbox_usage/src/main.c:52:12: error: too few arguments to function ‘k_mbox_get’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/mbox/mbox_usage/src/main.c:127:15: error: too few arguments to function ‘k_mbox_get’\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n[... 1 duplicate compilation error lines omitted]",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/mbox/mbox_usage/src/main.c:85:37: error: expected ‘;’ before ‘}’ token\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+    "protected_file_count": 3,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3new_c_syntax_mbox_usage_34f8f2d_r_fx",
+    "api_events": [],
+    "started_at": "2026-10-08T00:53:15+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

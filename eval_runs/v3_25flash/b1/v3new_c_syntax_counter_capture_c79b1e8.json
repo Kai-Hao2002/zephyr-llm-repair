@@ -1,0 +1,77 @@
+[
+  {
+    "case_id": "v3new_c_syntax_counter_capture_c79b1e8",
+    "category": "c_syntax",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 132.51490306854248,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 1108,
+            "output_tokens": 12861
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/drivers/counter/counter_capture/src/capture_test.c",
+            "content": "#include <zephyr/ztest.h>\n#include <zephyr/drivers/counter.h>\n#include <zephyr/devicetree.h>\n#include <zephyr/kernel.h>\n#include <zephyr/logging/log.h>\n\nLOG_MODULE_REGISTER(counter_capture_test, CONFIG_COUNTER_LOG_LEVEL);\n\n/* Define a common test structure or context for the suite */\nstruct counter_capture_test_data {\n\tconst struct device *dev;\n\tuint32_t max_top_value;\n\tuint32_t ticks_per_sec;\n\tuint32_t prescaler;\n\tuint32_t freq;\n\tuint8_t channel_id; /* Current channel being tested */\n\tstruct k_sem capture_sem;\n\tuint32_t captured_ticks;\n\tbool capture_done;\n};\n\nstatic struct counter_capture_test_data test_data;\n\n/* Callback for capture events */\nstatic void capture_callback(const struct device *dev, uint8_t chan_id, uint32_t ticks, void *user_data)\n{\n\tstruct counter_capture_test_data *data = (struct counter_capture_test_data *)user_data;\n\tLOG_DBG(\"Capture on channel %d: %u ticks\", chan_id, ticks);\n\tdata->captured_ticks = ticks;\n\tdata->capture_done = true;\n\tk_sem_give(&data->capture_sem);\n}\n\n/* Helper functions for ZTEST_SUITE */\nstatic void counter_setup(void)\n{\n\t/* Common setup for the entire test suite */\n\t/* Assuming a single counter instance for simplicity, or the first one. */\n\t/* The actual test might iterate over multiple instances. */\n\t/* Using DT_ALIAS(counter_0) as a common pattern for a default counter. */\n\ttest_data.dev = DEVICE_DT_GET(DT_ALIAS(counter_0));\n\tzassert_true(device_is_ready(test_data.dev), \"Counter device not ready\");\n\n\tstruct counter_capabilities cap;\n\tcounter_get_capabilities(test_data.dev, &cap);\n\ttest_data.max_top_value = cap.max_top_value;\n\ttest_data.ticks_per_sec = cap.ticks_per_sec;\n\ttest_data.prescaler = cap.prescaler;\n\ttest_data.freq = cap.freq;\n\n\tk_sem_init(&test_data.capture_sem, 0, 1); /* Initialize semaphore for capture events */\n}\n\nstatic void counter_before(void)\n{\n\t/* Setup before each test case */\n\t/* Reset counter to a known state, clear capture flags */\n\tzassert_equal(counter_stop(test_data.dev), 0, \"Failed to stop counter\");\n\tzassert_equal(counter_set_top_value(test_data.dev, test_data.max_top_value, 0), 0, \"Failed to set top value\");\n\tzassert_equal(counter_start(test_data.dev), 0, \"Failed to start counter\");\n\ttest_data.capture_done = false;\n\tk_sem_reset(&test_data.capture_sem);\n}\n\nstatic void counter_after(void)\n{\n\t/* Teardown after each test case */\n\t/* e.g., stop counter, disable capture channels */\n\tzassert_equal(counter_stop(test_data.dev), 0, \"Failed to stop counter\");\n\t/* Unset capture callback if set in the test case to clean up */\n\tstruct counter_config_capture cfg = {\n\t\t.channel_id = test_data.channel_id,\n\t\t.callback = NULL,\n\t\t.user_data = NULL,\n\t\t.flags = 0,\n\t};\n\t(void)counter_capture_set_callback(test_data.dev, &cfg); /* Best effort cleanup */\n}\n\nstatic void counter_teardown(void)\n{\n\t/* Common teardown for the entire test suite */\n\t/* No specific teardown needed for this example beyond what counter_after does */\n}\n\n/* Test cases */\n\n/* Define a placeholder compatible for the test device. */\n/* This should match a compatible in your devicetree for the counter(s) you want to test. */\n#define DT_DRV_COMPAT zephyr_counter_capture_test_device\n\n/* Macro to define a test case for each instance of the compatible device */\n#define DEFINE_CAPTURE_TEST_CASE(inst) \\\n\tZTEST(counter_capture, test_capture_inst_##inst) \\\n\t{ \\\n\t\tconst struct device *dev = DEVICE_DT_GET(DT_DRV_INST(inst)); \\\n\t\tzassert_true(device_is_ready(dev), \"Counter device %s not ready\", DT_NODE_PATH(DT_DRV_INST(inst))); \\\n\t\t\\\n\t\t/* Assuming channel 0 for simplicity, but could be iterated or configured via DT */ \\\n\t\tuint8_t channel_id = 0; \\\n\t\ttest_data.channel_id = channel_id; \\\n\t\t\\\n\t\tstruct counter_config_capture cfg = { \\\n\t\t\t.channel_id = channel_id, \\\n\t\t\t.callback = capture_callback, \\\n\t\t\t.user_data = &test_data, \\\n\t\t\t.flags = 0, \\\n\t\t}; \\\n\t\t\\\n\t\tint ret = counter_capture_set_callback(dev, &cfg); \\\n\t\tzassert_equal(ret, 0, \"Failed to set capture callback for %s, channel %d\", \\\n\t\t\t      DT_NODE_PATH(DT_DRV_INST(inst)), channel_id); \\\n\t\t\\\n\t\tret = counter_capture_start(dev, channel_id); \\\n\t\tzassert_equal(ret, 0, \"Failed to start capture for %s, channel %d\", \\\n\t\t\t      DT_NODE_PATH(DT_DRV_INST(inst)), channel_id); \\\n\t\t\\\n\t\t/* Simulate some counter activity or wait for capture trigger */ \\\n\t\t/* In a real test, this would involve triggering the capture event (e.g., GPIO pulse) */ \\\n\t\tk_sleep(K_MSEC(100)); \\\n\t\t\\\n\t\t/* Wait for the capture callback to signal */ \\\n\t\tret = k_sem_take(&test_data.capture_sem, K_MSEC(500)); \\\n\t\tzassert_equal(ret, 0, \"Capture callback did not fire in time\"); \\\n\t\tzassert_true(test_data.capture_done, \"Capture callback flag not set\"); \\\n\t\t\\\n\t\tLOG_INF(\"Captured ticks: %u\", test_data.captured_ticks); \\\n\t\t/* Add assertions on captured_ticks if expected values are known */ \\\n\t\t\\\n\t\tret = counter_capture_stop(dev, channel_id); \\\n\t\tzassert_equal(ret, 0, \"Failed to stop capture for %s, channel %d\", \\\n\t\t\t      DT_NODE_PATH(DT_DRV_INST(inst)), channel_id); \\\n\t}\n\n/* Generate test cases for each instance of the compatible device */\nDT_INST_FOREACH_STATUS_OKAY(DEFINE_CAPTURE_TEST_CASE)\n\n/* Define a basic test case for general functionality if no instances are found or for a default counter */\nZTEST(counter_capture, test_basic_capture)\n{\n\tconst struct device *dev = test_data.dev;\n\tuint8_t channel_id = 0;\n\ttest_data.channel_id = channel_id;\n\n\tstruct counter_config_capture cfg = {\n\t\t.channel_id = channel_id,\n\t\t.callback = capture_callback,\n\t\t.user_data = &test_data,\n\t\t.flags = 0,\n\t};\n\n\tint ret = counter_capture_set_callback(dev, &cfg);\n\tzassert_equal(ret, 0, \"Failed to set capture callback\");\n\n\tret = counter_capture_start(dev, channel_id);\n\tzassert_equal(ret, 0, \"Failed to start capture\");\n\n\tk_sleep(K_MSEC(100)); /* Simulate some activity */\n\n\tret = k_sem_take(&test_data.capture_sem, K_MSEC(500));\n\tzassert_equal(ret, 0, \"Capture callback did not fire in time\");\n\tzassert_true(test_data.capture_done, \"Capture callback flag not set\");\n\n\tLOG_INF(\"Basic captured ticks: %u\", test_data.captured_ticks);\n\n\tret = counter_capture_stop(dev, channel_id);\n\tzassert_equal(ret, 0, \"Failed to stop capture\");\n}\n\n/* Define the test suite with the helper functions */\nZTEST_SUITE(counter_capture, counter_setup, counter_before, counter_after, counter_teardown, NULL);\n"
+          },
+          "applied_files": [
+            "tests/drivers/counter/counter_capture/src/capture_test.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/device.h:96:41: error: ‘__device_dts_ord_DT_N_ALIAS_counter_0_ORD’ undeclared (first use in this function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:44:37: error: storage size of ‘cap’ isn’t known\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:59:23: error: too many arguments to function ‘counter_set_top_value’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:71:16: error: variable ‘cfg’ has initializer but incomplete type\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:72:18: error: ‘struct counter_config_capture’ has no member named ‘channel_id’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:73:18: error: ‘struct counter_config_capture’ has no member named ‘callback’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:74:18: error: ‘struct counter_config_capture’ has no member named ‘user_data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:75:18: error: ‘struct counter_config_capture’ has no member named ‘flags’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:71:39: error: storage size of ‘cfg’ isn’t known\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:145:16: error: variable ‘cfg’ has initializer but incomplete type\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:146:18: error: ‘struct counter_config_capture’ has no member named ‘channel_id’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:147:18: error: ‘struct counter_config_capture’ has no member named ‘callback’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:148:18: error: ‘struct counter_config_capture’ has no member named ‘user_data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:149:18: error: ‘struct counter_config_capture’ has no member named ‘flags’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:145:39: error: storage size of ‘cfg’ isn’t known\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:20:51: error: pasting \")\" and \"_P_\" does not give a valid preprocessing token\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/sys/util_macro.h:519:44: error: return type defaults to ‘int’ [-Werror=implicit-int]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/devicetree.h:907:53: error: expected declaration specifiers before ‘_P_test_counter_captures_LEN’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:334:1: error: expected ‘=’, ‘,’, ‘;’, ‘asm’ or ‘__attribute__’ before ‘{’ token\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:348:1: error: expected ‘=’, ‘,’, ‘;’, ‘asm’ or ‘__attribute__’ before ‘{’ token\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:292:55: error: storage class specified for parameter ‘z_ztest_test_node_counter_capture’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:291:46: error: parameter ‘z_ztest_test_node_counter_capture’ is initialized\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:292:55: error: section attribute not allowed for ‘z_ztest_test_node_counter_capture’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:292:55: error: alignment may not be specified for ‘z_ztest_test_node_counter_capture’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:365:36: error: ‘counter_setup’ undeclared (first use in this function); did you mean ‘counter_stop’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:365:51: error: ‘counter_before’ undeclared (first use in this function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/counter/counter_capture/src/capture_test.c:365:67: error: ‘counter_after’ undeclared (first use in this function); did you mean ‘counter_reset’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/sys/util_macro.h:519:44: error: type of ‘counter_loopback_0’ defaults to ‘int’ [-Werror=implicit-int]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:292:55: error: declaration for parameter ‘z_ztest_test_node_counter_capture’ but no such parameter\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:290:43: error: declaration for parameter ‘z_ztest_suite_node_stats_counter_capture’ but no such parameter\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n[... 5 duplicate compilation error lines omitted]",
+    "protected_file_count": 19,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3new_c_syntax_counter_capture_c79b1e8",
+    "api_events": [],
+    "started_at": "2026-10-08T00:05:24+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

@@ -1,0 +1,75 @@
+[
+  {
+    "case_id": "v3_runtime_kernel_cleanup_foo_destructor_double_free_aa50e83",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 49.10198903083801,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 728,
+            "output_tokens": 11407
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": {
+            "filepath": "tests/kernel/thread_apis/thread_custom_data/src/main.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n#include <zephyr/sys/util.h>\n\n/* Define a structure for custom data */\nstruct k_thread_custom_data_test_data {\n    int magic;\n    struct k_sem cleanup_sem; /* Semaphore to signal cleanup completion */\n};\n\n/* Cleanup handler for custom data */\nstatic void custom_data_cleanup(void *data) {\n    struct k_thread_custom_data_test_data *d =\n        (struct k_thread_custom_data_test_data *)data;\n\n    /*\n     * The page fault at 0x70023 suggests dereferencing a NULL pointer\n     * with a large offset, or accessing an unmapped region.\n     * This typically happens if 'data' is NULL and a member access like\n     * 'd->member' is attempted, where 'member' is at offset 0x70023.\n     *\n     * Ensure 'data' is not NULL before attempting to dereference it.\n     * The k_sem_give(&d->cleanup_sem) is a likely candidate for such a crash\n     * if 'd' is NULL and 'cleanup_sem' is at offset 0x70023.\n     */\n    if (d != NULL) {\n        k_sem_give(&d->cleanup_sem); /* Signal that cleanup has completed */\n        k_free(d); /* Free the custom data structure itself */\n    }\n}\n\n/* Test function for custom data cleanup helper */\nstatic void test_custom_cleanup_helper(void) {\n    struct k_thread_custom_data_test_data *data;\n\n    /* Allocate memory for custom data */\n    data = k_malloc(sizeof(struct k_thread_custom_data_test_data));\n    if (data == NULL) {\n        /* If allocation fails, skip the test to prevent NULL pointer issues */\n        ztest_skip(\"Failed to allocate custom data\");\n        return;\n    }\n\n    /* Initialize custom data */\n    data->magic = 0xDEADBEEF;\n    k_sem_init(&data->cleanup_sem, 0, 1); /* Initialize the semaphore within the struct */\n\n    /* Set custom data and cleanup handler for the current thread */\n    k_thread_custom_data_set(data);\n    k_thread_custom_data_cleanup_set(custom_data_cleanup);\n\n    /*\n     * The cleanup handler will be called when this thread exits.\n     * We need to wait for the cleanup to complete before the test function returns,\n     * to ensure the cleanup handler was indeed called and didn't crash.\n     */\n    k_sem_take(&data->cleanup_sem, K_FOREVER);\n\n    /* If we reach here, cleanup completed without crashing (and the sem was given) */\n    ztest_pass();\n}\n\n/* Other test functions for thread custom data */\nstatic void test_custom_data_set_get(void) {\n    int my_data = 123;\n    void *ret_data;\n\n    k_thread_custom_data_set(&my_data);\n    ret_data = k_thread_custom_data_get();\n    zassert_equal(ret_data, &my_data, \"Custom data not retrieved correctly\");\n\n    /* Clear custom data for subsequent tests */\n    k_thread_custom_data_set(NULL);\n}\n\n/* Define the test suite */\nZTEST_SUITE(thread_custom_data_suite, NULL, NULL, NULL, NULL, NULL);\n\nZTEST_UNIT_TEST(test_custom_data_set_get);\nZTEST_UNIT_TEST(test_custom_cleanup_helper);\n"
+          },
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file 'tests/kernel/thread_apis/thread_custom_data/src/main.c' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[Runtime Log Tail]\nSTART - test_custom_cleanup_helper\nE: Page fault at address 0x70023 (error code 0x0)\nE: Linear address not present in page tables\nE: Access violation: supervisor thread not allowed to read\nE: PTE: not present\nE: EAX: 0x00070023, EBX: 0x00070023, ECX: 0x00116120, EDX: 0x00116101\nE: ESI: 0x00070007, EDI: 0x0012b06c, EBP: 0x007f1f9c, ESP: 0x007f1f9c\nE: EFLAGS: 0x00010002 CS: 0x0008 CR3: 0x00115000\nE: EIP: 0x001083ab\nE: call trace:\nE:      0: 0x00109d7f\nE:      1: 0x00103afb\nE:      2: 0x0010273c\nE: >>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0\nE: Current thread: 0x116120 (test_custom_cleanup_helper)\nE: Halting system\nE: Page fault at address 0x7f1f0c (errFAILED: zephyr/CMakeFiles/run_qemu /tmp/build/zephyr/CMakeFiles/run_qemu\ncd /tmp/build && /opt/toolchains/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-i386 -m 32 -cpu qemu32,+nx,+pae -machine q35 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot -machine acpi=off -pidfile qemu.pid -chardev stdio,id=con,mux=on -serial chardev:con -mon chardev=con,mode=readline -nographic -icount shift=5,align=off,sleep=off -rtc clock=vm -net none -kernel /tmp/build/zephyr/zephyr.elf\nninja: build stopped: subcommand failed.\nFATAL ERROR: command exited with status 1: /usr/bin/cmake --build /tmp/build --target run",
+    "protected_file_count": 3,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3_runtime_kernel_cleanup_foo_destructor_double_free_aa50e83",
+    "api_events": [],
+    "started_at": "2026-10-07T21:13:17+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

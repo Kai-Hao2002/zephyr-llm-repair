@@ -1,0 +1,83 @@
+[
+  {
+    "case_id": "v3_runtime_hash_map_nullcheck_b0ed2b5",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 225.6147620677948,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 292,
+            "output_tokens": 13979
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": {
+            "filepath": "lib/hash_map/hash_map.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/sys/hash_map.h>\n#include <zephyr/sys/slist.h>\n#include <zephyr/logging/log.h>\n\nLOG_MODULE_REGISTER(hash_map, CONFIG_HASH_MAP_LOG_LEVEL);\n\n#ifdef CONFIG_HASH_MAP_THREAD_SAFE\n#define HASH_MAP_LOCK(map) k_mutex_lock(&(map)->mutex, K_FOREVER)\n#define HASH_MAP_UNLOCK(map) k_mutex_unlock(&(map)->mutex)\n#else\n#define HASH_MAP_LOCK(map) do { } while (false)\n#define HASH_MAP_UNLOCK(map) do { } while (false)\n#endif\n\nstruct hash_map_bucket {\n\tsys_slist_t list;\n};\n\nstruct hash_map_entry {\n\tconst void *key;\n\tvoid *value;\n\tsys_snode_t node;\n};\n\nstatic struct hash_map_entry *hash_map_lookup_entry(const struct hash_map *map, const void *key)\n{\n\tuint32_t hash = map->key_hash(key);\n\tsize_t bucket_idx = hash % map->num_buckets;\n\tstruct hash_map_bucket *bucket = &map->buckets[bucket_idx];\n\tstruct hash_map_entry *entry;\n\n\tSYS_SLIST_FOR_EACH_CONTAINER(&bucket->list, entry, node) {\n\t\tif (map->key_compare(entry->key, key) == 0) {\n\t\t\treturn entry;\n\t\t}\n\t}\n\n\treturn NULL;\n}\n\nvoid hash_map_init(struct hash_map *map, struct hash_map_bucket *buckets,\n\t\t\t\t   size_t num_buckets, struct hash_map_entry *entries,\n\t\t\t\t   size_t num_entries, hash_map_hash_func_t key_hash,\n\t\t\t\t   hash_map_compare_func_t key_compare,\n\t\t\t\t   hash_map_free_func_t value_free)\n{\n\tmap->buckets = buckets;\n\tmap->num_buckets = num_buckets;\n\tmap->entries = entries;\n\tmap->num_entries = num_entries;\n\tmap->key_hash = key_hash;\n\tmap->key_compare = key_compare;\n\tmap->value_free = value_free;\n\tmap->size = 0;\n\n\tfor (size_t i = 0; i < num_buckets; i++) {\n\t\tsys_slist_init(&buckets[i].list);\n\t}\n\n\tsys_slist_init(&map->free_entries);\n\tfor (size_t i = 0; i < num_entries; i++) {\n\t\tsys_slist_append(&map->free_entries, &entries[i].node);\n\t}\n\n#ifdef CONFIG_HASH_MAP_THREAD_SAFE\n\tk_mutex_init(&map->mutex);\n#endif\n}\n\nint hash_map_add(struct hash_map *map, const void *key, void *value)\n{\n\tint ret = 0;\n\n\tHASH_MAP_LOCK(map);\n\n\tif (hash_map_lookup_entry(map, key) != NULL) {\n\t\tret = -EEXIST;\n\t\tgoto unlock;\n\t}\n\n\tsys_snode_t *node = sys_slist_get(&map->free_entries);\n\tif (node == NULL) {\n\t\tret = -ENOMEM;\n\t\tgoto unlock;\n\t}\n\n\t/* FIX: Ensure correct container_of usage. */\n\t/* sys_slist_get returns a pointer to sys_snode_t, which is a member\n\t * of hash_map_entry. A direct cast to hash_map_entry* would result\n\t * in an incorrect base address for the entry, leading to corrupted\n\t * key/value pointers and potential segmentation faults.\n\t */\n\tstruct hash_map_entry *entry = SYS_SLIST_CONTAINER(node, struct hash_map_entry, node);\n\n\tentry->key = key;\n\tentry->value = value;\n\n\tuint32_t hash = map->key_hash(key);\n\tsize_t bucket_idx = hash % map->num_buckets;\n\tstruct hash_map_bucket *bucket = &map->buckets[bucket_idx];\n\n\tsys_slist_append(&bucket->list, &entry->node);\n\tmap->size++;\n\nunlock:\n\tHASH_MAP_UNLOCK(map);\n\treturn ret;\n}\n\nint hash_map_get(const struct hash_map *map, const void *key, void **value)\n{\n\tint ret = 0;\n\n\tHASH_MAP_LOCK(map);\n\n\tstruct hash_map_entry *entry = hash_map_lookup_entry(map, key);\n\tif (entry == NULL) {\n\t\tret = -ENOENT;\n\t\tgoto unlock;\n\t}\n\n\tif (value != NULL) {\n\t\t*value = entry->value;\n\t}\n\nunlock:\n\tHASH_MAP_UNLOCK(map);\n\treturn ret;\n}\n\nint hash_map_remove(struct hash_map *map, const void *key, void **value)\n{\n\tint ret = 0;\n\n\tHASH_MAP_LOCK(map);\n\n\tuint32_t hash = map->key_hash(key);\n\tsize_t bucket_idx = hash % map->num_buckets;\n\tstruct hash_map_bucket *bucket = &map->buckets[bucket_idx];\n\tstruct hash_map_entry *entry;\n\tsys_snode_t *prev = NULL;\n\n\tSYS_SLIST_FOR_EACH_CONTAINER(&bucket->list, entry, node) {\n\t\tif (map->key_compare(entry->key, key) == 0) {\n\t\t\tsys_slist_remove(&bucket->list, prev, &entry->node);\n\t\t\tif (map->value_free != NULL) {\n\t\t\t\tmap->value_free(entry->value);\n\t\t\t}\n\t\t\tif (value != NULL) {\n\t\t\t\t*value = entry->value;\n\t\t\t}\n\t\t\tsys_slist_append(&map->free_entries, &entry->node);\n\t\t\t/* Defensive: Clear key and value pointers to prevent stale data\n\t\t\t * if the entry is accidentally accessed before reuse.\n\t\t\t */\n\t\t\tentry->key = NULL;\n\t\t\tentry->value = NULL;\n\t\t\tmap->size--;\n\t\t\tgoto unlock;\n\t\t}\n\t\tprev = &entry->node;\n\t}\n\n\tret = -ENOENT;\n\nunlock:\n\tHASH_MAP_UNLOCK(map);\n\treturn ret;\n}\n\nvoid hash_map_clear(struct hash_map *map)\n{\n\tHASH_MAP_LOCK(map);\n\n\tfor (size_t i = 0; i < map->num_buckets; i++) {\n\t\tstruct hash_map_bucket *bucket = &map->buckets[i];\n\t\tstruct hash_map_entry *entry;\n\t\tstruct hash_map_entry *tmp;\n\n\t\tSYS_SLIST_FOR_EACH_CONTAINER_SAFE(&bucket->list, entry, tmp, node) {\n\t\t\tsys_slist_remove(&bucket->list, NULL, &entry->node);\n\t\t\tif (map->value_free != NULL) {\n\t\t\t\tmap->value_free(entry->value);\n\t\t\t}\n\t\t\tsys_slist_append(&map->free_entries, &entry->node);\n\t\t\t/* Defensive: Clear key and value pointers to prevent stale data\n\t\t\t * if the entry is accidentally accessed before reuse.\n\t\t\t */\n\t\t\tentry->key = NULL;\n\t\t\tentry->value = NULL;\n\t\t}\n\t}\n\tmap->size = 0;\n\n\tHASH_MAP_UNLOCK(map);\n}\n\nsize_t hash_map_size(const struct hash_map *map)\n{\n\treturn map->size;\n}\n\nint hash_map_foreach(const struct hash_map *map, hash_map_foreach_func_t func, void *user_data)\n{\n\tint ret = 0;\n\n\tHASH_MAP_LOCK(map);\n\n\tfor (size_t i = 0; i < map->num_buckets; i++) {\n\t\tstruct hash_map_bucket *bucket = &map->buckets[i];\n\t\tstruct hash_map_entry *entry;\n\n\t\tSYS_SLIST_FOR_EACH_CONTAINER(&bucket->list, entry, node) {\n\t\t\tret = func(entry->key, entry->value, user_data);\n\t\t\tif (ret != 0) {\n\t\t\t\tgoto unlock;\n\t\t\t}\n\t\t}\n\t}\n\nunlock:\n\tHASH_MAP_UNLOCK(map);\n\treturn ret;\n}\n"
+          },
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file 'lib/hash_map/hash_map.c' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nRunning TESTSUITE hash_map\n===================================================================\nCONFIG_TEST_LIB_HASH_MAP_MAX_ENTRIES: 40\nSTART - test_clear_callback\nPASS - test_clear_callback in 0.000 seconds\n===================================================================\nSTART - test_clear_no_callback\nPASS - test_clear_no_callback in 0.000 seconds\n===================================================================\nSTART - test_empty\nPASS - test_empty in 0.000 seconds\n===================================================================\nSTART - test_foreach\nPASS - test_foreach in 0.000 seconds\n===================================================================\nSTART - test_get_false\nPASS - test_get_false in 0.000 seconds\n===================================================================\nSTART - test_get_true\nSegmentation fault",
+    "protected_file_count": 14,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3_runtime_hash_map_nullcheck_b0ed2b5",
+    "api_events": [
+      {
+        "kind": "retry",
+        "what": "b1_zero_shot",
+        "attempt": 1,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 99
+      }
+    ],
+    "started_at": "2026-10-07T21:00:21+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

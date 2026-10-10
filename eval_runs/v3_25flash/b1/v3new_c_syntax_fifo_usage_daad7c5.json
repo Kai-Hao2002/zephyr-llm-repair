@@ -1,0 +1,77 @@
+[
+  {
+    "case_id": "v3new_c_syntax_fifo_usage_daad7c5",
+    "category": "c_syntax",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 112.15125489234924,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 294,
+            "output_tokens": 9750
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/kernel/fifo/fifo_usage/src/main.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n\n#define STACK_SIZE (512 + CONFIG_TEST_EXTRA_STACK_SIZE)\n#define THREAD_PRIORITY K_PRIO_PREEMPT(10)\n\n/* Data structures for FIFO items */\nstruct data_item {\n    sys_snode_t node;\n    uint32_t value;\n};\n\nstruct data_item_ext {\n    sys_snode_t node;\n    uint32_t value;\n    uint32_t extra_data[4];\n};\n\n/* FIFOs */\nK_FIFO_DEFINE(fifo1);\nK_FIFO_DEFINE(fifo2);\n\n/* Semaphores for synchronization */\nstatic struct k_sem test_sem;\nstatic struct k_sem consumer_sem;\nstatic struct k_sem producer_sem;\n\n/* Thread stacks */\nstatic K_THREAD_STACK_DEFINE(consumer_stack, STACK_SIZE);\nstatic K_THREAD_STACK_DEFINE(producer_stack, STACK_SIZE);\nstatic K_THREAD_STACK_DEFINE(isr_producer_stack, STACK_SIZE);\n\n/* Thread IDs */\nstatic k_tid_t consumer_tid;\nstatic k_tid_t producer_tid;\nstatic k_tid_t isr_producer_tid;\n\n/* Data items for testing */\nstatic struct data_item item1 = {.value = 1};\nstatic struct data_item item2 = {.value = 2};\nstatic struct data_item item3 = {.value = 3};\nstatic struct data_item item4 = {.value = 4};\nstatic struct data_item item5 = {.value = 5};\n\nstatic struct data_item_ext item_ext1 = {.value = 10, .extra_data = {1, 2, 3, 4}};\nstatic struct data_item_ext item_ext2 = {.value = 20, .extra_data = {5, 6, 7, 8}};\n\n/* Test data for multiple producers/consumers */\n#define NUM_ITEMS 10\nstatic struct data_item multi_items[NUM_ITEMS];\nstatic uint32_t received_values[NUM_ITEMS];\nstatic volatile int received_count;\n\n/* Helper function to initialize data items */\nstatic void init_multi_items(void)\n{\n    for (int i = 0; i < NUM_ITEMS; i++) {\n        multi_items[i].value = i + 1;\n    }\n    received_count = 0;\n    memset(received_values, 0, sizeof(received_values));\n}\n\n/* Consumer thread for basic tests */\nvoid consumer_thread(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    struct data_item *data;\n\n    k_sem_give(&consumer_sem); /* Signal that consumer is ready */\n\n    data = k_fifo_get(&fifo1, K_FOREVER);\n    zassert_equal(data, &item1, \"Expected item1\");\n    zassert_equal(data->value, 1, \"Expected value 1\");\n\n    data = k_fifo_get(&fifo1, K_FOREVER);\n    zassert_equal(data, &item2, \"Expected item2\");\n    zassert_equal(data->value, 2, \"Expected value 2\");\n\n    data = k_fifo_get(&fifo1, K_NO_WAIT);\n    zassert_is_null(data, \"Expected no item\");\n\n    k_sem_give(&test_sem); /* Signal completion */\n}\n\n/* Producer thread for basic tests */\nvoid producer_thread(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    k_sem_give(&producer_sem); /* Signal that producer is ready */\n\n    k_fifo_put(&fifo1, &item1);\n    k_fifo_put(&fifo1, &item2);\n\n    k_sem_give(&test_sem); /* Signal completion */\n}\n\n/* ISR producer thread for testing k_fifo_put_isr */\nvoid isr_producer_thread(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    k_sem_give(&producer_sem); /* Signal that ISR producer is ready */\n\n    /* Simulate an ISR context */\n    k_fifo_put_isr(&fifo1, &item3);\n    k_fifo_put_isr(&fifo1, &item4);\n\n    k_sem_give(&test_sem); /* Signal completion */\n}\n\n/* Consumer thread for multiple producers/consumers */\nvoid multi_consumer_thread(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    struct data_item *data;\n\n    while (true) {\n        data = k_fifo_get(&fifo2, K_FOREVER);\n        if (data == NULL) {\n            break; /* Test completion signal */\n        }\n        received_values[received_count++] = data->value;\n        if (received_count == NUM_ITEMS) {\n            break;\n        }\n    }\n    k_sem_give(&test_sem);\n}\n\n/* Producer thread for multiple producers/consumers */\nvoid multi_producer_thread(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    for (int i = 0; i < NUM_ITEMS; i++) {\n        k_fifo_put(&fifo2, &multi_items[i]);\n        k_msleep(10); /* Give consumer a chance to run */\n    }\n    k_sem_give(&test_sem);\n}\n\n/* Test cases */\n\nZTEST_USER(fifo_usage, test_fifo_basic)\n{\n    k_sem_init(&test_sem, 0, 1);\n    k_sem_init(&consumer_sem, 0, 1);\n    k_sem_init(&producer_sem, 0, 1);\n\n    k_fifo_init(&fifo1);\n\n    consumer_tid = k_thread_create(&consumer_tid, consumer_stack,\n                                   K_THREAD_STACK_SIZEOF(consumer_stack),\n                                   consumer_thread, NULL, NULL, NULL,\n                                   THREAD_PRIORITY, 0, K_NO_WAIT);\n\n    producer_tid = k_thread_create(&producer_tid, producer_stack,\n                                   K_THREAD_STACK_SIZEOF(producer_stack),\n                                   producer_thread, NULL, NULL, NULL,\n                                   THREAD_PRIORITY, 0, K_NO_WAIT);\n\n    k_sem_take(&consumer_sem, K_FOREVER); /* Wait for consumer to be ready */\n    k_sem_take(&producer_sem, K_FOREVER); /* Wait for producer to be ready */\n\n    k_sem_take(&test_sem, K_FOREVER); /* Wait for consumer to finish */\n    k_sem_take(&test_sem, K_FOREVER); /* Wait for producer to finish */\n\n    k_thread_abort(consumer_tid);\n    k_thread_abort(producer_tid);\n\n    /* Verify remaining items (should be none) */\n    zassert_is_null(k_fifo_get(&fifo1, K_NO_WAIT), \"FIFO should be empty\");\n}\n\nZTEST_USER(fifo_usage, test_fifo_put_isr)\n{\n    k_sem_init(&test_sem, 0, 1);\n    k_sem_init(&producer_sem, 0, 1);\n\n    k_fifo_init(&fifo1);\n\n    isr_producer_tid = k_thread_create(&isr_producer_tid, isr_producer_stack,\n                                       K_THREAD_STACK_SIZEOF(isr_producer_stack),\n                                       isr_producer_thread, NULL, NULL, NULL,\n                                       THREAD_PRIORITY, 0, K_NO_WAIT);\n\n    k_sem_take(&producer_sem, K_FOREVER); /* Wait for ISR producer to be ready */\n    k_sem_take(&test_sem, K_FOREVER); /* Wait for ISR producer to finish */\n\n    k_thread_abort(isr_producer_tid);\n\n    struct data_item *data;\n    data = k_fifo_get(&fifo1, K_NO_WAIT);\n    zassert_equal(data, &item3, \"Expected item3\");\n    zassert_equal(data->value, 3, \"Expected value 3\");\n\n    data = k_fifo_get(&fifo1, K_NO_WAIT);\n    zassert_equal(data, &item4, \"Expected item4\");\n    zassert_equal(data->value, 4, \"Expected value 4\");\n\n    zassert_is_null(k_fifo_get(&fifo1, K_NO_WAIT), \"FIFO should be empty\");\n}\n\nZTEST_USER(fifo_usage, test_fifo_peek)\n{\n    k_fifo_init(&fifo1);\n\n    k_fifo_put(&fifo1, &item1);\n    k_fifo_put(&fifo1, &item2);\n\n    struct data_item *data;\n\n    data = k_fifo_peek_head(&fifo1);\n    zassert_equal(data, &item1, \"Expected item1 at head\");\n    zassert_equal(data->value, 1, \"Expected value 1 at head\");\n\n    data = k_fifo_peek_tail(&fifo1);\n    zassert_equal(data, &item2, \"Expected item2 at tail\");\n    zassert_equal(data->value, 2, \"Expected value 2 at tail\");\n\n    data = k_fifo_get(&fifo1, K_NO_WAIT);\n    zassert_equal(data, &item1, \"Expected item1 after get\");\n\n    data = k_fifo_peek_head(&fifo1);\n    zassert_equal(data, &item2, \"Expected item2 at head after get\");\n\n    k_fifo_get(&fifo1, K_NO_WAIT); /* Get item2 */\n    zassert_is_null(k_fifo_peek_head(&fifo1), \"FIFO should be empty after all gets\");\n}\n\nZTEST_USER(fifo_usage, test_fifo_purge)\n{\n    k_fifo_init(&fifo1);\n\n    k_fifo_put(&fifo1, &item1);\n    k_fifo_put(&fifo1, &item2);\n    k_fifo_put(&fifo1, &item3);\n\n    zassert_not_is_null(k_fifo_peek_head(&fifo1), \"FIFO should not be empty\");\n\n    k_fifo_purge(&fifo1);\n\n    zassert_is_null(k_fifo_peek_head(&fifo1), \"FIFO should be empty after purge\");\n}\n\nZTEST_USER(fifo_usage, test_fifo_timeout)\n{\n    k_fifo_init(&fifo1);\n\n    struct data_item *data;\n    int64_t start_time, end_time;\n\n    start_time = k_uptime_get();\n    data = k_fifo_get(&fifo1, K_MSEC(100));\n    end_time = k_uptime_get();\n\n    zassert_is_null(data, \"Expected timeout, no item\");\n    zassert_true((end_time - start_time) >= 90 && (end_time - start_time) <= 110,\n                 \"Expected timeout duration around 100ms\");\n\n    k_fifo_put(&fifo1, &item1);\n    data = k_fifo_get(&fifo1, K_MSEC(100));\n    zassert_equal(data, &item1, \"Expected item1, no timeout\");\n}\n\nZTEST_USER(fifo_usage, test_fifo_multi_producer_consumer)\n{\n    k_sem_init(&test_sem, 0, 1);\n    k_fifo_init(&fifo2);\n\n    init_multi_items();\n\n    consumer_tid = k_thread_create(&consumer_tid, consumer_stack,\n                                   K_THREAD_STACK_SIZEOF(consumer_stack),\n                                   multi_consumer_thread, NULL, NULL, NULL,\n                                   THREAD_PRIORITY, 0, K_NO_WAIT);\n\n    producer_tid = k_thread_create(&producer_tid, producer_stack,\n                                   K_THREAD_STACK_SIZEOF(producer_stack),\n                                   multi_producer_thread, NULL, NULL, NULL,\n                                   THREAD_PRIORITY, 0, K_NO_WAIT);\n\n    k_sem_take(&test_sem, K_FOREVER); /* Wait for consumer to finish */\n    k_sem_take(&test_sem, K_FOREVER); /* Wait for producer to finish */\n\n    k_thread_abort(consumer_tid);\n    k_thread_abort(producer_tid);\n\n    /* Verify received items */\n    zassert_equal(received_count, NUM_ITEMS, \"Not all items received\");\n    for (int i = 0; i < NUM_ITEMS; i++) {\n        zassert_equal(received_values[i], i + 1, \"Received item value mismatch\");\n    }\n    zassert_is_null(k_fifo_get(&fifo2, K_NO_WAIT), \"FIFO should be empty\");\n}\n\nZTEST_SUITE(fifo_usage, NULL, NULL, NULL, NULL, NULL);\n"
+          },
+          "applied_files": [
+            "tests/kernel/fifo/fifo_usage/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Linker Error Detected]\n/zephyrproject/zephyr/tests/kernel/fifo/fifo_usage/src/main.c:114:(.text.isr_producer_thread+0x1d): undefined reference to `k_fifo_put_isr'\n/zephyrproject/zephyr/tests/kernel/fifo/fifo_usage/src/main.c:253:(.text._fifo_usage_test_fifo_purge_wrapper+0x58): undefined reference to `zassert_not_is_null'\n/usr/bin/ld: /zephyrproject/zephyr/tests/kernel/fifo/fifo_usage/src/main.c:255:(.text._fifo_usage_test_fifo_purge_wrapper+0x64): undefined reference to `k_fifo_purge'\ncollect2: error: ld returned 1 exit status\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/fifo/fifo_usage/src/main.c:47:1: error: expected ‘,’ or ‘;’ before ‘static’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/fifo/fifo_usage/src/main.c:189:64: error: ‘fifo2’ undeclared (first use in this function); did you mean ‘fifo1’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/fifo/fifo_usage/src/main.c:221:63: error: ‘fifo2’ undeclared (first use in this function); did you mean ‘fifo1’?\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+    "protected_file_count": 3,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3new_c_syntax_fifo_usage_daad7c5",
+    "api_events": [],
+    "started_at": "2026-10-08T00:20:22+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
