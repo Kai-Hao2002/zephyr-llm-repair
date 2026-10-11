@@ -152,8 +152,17 @@ class HybridRetriever:
             # as agents/analyzer.py: Gemini API calls have been observed to
             # hang with no response at all; without a timeout the caller
             # blocks indefinitely.
+            # GEMINI_EMBEDDING_API_KEY 有設定時 embedding 改用這把金鑰 (2026-10-11：免費層
+            # embedding 每天只有 1,000 筆內容，每次檢索就用掉 31 筆，所以 embedding 改走付費金鑰，
+            # 生成呼叫仍用 GEMINI_API_KEY)。未設定時沿用 GEMINI_API_KEY。
+            # When GEMINI_EMBEDDING_API_KEY is set, embeddings use that key (2026-10-11: the free
+            # tier allows 1,000 embedded contents per day and each retrieval uses 31, so embeddings
+            # go through a billed key while generation stays on GEMINI_API_KEY). Unset falls back
+            # to GEMINI_API_KEY.
+            embed_key = os.environ.get("GEMINI_EMBEDDING_API_KEY") or None
             self._embeddings = GoogleGenerativeAIEmbeddings(
-                model=EMBEDDING_MODEL, request_options={"timeout": 120}
+                model=EMBEDDING_MODEL, request_options={"timeout": 120},
+                **({"google_api_key": embed_key} if embed_key else {}),
             )
         return self._embeddings
 

@@ -630,6 +630,10 @@ def collect_run_meta() -> Dict[str, Any]:
         # SHA-256 only, never the key); keys rotate when a daily quota runs out.
         "gemini_key_fingerprint": (hashlib.sha256(os.environ["GEMINI_API_KEY"].encode()).hexdigest()[:8]
                                    if os.environ.get("GEMINI_API_KEY") else None),
+        # embedding 用的金鑰 (GEMINI_EMBEDDING_API_KEY，未設定時就是 GEMINI_API_KEY)。
+        # Key used for embeddings (GEMINI_EMBEDDING_API_KEY, else GEMINI_API_KEY).
+        "embedding_key_fingerprint": (lambda k: hashlib.sha256(k.encode()).hexdigest()[:8] if k else None)(
+            os.environ.get("GEMINI_EMBEDDING_API_KEY") or os.environ.get("GEMINI_API_KEY")),
         "sdk_versions": {p: _version(p) for p in ("langchain-core", "langgraph", "langchain-google-genai",
                                                    "google-genai", "langchain-anthropic", "langchain-openai")},
     }
