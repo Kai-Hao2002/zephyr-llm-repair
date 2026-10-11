@@ -1,0 +1,110 @@
+[
+  {
+    "case_id": "v3_runtime_video_emul_rx_offbyone_93db4e5",
+    "category": "runtime_crash",
+    "pipeline": "proposed",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "resolved",
+    "iterations": 1,
+    "ttr_seconds": 206.4216809272766,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": true,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 1319,
+            "output_tokens": 686
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 26450,
+            "output_tokens": 13280
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "success",
+          "patch": "The error log indicates two main issues:\n1.  An assertion failure in `test_video_vbuf_too_small`: `zexpect_equal(-ENOMEM, video_enqueue(rx_dev, vbuf))` failed. This means `video_enqueue` did not return `-ENOMEM` as expected when a buffer that is one byte too small was enqueued.\n2.  A `Segmentation fault` occurring in `emul_rx_worker` after logging `Inserting 153600 bytes into buffer (nil)`. This implies that `vbuf->buffer` was `NULL` when the worker tried to `memcpy` into it.\n\nLet's address these:\n\n**Issue 1: Incorrect buffer size check in `emul_rx_enqueue`**\n\nThe `test_video_vbuf_too_small` test allocates a `video_buffer` with a size exactly one byte less than a full frame (`fmt->pitch * fmt->height - 1`). It then expects `video_enqueue` to reject this buffer with `-ENOMEM`.\n\nLooking at `drivers/video/video_emul_rx.c`, the `emul_rx_enqueue` function has the following check:\n```c\nif (vbuf->size < fmt->pitch * fmt->height - 1) {\n\tLOG_ERR(\"Buffer too small for a full frame\");\n\treturn -ENOMEM;\n}\n```\nIf `vbuf->size` is `fmt->pitch * fmt->height - 1`, the condition `(fmt->pitch * fmt->height - 1) < (fmt->pitch * fmt->height - 1)` evaluates to `false`. Consequently, the function does not return `-ENOMEM` but `0`, causing the test assertion to fail.\n\nThe correct condition to check if the buffer is too small for a full frame is `vbuf->size < fmt->pitch * fmt->height`. The `video_estimate_fmt_size` helper function already calculates `fmt->size = fmt->pitch * fmt->height`, so we can use `fmt->size` directly.\n\n**Issue 2: `Segmentation fault` due to `NULL` buffer in `emul_rx_worker`**\n\nThe `Segmentation fault` occurs because `emul_rx_worker` attempts to `memcpy` into `vbuf->buffer` when `vbuf->buffer` is `NULL`. This is highly unusual given that `video_buffer_alloc` should return `NULL` if the buffer memory allocation fails, and the test asserts that `vbuf` is not `NULL`.\n\nHowever, if the `emul_rx_enqueue` function incorrectly allows a buffer that is too small to be enqueued, the `emul_rx_worker` will then attempt to `memcpy` `fmt->pitch * fmt->height` bytes into a buffer that is only `fmt->pitch * fmt->height - 1` bytes long. This is an out-of-bounds write, which can lead to memory corruption, potentially corrupting the `vbuf->buffer` pointer itself or other critical data, eventually leading to a `Segmentation fault`.\n\nBy fixing the size check in `emul_rx_enqueue`, we prevent the worker from ever receiving a buffer that is too small, thus eliminating the out-of-bounds write and likely resolving the `Segmentation fault`.\n\n**Minor Typo in `emul_rx_worker`**\n\nThere's a harmless typo `struct video_buffer *vbuf = vbuf;` in `emul_rx_worker`. While it doesn't cause the current issue (as `vbuf` is immediately reassigned by `k_fifo_get`), it's good practice to fix it for clarity.\n\n**Proposed Fixes:**\n\n1.  Correct the buffer size check in `drivers/video/video_emul_rx.c` to use `fmt->size`.\n2.  Fix the typo in `drivers/video/video_emul_rx.c`.\n\ndrivers/video/video_emul_rx.c\n<<<<<<<< SEARCH\n\tstruct video_buffer *vbuf = vbuf;\n\n\tLOG_DBG(\"Queueing a frame of %u bytes in format %x %ux%u\", fmt->pitch * fmt->height,\n\t\tfmt->pixelformat, fmt->width, fmt->height);\n\n\twhile ((vbuf = k_fifo_get(&data->fifo_in, K_NO_WAIT)) != NULL) {\n\t\tvbuf->bytesused = fmt->pitch * fmt->height;\n\t\tvbuf->line_offset = 0;\n\n\t\tLOG_DBG(\"Inserting %u bytes into buffer %p\", vbuf->bytesused, vbuf->buffer);\n\n\t\t/* Simulate the MIPI/DVP hardware transferring image data line-by-line from the\n\t\t * imager to the video buffer memory using DMA copying the data line-by-line over\n\t\t * the whole frame. vbuf->size is already checked in emul_rx_enqueue().\n\t\t */\n\t\tfor (size_t i = 0; i + fmt->pitch <= vbuf->bytesused; i += fmt->pitch) {\n\t\t\tmemcpy(vbuf->buffer + i, cfg->source_dev->data, fmt->pitch);\n\t\t}\n\n\t\t/* Once the buffer is completed, submit it to the video buffer */\n\t\tk_fifo_put(&data->fifo_out, vbuf);\n\t}\n}\n\nstatic int emul_rx_enqueue(const struct device *dev, struct video_buffer *vbuf)\n{\n\tstruct emul_rx_data *data = dev->data;\n\tstruct video_format *fmt = &data->fmt;\n\n\tif (vbuf->size < fmt->pitch * fmt->height - 1) {\n\t\tLOG_ERR(\"Buffer too small for a full frame\");\n\t\treturn -ENOMEM;\n\t}\n========\n\tstruct video_buffer *vbuf;\n\n\tLOG_DBG(\"Queueing a frame of %u bytes in format %x %ux%u\", fmt->pitch * fmt->height,\n\t\tfmt->pixelformat, fmt->width, fmt->height);\n\n\twhile ((vbuf = k_fifo_get(&data->fifo_in, K_NO_WAIT)) != NULL) {\n\t\tvbuf->bytesused = fmt->pitch * fmt->height;\n\t\tvbuf->line_offset = 0;\n\n\t\tLOG_DBG(\"Inserting %u bytes into buffer %p\", vbuf->bytesused, vbuf->buffer);\n\n\t\t/* Simulate the MIPI/DVP hardware transferring image data line-by-line from the\n\t\t * imager to the video buffer memory using DMA copying the data line-by-line over\n\t\t * the whole frame. vbuf->size is already checked in emul_rx_enqueue().\n\t\t */\n\t\tfor (size_t i = 0; i + fmt->pitch <= vbuf->bytesused; i += fmt->pitch) {\n\t\t\tmemcpy(vbuf->buffer + i, cfg->source_dev->data, fmt->pitch);\n\t\t}\n\n\t\t/* Once the buffer is completed, submit it to the video buffer */\n\t\tk_fifo_put(&data->fifo_out, vbuf);\n\t}\n}\n\nstatic int emul_rx_enqueue(const struct device *dev, struct video_buffer *vbuf)\n{\n\tstruct emul_rx_data *data = dev->data;\n\tstruct video_format *fmt = &data->fmt;\n\n\tif (vbuf->size < fmt->size) {\n\t\tLOG_ERR(\"Buffer too small for a full frame\");\n\t\treturn -ENOMEM;\n\t}\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "drivers/video/video_emul_rx.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "Zephyr OS successfully booted.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": {
+            "iteration": 1,
+            "reasoning": "The log shows a runtime error, specifically an 'Expectation failed' with -ENOMEM and a 'Segmentation fault' when trying to insert data into a '(nil)' buffer. This indicates a memory allocation failure, likely due to insufficient memory configured for the video subsystem or general system heap/stack. Graph retrieval is needed to inspect Kconfig options related to memory, buffer sizes, and the video subsystem.",
+            "error_category": "kconfig",
+            "search_keywords": [
+              "video",
+              "buffer",
+              "memory",
+              "heap",
+              "ENOMEM"
+            ]
+          },
+          "retrieved_files": [
+            "drivers/video/Kconfig",
+            "drivers/video/Kconfig.stm32_venc",
+            "subsys/video/buffer.c",
+            "include/zephyr/video/types.h",
+            "include/zephyr/video/video.h",
+            "samples/subsys/video/capture/src/transform.h",
+            "samples/subsys/usb/host_uvc/src/main.c",
+            "drivers/video/video_emul_rx.c"
+          ],
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": [
+      "drivers/video/Kconfig",
+      "drivers/video/Kconfig.stm32_venc",
+      "subsys/video/buffer.c",
+      "include/zephyr/video/types.h",
+      "include/zephyr/video/video.h",
+      "samples/subsys/video/capture/src/transform.h",
+      "samples/subsys/usb/host_uvc/src/main.c",
+      "drivers/video/video_emul_rx.c"
+    ],
+    "initial_error_log": "[Fallback Raw Tail]\nPASS - test_video_frmival_nsec in 0.000 seconds\n===================================================================\nSTART - test_video_vbuf\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_set_mode: Applying mode 0x8062180 at 15 FPS\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000032 to 0x04\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000024 to 0x05\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000001 to 0x0a\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000001 to 0x01\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Queueing a frame of 153600 bytes in format 50424752 320x240\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Inserting 153600 bytes into buffer 0x8063558\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Queueing a frame of 153600 bytes in format 50424752 320x240\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Inserting 153600 bytes into buffer 0x8063558\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000000 to 0x01\nPASS - test_video_vbuf in 0.000 seconds\n===================================================================\nSTART - test_video_vbuf_too_small\nExpectation failed at WEST_TOPDIR/zephyr/tests/subsys/video/api/src/video_emul.c:227: video_common_test_video_vbuf_too_small: -ENOMEM not equal to video_enqueue(rx_dev, vbuf)\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Queueing a frame of 153600 bytes in format 50424752 320x240\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Inserting 153600 bytes into buffer (nil)\nSegmentation fault",
+    "protected_file_count": 7,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/proposed/v3_runtime_video_emul_rx_offbyone_93db4e5",
+    "api_events": [],
+    "started_at": "2026-10-11T08:41:58+00:00",
+    "run_meta": {
+      "code_commit": "a2b389efec310f3a8bd387423ce561e258945093",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
