@@ -221,18 +221,22 @@ def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
         return {"status": "missing_required_test", "resolved": False, "compiled": compiled, "log": compressed_log}
 
     if eval_result["status"] == "success":
-        # 被注入的測試檔若被刪了 assertion 或加了 skip，套件「通過」不算修好 (見 core/protected_files.py)
-        # A pass obtained by deleting assertions / adding skips in the injected test file is not a fix
-        # 給 agent 的訊息不含檔名：被注入的檔案清單不能讓 agent 知道；細節只寫進評測端 log。
-        # The agent-facing message names no file (the injected-file list must stay hidden);
-        # details go to the evaluator's log only.
+        # 被注入的測試檔若被刪了 assertion、加了 skip，或在注入行以外改了測試/規格，套件「通過」不算修好
+        # (見 core/protected_files.py)。A pass obtained by deleting assertions, adding skips, or editing
+        # test/spec lines outside the injected lines is not a fix (see core/protected_files.py).
+        # 給 agent 的訊息不含檔名：被注入的檔案清單不能讓 agent 知道；細節只寫進評測端 log。訊息不說
+        # 「去修受測程式而不是測試」：有些缺陷就在測試檔裡 (2026-10-12 起)。
+        # The agent-facing message names no file (the injected-file list must stay hidden); details go
+        # to the evaluator's log only. It no longer says "fix the code under test instead of the tests":
+        # some defects live in test files (since 2026-10-12).
         violations = check_test_integrity(workspace_path)
         if violations:
             logging.getLogger(__name__).warning("Test integrity violation: %s", "; ".join(violations))
             return {"status": "test_integrity_violation", "resolved": False, "compiled": True,
-                    "log": "[Verdict: FAILED. The suite passed, but test code was weakened (assertions removed "
-                           "or tests skipped/forced to pass), so this does not count as a fix. Fix the code "
-                           "under test instead of the tests.]"}
+                    "log": "[Verdict: FAILED. The suite passed, but test or specification code was changed "
+                           "(assertions removed, tests skipped/forced to pass, or test logic/expected values "
+                           "altered), so this does not count as a fix. Fix the actual defect without changing "
+                           "what the tests check or expect.]"}
         return {"status": "success", "resolved": True, "compiled": compiled, "log": "Zephyr OS successfully booted."}
 
     return {"status": eval_result["status"], "resolved": False, "compiled": compiled,

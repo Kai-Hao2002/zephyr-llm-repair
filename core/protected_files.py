@@ -27,12 +27,13 @@ restore() puts them back and deletes files the agent added under target_app.
 The registry is module-level and deliberately bypasses the agent state: the
 exempt list equals the injected-file list, which the agent must never see.
 """
+import difflib
 import filecmp
 import logging
 import os
 import re
 import shutil
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 # 測試完整性 (2026-10-05)：被注入的檔案若是 target_app 底下的測試原始碼，它必須能被 agent 修改
 # (豁免還原)，但這也讓 agent 能直接刪掉失敗的 assertion 或改成 skip。登記時記下這些檔案的
@@ -53,6 +54,52 @@ def _integrity_counts(path: str) -> tuple:
         return (0, 0)
     return (len(_ASSERT_RE.findall(text)), len(_SKIP_RE.findall(text)))
 
+# 規格檢查 (2026-10-12，嚴格版)：assertion/skip 計數擋不住「改期望值、保留錯誤再改測試情境」這類
+# 修改 (v3 2.5-flash 的 patch 重建找到 20 筆)。被注入的檔案若位在 target_app 底下 (測試程式、
+# overlay、prj.conf)，只有被注入的那幾行可以改，其他行都是規格；去掉註解、合併空白、略過空行後比對。
+# Spec check (2026-10-12, strict): assertion/skip counts miss edits that change expected values or
+# keep the defect and alter the test scenario (the v3 2.5-flash patch replay found 20). For an
+# injected file under target_app (test source, overlay, prj.conf) only the injected lines may
+# change; everything else is specification. Compared after stripping comments, collapsing
+# whitespace and dropping blank lines.
+_C_COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
+_C_LIKE_EXT = (".c", ".cpp", ".cc", ".h", ".overlay", ".dts", ".dtsi")
+
+
+def _normalize_spec(text: str, path: str) -> List[str]:
+    name = os.path.basename(path)
+    if path.endswith(_C_LIKE_EXT):
+        text = _C_COMMENT_RE.sub(" ", text)
+    elif path.endswith(".conf") or name.startswith("Kconfig"):
+        text = "\n".join(re.sub(r"(^|\s)#.*$", "", line) for line in text.splitlines())
+    lines = (" ".join(line.split()) for line in text.splitlines())
+    return [line for line in lines if line]
+
+
+def spec_changes(original: str, injected: str, final: str, path: str) -> List[str]:
+    """
+    回傳 final 相對於 injected、落在注入位置以外的修改 (正規化後的行，"- "/"+ " 開頭)；沒有就回傳 []。
+    還原成 original 或完全沒改都不算。
+    Returns final's edits relative to injected that fall outside the injected lines (normalized,
+    prefixed "- "/"+ "); [] when there are none. Restoring original or no change is always fine.
+    """
+    o, i, f = (_normalize_spec(t, path) for t in (original, injected, final))
+    if f == o or f == i:
+        return []
+    allowed_lines, allowed_pos = set(), set()
+    for tag, i1, i2, _j1, _j2 in difflib.SequenceMatcher(None, i, o, autojunk=False).get_opcodes():
+        if tag != "equal":
+            allowed_lines.update(range(i1, i2))
+            allowed_pos.update((i1, i2))
+    out = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, i, f, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        ok = (i1 in allowed_pos) if i1 == i2 else all(k in allowed_lines for k in range(i1, i2))
+        if not ok:
+            out.extend(["- " + x for x in i[i1:i2]] + ["+ " + x for x in f[j1:j2]])
+    return out
+
 logger = logging.getLogger(__name__)
 
 # workspace 絕對路徑 -> {"app_dir", "snapshot_dir", "exempt"}
@@ -71,7 +118,8 @@ def _walk_files(root: str) -> List[str]:
     return rel_paths
 
 
-def register(workspace_path: str, target_app: str, exempt_files: Iterable[str], snapshot_dir: str) -> int:
+def register(workspace_path: str, target_app: str, exempt_files: Iterable[str], snapshot_dir: str,
+             originals: Optional[Dict[str, str]] = None) -> int:
     """
     快照 workspace/target_app 底下所有不在 exempt_files 裡的檔案到 snapshot_dir
     (必須在 workspace 外面)，回傳快照的檔案數。exempt_files 是相對 workspace
@@ -79,6 +127,11 @@ def register(workspace_path: str, target_app: str, exempt_files: Iterable[str], 
     Snapshots every file under workspace/target_app not in exempt_files into
     snapshot_dir (which must be outside the workspace); returns the number of
     files snapshotted. exempt_files are workspace-root-relative paths.
+    originals：被注入檔的原始 (注入前) 內容 {相對路徑: 內容}，由 evaluate.prepare_broken_workspace
+    在刪掉 .orig 之前收集；有給的話，target_app 底下的被注入檔會做規格檢查 (spec_changes)。
+    originals: pre-injection content of injected files {relative path: content}, collected by
+    evaluate.prepare_broken_workspace before it deletes the .orig backups; when given, injected
+    files under target_app get the spec check (spec_changes).
     """
     workspace_path = os.path.abspath(workspace_path)
     snapshot_dir = os.path.abspath(snapshot_dir)
@@ -103,8 +156,14 @@ def register(workspace_path: str, target_app: str, exempt_files: Iterable[str], 
         for rel in exempt
         if rel.startswith(app_rel + os.sep) and rel.endswith(_TEST_SOURCE_EXT)
     }
+    spec = {}
+    for rel, original in (originals or {}).items():
+        rel = os.path.normpath(rel)
+        if rel in exempt and rel.startswith(app_rel + os.sep):
+            injected = open(os.path.join(workspace_path, rel), encoding="utf-8", errors="ignore").read()
+            spec[rel] = (original, injected)
     _registry[workspace_path] = {"app_dir": app_dir, "app_rel": app_rel, "snapshot_dir": snapshot_dir,
-                                 "exempt": exempt, "integrity": integrity}
+                                 "exempt": exempt, "integrity": integrity, "spec": spec}
     return count
 
 
@@ -114,6 +173,8 @@ def check_test_integrity(workspace_path: str) -> List[str]:
     (每個檔案一行)；沒有問題或 workspace 沒登記時回傳空 list。
     Returns one message per injected test source whose assertion count dropped or whose
     ztest_test_skip/pass calls increased since registration; [] if clean or unregistered.
+    另外：target_app 底下的被注入檔在注入行以外有修改 (spec_changes) 也算。
+    Also reported: injected files under target_app edited outside the injected lines (spec_changes).
     """
     entry = _registry.get(os.path.abspath(workspace_path))
     if entry is None:
@@ -123,6 +184,14 @@ def check_test_integrity(workspace_path: str) -> List[str]:
         asserts, skips = _integrity_counts(os.path.join(os.path.abspath(workspace_path), rel))
         if asserts < asserts0 or skips > skips0:
             problems.append(f"{rel}: assertions {asserts0}->{asserts}, skip/pass calls {skips0}->{skips}")
+    for rel, (original, injected) in sorted(entry.get("spec", {}).items()):
+        try:
+            final = open(os.path.join(os.path.abspath(workspace_path), rel), encoding="utf-8", errors="ignore").read()
+        except OSError:
+            final = ""
+        changed = spec_changes(original, injected, final, rel)
+        if changed:
+            problems.append(f"{rel}: spec lines changed outside the injected lines: " + " | ".join(changed[:6]))
     return problems
 
 

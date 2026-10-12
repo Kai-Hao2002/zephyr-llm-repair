@@ -150,7 +150,7 @@ def load_dataset(dataset_path: str) -> List[Dict[str, Any]]:
         return json.load(f)
 
 
-def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
+def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str, originals: Optional[Dict[str, str]] = None) -> str:
     """
     在一個拋棄式容器內對 case['broken_commit'] 做
     checkout -> 套用 mutation，比照 tools/fault_injector.py._run() 已經拿來
@@ -319,10 +319,19 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
     # which Kconfig.orig happens to match. Same severity as the .git leak
     # — must be stripped here, not left for each downstream "looks
     # relevant, include it" heuristic to independently step on.
+    # originals 有給時，刪之前先把被注入檔的原始內容讀出來 (評測端的規格檢查用，存在 workspace 外的
+    # 記憶體裡，agent 看不到)。When originals is given, read the injected files' original content
+    # before deleting (for the evaluator-side spec check; kept in memory outside the workspace).
+    injected_paths = {os.path.normpath(inj["target_file"]) for inj in injections}
     for root, _dirs, files in os.walk(dest_dir):
         for filename in files:
             if filename.endswith(".orig"):
-                os.remove(os.path.join(root, filename))
+                orig_path = os.path.join(root, filename)
+                rel = os.path.normpath(os.path.relpath(orig_path[: -len(".orig")], dest_dir))
+                if originals is not None and rel in injected_paths:
+                    with open(orig_path, encoding="utf-8", errors="ignore") as f:
+                        originals[rel] = f.read()
+                os.remove(orig_path)
 
     _assert_no_orig_residue(dest_dir, case_id)
 
@@ -454,7 +463,8 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
     case_id = case["id"]
     dest_dir = os.path.join(runs_dir, case_id)
 
-    workspace_path = prepare_broken_workspace(case, dest_dir)
+    originals: Dict[str, str] = {}
+    workspace_path = prepare_broken_workspace(case, dest_dir, originals)
     # 評測端的受保護檔案：target_app 底下除了被注入的檔案以外都快照起來，每次
     # 建置前還原 (見 core/protected_files.py)。快照放在 workspace 外面。
     # Evaluator-side protected files: snapshot everything under target_app except
@@ -464,6 +474,7 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
         workspace_path, case.get("target_app", "."),
         [inj["target_file"] for inj in _normalize_injections(case)],
         dest_dir.rstrip(os.sep) + ".protected",
+        originals,
     )
     logger.info(f"[{case_id}] Snapshotted {protected_count} protected test-app files")
     try:
