@@ -152,6 +152,8 @@ log 已經指出檔案時，三者差不多。Proposed 的優勢幾乎都在 log
 
 ## 6. 失敗分類（原始判定；未修好的案例）
 
+各類別失敗原因的詳細分析在 `FAILURES.md`。
+
 分類規則見 `tools/failure_taxonomy.py`：
 
 | | B1 | B2 | B3 | Proposed |
