@@ -347,6 +347,22 @@ def main():
     if args.replay:
         rp = json.load(open(args.replay))
         summary["replay"] = {p: dict(Counter(x.get("overall") for x in rp if x["pipeline"] == p)) for p in PIPELINES}
+    if args.replay:
+        # 嚴格規格檢查的離線估計：重建後違反規格的修好案例改判未修好；重建不可靠 (replay_mismatch) 的
+        # 案例沿用人工標註 (test_changed 視為違反)。實際評分時 agent 會收到訊息並可重試，所以這是下界。
+        # Offline estimate of the strict spec check: resolved cases whose replay violates the spec count
+        # as unresolved; unreliable replays fall back to the manual label. A lower bound, since live
+        # grading would tell the agent and allow retries.
+        rp = json.load(open(args.replay))
+        lab_tc = ({(x[0], x[1]) for x in json.load(open(args.labels))["labels"] if x[2] == "test_changed"}
+                  if args.labels else set())
+        bad = {(x["pipeline"], x["case_id"]) for x in rp
+               if x.get("spec_violation") or (x.get("overall") == "replay_mismatch" and (x["pipeline"], x["case_id"]) in lab_tc)}
+        r3 = {p: {cid: (dict(r, final_status="spec_violation") if (p, cid) in bad else r) for cid, r in rows.items()}
+              for p, rows in res.items()}
+        summary["strict_spec_offline"] = {"rates": rates(cases, r3), "pairwise": pairwise(cases, r3),
+                                          "by_category": grouped(cases, r3, "category"),
+                                          "violations": {p: sorted(c for q, c in bad if q == p) for p in PIPELINES}}
     if args.labels:
         lab = json.load(open(args.labels))["labels"]
         summary["manual_labels"] = {p: dict(Counter(x[2] for x in lab if x[0] == p)) for p in PIPELINES}
@@ -392,7 +408,7 @@ def main():
     for p, v in summary["failure_taxonomy"].items():
         print(" ", p, {c: v.get(c, 0) for c in ["resolved"] + CATEGORY_ORDER if v.get(c)})
     print("== costs"); [print(" ", p, {k: round(x, 1) if isinstance(x, float) else x for k, x in v.items()}) for p, v in summary["costs"].items()]
-    for name in ("strict_no_test_change", "strict_root_fix"):
+    for name in ("strict_no_test_change", "strict_root_fix", "strict_spec_offline"):
         if name in summary:
             print(f"== {name}")
             for p, v in summary[name]["rates"].items():

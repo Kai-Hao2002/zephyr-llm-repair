@@ -28,6 +28,7 @@ sys.path.insert(0, REPO)
 from failure_taxonomy import injected_files, load_pipeline_results  # noqa: E402
 from mutate_inject import MUTATION_OPERATORS  # noqa: E402
 from patch_applier import PatchApplier  # noqa: E402
+from core.protected_files import spec_changes  # noqa: E402
 
 PIPELINES = ["b1", "b2", "b3", "proposed"]
 
@@ -112,9 +113,13 @@ def replay(case: Dict, res: Dict, originals: Dict[str, str]) -> Dict:
                 state = "untouched"
             else:
                 state = "differs"
+            # 2026-10-12 起的嚴格規格檢查 (只套用在 target_app 底下的被注入檔)，離線估計用。
+            # The strict spec check (from 2026-10-12; injected files under target_app only), for offline estimates.
+            spec = (spec_changes(orig, mutated[path], final, path)
+                    if path.startswith(case["target_app"].rstrip("/") + "/") else [])
             diff = "" if state in ("exact_restore", "untouched") else "".join(difflib.unified_diff(
                 orig.splitlines(True), final.splitlines(True), f"a/{path} (original)", f"b/{path} (final)", n=2))
-            files[path] = {"state": state, "diff_vs_original": diff}
+            files[path] = {"state": state, "diff_vs_original": diff, "spec_changes": spec}
     return files
 
 
@@ -164,7 +169,7 @@ def main():
         overall = ("exact_restore" if all(s in ("exact_restore", "whitespace_only") for s in states)
                    else "differs" if "differs" in states else "partial")
         rows.append({"pipeline": p, "case_id": c["id"], "category": c["category"], "overall": overall,
-                     "files": files})
+                     "spec_violation": any(v["spec_changes"] for v in files.values()), "files": files})
 
     os.makedirs(args.out_dir, exist_ok=True)
     json.dump(rows, open(os.path.join(args.out_dir, f"replay_{args.tag}.json"), "w"), indent=1, ensure_ascii=False)
