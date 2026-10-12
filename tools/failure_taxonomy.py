@@ -18,6 +18,7 @@ Primary categories (first matching rule wins):
   (resolved cases are kept as failure="resolved" so localization stats can use all rows)
 """
 import argparse
+import glob
 import json
 import os
 import re
@@ -107,6 +108,15 @@ def classify(case: Dict[str, Any], res: Dict[str, Any]) -> Dict[str, Any]:
             tags.append("search_mismatch")
         if "FormatError" in apply_errs:
             tags.append("format_error")
+    # v3：格式錯誤的細項 (2026-10-08 決定解析器維持原樣，分析時統計次數)。
+    # v3: format-error details (parser kept as is per the 2026-10-08 decision; counted here).
+    if "Target file '>>>>>>>> REPLACE' not found" in apply_errs:
+        tags.append("multi_block_one_header")
+    if "Target file '---" in apply_errs or "Target file '+++" in apply_errs:
+        tags.append("diff_style_header")
+    statuses = [it["trajectory"].get("status") for it in its]
+    if "test_integrity_violation" in statuses:
+        tags.append("integrity_violation")
     if restored_any:
         tags.append("restored")
     if sum(s == "static_check/static_check_failed" for s in stages) >= 2:
@@ -136,9 +146,23 @@ def classify(case: Dict[str, Any], res: Dict[str, Any]) -> Dict[str, Any]:
         "touched_injected": bool(applied_any & inj),
         "crash_signal_lost": signal_lost,
         "iterations": len(its),
+        "integrity_violations": statuses.count("test_integrity_violation"),
+        "format_errors": statuses.count("patch_format_error"),
         "stages": stages,
         "error": res.get("error"),
     }
+
+
+def load_pipeline_results(runs: str, pipeline: str) -> List[Dict[str, Any]]:
+    """v2：<runs>/<p>_results.json；v3：<runs>/<p>/<case_id>.json (一筆一檔)。
+    v2: <runs>/<p>_results.json; v3: <runs>/<p>/<case_id>.json (one file per case)."""
+    merged = os.path.join(runs, f"{pipeline}_results.json")
+    if os.path.exists(merged):
+        return json.load(open(merged))
+    out = []
+    for f in sorted(glob.glob(os.path.join(runs, pipeline, "*.json"))):
+        out.extend(json.load(open(f)))
+    return out
 
 
 def main():
@@ -150,7 +174,7 @@ def main():
     cases = {c["id"]: c for c in json.load(open(args.dataset))}
     rows = []
     for p in PIPELINES:
-        for res in json.load(open(os.path.join(args.runs, f"{p}_results.json"))):
+        for res in load_pipeline_results(args.runs, p):
             rows.append(classify(cases[res["case_id"]], res))
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     json.dump(rows, open(args.out, "w"), indent=1, ensure_ascii=False)
