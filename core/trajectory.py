@@ -43,10 +43,13 @@ def build_trajectory(stage: str, status: str, *, patch: Any = None, applied_file
     iteration (see core/protected_files.py).
     Fields that don't apply to a pipeline/stage are left None.
     """
-    if isinstance(patch, dict):
-        patch = {k: clip_text(v) if isinstance(v, str) else v for k, v in patch.items()}
-    else:
-        patch = clip_text(patch)
+    # patch 不截斷 (2026-10-12)：離線重建 (tools/replay_patches.py) 要完整的 patch 才能重現 workspace；
+    # 2.5-flash 那一輪有 13 個 patch 超過 20,000 字被截斷，1 筆因此無法重建。patch 大小受模型單次輸出
+    # 上限限制；log 等其他欄位仍截斷。
+    # Patches are no longer clipped (2026-10-12): the offline replay (tools/replay_patches.py) needs the
+    # full patch to rebuild the workspace; 13 patches over 20,000 chars were clipped in the 2.5-flash run
+    # and one case could not be replayed. Patch size is bounded by the model's output limit; logs and
+    # other fields are still clipped.
     return {
         "stage": stage,
         "status": status,
