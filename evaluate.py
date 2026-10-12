@@ -440,7 +440,9 @@ def verify_reproduces_initial_failure(case: Dict[str, Any], workspace_path: str)
     case is still broken, it isn't grading a repair attempt.
     """
     category = case.get("category", "")
-    wait_for_completion = category in ("runtime_crash", "compound")
+    # real_bug (v3 真實 bug 對照集) 都是執行期才失敗，要等測試跑完；不等的話看到開機訊號就判 success。
+    # real_bug cases (v3 real-bug control set) all fail at run time; without waiting, the boot banner reads as success.
+    wait_for_completion = category in ("runtime_crash", "compound", "real_bug")
     docker_cmd, container_name = build_devops_docker_cmd(workspace_path, case.get("board", "qemu_x86"), case.get("target_app", "."))
     oracle = QemuOracle(timeout=600)
     result = oracle.evaluate(docker_cmd, container_name=container_name, wait_for_completion=wait_for_completion)
