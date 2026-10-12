@@ -1,0 +1,91 @@
+[
+  {
+    "case_id": "v3real_cap_start_from_qos_acd3b54",
+    "category": "real_bug",
+    "pipeline": "b2",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 91.26821208000183,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b2_single_agent_rag",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 97329,
+            "output_tokens": 12389
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "`ASSERTION FAIL [proc_param != ((void *)0)]` in `cap_initiator.c` indicates that a pointer `proc_param` is unexpectedly NULL. While `cap_initiator.c` is not provided, the error occurs after a stream has been enabled, and the log mentions `(3/4 streams done)`. This suggests an issue with the client's internal state management or iteration over procedures/streams.\n\nA common cause for such issues in state-driven systems is an incomplete state machine definition. The `bt_bap_stream_valid_state_transition` function in `subsys/bluetooth/audio/bap_stream.c` is responsible for validating state transitions for BAP endpoints. Currently, for both sink and source endpoints, the `IDLE` state can only transition to `CODEC_CONFIGURED`. It does not explicitly allow a self-transition from `IDLE` to `IDLE`.\n\nWhile a direct transition from `IDLE` to `IDLE` might not be an \"operation\" in the ASCS specification, allowing it as a valid state machine transition makes the system more robust. If the `cap_initiator` (client) attempts to reset or re-evaluate an already-idle stream, and the underlying state validation (on the server side, via `ascs_ep_set_state` calling `bt_bap_stream_valid_state_transition`) rejects this as an invalid transition, it could lead to an unexpected error path in the client's logic, potentially causing `proc_param` to become NULL.\n\nBy explicitly allowing `IDLE` to `IDLE` transitions, we ensure that such scenarios do not result in an invalid state transition error, potentially preventing the `cap_initiator` from entering an inconsistent state.\n\nThe fix involves modifying the `valid_snk_state_transition` and `valid_src_state_transition` functions in `subsys/bluetooth/audio/bap_stream.c` to include `BT_BAP_EP_STATE_IDLE` as a valid `new_state` when the `old_state` is also `BT_BAP_EP_STATE_IDLE`.\n\n```\nsubsys/bluetooth/audio/bap_stream.c\n<<<<<<<< SEARCH\n\tcase BT_BAP_EP_STATE_IDLE:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_ENABLING:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_ENABLING:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_ENABLING:\n\t\tcase BT_BAP_EP_STATE_STREAMING:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_STREAMING:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_STREAMING:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_RELEASING:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_IDLE:\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tdefault:\n\t\tvalid_transition = false;\n\t\tbreak;\n\t}\n\n\treturn valid_transition;\n}\n\nstatic bool valid_src_state_transition(enum bt_bap_ep_state old_state,\n\t\t\t\t       enum bt_bap_ep_state new_state)\n{\n\tbool valid_transition;\n\n\tswitch (old_state) {\n\tcase BT_BAP_EP_STATE_IDLE:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_ENABLING:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_ENABLING:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_ENABLING:\n\t\tcase BT_BAP_EP_STATE_STREAMING:\n\t\tcase BT_BAP_EP_STATE_DISABLING:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_STREAMING:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED: /* Allowed during CIS disconnect */\n\t\tcase BT_BAP_EP_STATE_STREAMING:\n\t\tcase BT_BAP_EP_STATE_DISABLING:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_DISABLING:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_RELEASING:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_IDLE:\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tdefault:\n\t\tvalid_transition = false;\n\t\tbreak;\n\t}\n========\n\tcase BT_BAP_EP_STATE_IDLE:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_IDLE:\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_ENABLING:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_ENABLING:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_ENABLING:\n\t\tcase BT_BAP_EP_STATE_STREAMING:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_STREAMING:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED: /* Allowed during CIS disconnect */\n\t\tcase BT_BAP_EP_STATE_STREAMING:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_RELEASING:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_IDLE:\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tdefault:\n\t\tvalid_transition = false;\n\t\tbreak;\n\t}\n\n\treturn valid_transition;\n}\n\nstatic bool valid_src_state_transition(enum bt_bap_ep_state old_state,\n\t\t\t\t       enum bt_bap_ep_state new_state)\n{\n\tbool valid_transition;\n\n\tswitch (old_state) {\n\tcase BT_BAP_EP_STATE_IDLE:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_IDLE:\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_ENABLING:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_ENABLING:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_ENABLING:\n\t\tcase BT_BAP_EP_STATE_STREAMING:\n\t\tcase BT_BAP_EP_STATE_DISABLING:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_STREAMING:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED: /* Allowed during CIS disconnect */\n\t\tcase BT_BAP_EP_STATE_STREAMING:\n\t\tcase BT_BAP_EP_STATE_DISABLING:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_DISABLING:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_QOS_CONFIGURED:\n\t\tcase BT_BAP_EP_STATE_RELEASING:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase BT_BAP_EP_STATE_RELEASING:\n\t\tswitch (new_state) {\n\t\tcase BT_BAP_EP_STATE_IDLE:\n\t\tcase BT_BAP_EP_STATE_CODEC_CONFIGURED:\n\t\t\tvalid_transition = true;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tvalid_transition = false;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tdefault:\n\t\tvalid_transition = false;\n\t\tbreak;\n\t}\n>>>>>>>> REPLACE\n```",
+          "applied_files": [],
+          "apply_error": "SearchMatchFailed: No exactly matching SEARCH block was found in 'subsys/bluetooth/audio/bap_stream.c'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": [
+            "subsys/bluetooth/audio/cap_initiator.c",
+            "subsys/bluetooth/audio/bap_stream.c",
+            "subsys/bluetooth/audio/ascs.c",
+            "tests/bluetooth/tester/src/audio/btp_bap_unicast.c",
+            "tests/bluetooth/audio/mocks/src/bap_unicast_client.c",
+            "samples/bluetooth/audio/cap_acceptor/src/cap_acceptor_unicast.c",
+            "include/zephyr/bluetooth/audio/bap.h",
+            "samples/bluetooth/audio/tmap_peripheral/src/bap_unicast_sr.c"
+          ],
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": [
+      "subsys/bluetooth/audio/cap_initiator.c",
+      "subsys/bluetooth/audio/bap_stream.c",
+      "subsys/bluetooth/audio/ascs.c",
+      "tests/bluetooth/tester/src/audio/btp_bap_unicast.c",
+      "tests/bluetooth/audio/mocks/src/bap_unicast_client.c",
+      "samples/bluetooth/audio/cap_acceptor/src/cap_acceptor_unicast.c",
+      "include/zephyr/bluetooth/audio/bap.h",
+      "samples/bluetooth/audio/tmap_peripheral/src/bap_unicast_sr.c"
+    ],
+    "initial_error_log": "[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[Runtime Log Tail]\nSTART - test_initiator_unicast_start_state_qos_configured\nSetting stream 0xf6001760 to state 2\n[00:00:00.000,000] <dbg> bt_bap_stream.bt_bap_stream_config: conn 0xf60018ac stream 0xf6001760, ep 0x806dda0 codec_cfg 0xf6001914 codec id 0x06 codec cid 0x0000 codec vid 0x0000\n[00:00:00.000,000] <dbg> bt_bap_stream.bap_stream_valid_ase_op: ASE operation (dir Sink) 1 in state idle is valid\n[00:00:00.000,000] <dbg> bt_bap_stream.bt_bap_stream_attach: conn 0xf60018ac stream 0xf6001760 ep 0x806dda0\n[00:00:00.000,000] <dbg> bt_cap_common.bt_cap_common_get_active_proc: Took active_proc_mutex (count: 1)\n[00:00:00.000,000] <dbg> bt_cap_common.bt_cap_common_unlock_proc: Released active_proc_mutex\nSetting stream 0xf600178c to state 2\n[00:00:00.000,000] <dbg> bt_bap_stream.bt_bap_stream_config: conn 0xf60018ac stream 0xf600178c, ep 0x806de98 codec_cfg 0xf6001914 codec id 0x06 codec cid 0x0000 codec vid 0x0000\n[00:00:00.000,000] <dbg> bt_bap_stream.bap_stream_valid_ase_op: ASE operation (dir Source) 1 in state idle is valid\n[00:00:00.000,000] <dbg> bt_bap_stream.bt_bap_stream_attach: conn 0xf60018ac stream 0xf600178c ep 0x806de98\n[00:00:00.000,000] <dbg> bt_cap_common.bt_cap_common_get_active_proc: Took active_proc_mutex (count: 1)\n[00:00:00.000,000] <dbg> bt_cap_common.bt_cap_common_unlock_proc: Released active_proc_mutex\nSetting stream 0xf60017b8 to state 2\n[00:00:00.000,000] <dbg> bt_bap_stream.bt_bap_stream_config: conn 0xf60018e0 stream 0xf60017b8, ep 0x806df94 codec_cfg 0xf6001914 codec id 0x06 codec cid 0x0000 codec vid 0x0000\n[00:00:00.000,000] <dbg> bt_bap_stream.bap_stream_valid_ase_op: ASE operation (dir Sink) 1 in state idle is valid\n[00:00:00.000,000] <dbg> bt_bap_stream.bt_bap_stream_attach: conn 0xf60018e0 stream 0xf60017b8 ep 0x806df94\n[00:00:00.000,000] <dbg> bt_cap_common.bt_cap_common_get_active_proc: Took active_proc_mutex (count: 1)\n[00:00:00.000,000] <dbg> bt_cap_common.bt_cap_common_unlock_proc: Released active_proc_mutex\nSetting stream 0xf60017e4 to state 2\n[...]\n[00:00:00.000,000] <dbg> bt_bap_stream.bt_bap_stream_enable: stream 0xf60017e4\n[00:00:00.000,000] <dbg> bt_bap_stream.bap_stream_valid_ase_op: ASE operation (dir Source) 3 in state qos-configured is valid\n[00:00:00.000,000] <dbg> bt_cap_common.bt_cap_common_get_active_proc: Took active_proc_mutex (count: 6)\n[00:00:00.000,000] <dbg> bt_cap_initiator.bt_cap_initiator_cp_cb: cap_stream 0xf60017e4\n[00:00:00.000,000] <dbg> bt_cap_common.bt_cap_common_unlock_proc: Released active_proc_mutex\n[00:00:00.000,000] <dbg> bt_cap_common.bt_cap_common_get_active_proc: Took active_proc_mutex (count: 6)\n[00:00:00.000,000] <dbg> bt_cap_initiator.bt_cap_initiator_enabled: cap_stream 0xf60017e4\n[00:00:00.000,000] <dbg> bt_cap_initiator.update_proc_done_cnt: proc 1 subproc 3: 3/4\n[00:00:00.000,000] <dbg> bt_cap_initiator.bt_cap_initiator_enabled: Stream 0xf60017e4 enabled (3/4 streams done)\nASSERTION FAIL [proc_param != ((void *)0)] @ WEST_TOPDIR/zephyr/subsys/bluetooth/audio/cap_initiator.c:1915\nproc is not done, but could not get next proc_param\n@ WEST_TOPDIR/zephyr/lib/os/assert.c:43\n[00:00:00.000,000] <err> os: >>> ZEPHYR FATAL ERROR 4: Kernel panic on CPU 0\n[00:00:00.000,000] <err> os: Current thread: 0x806e840 (test_initiator_unicast_start_st)\n[00:00:00.000,000] <err> os: Halting system\nExiting due to fatal error\nFAILED: zephyr/CMakeFiles/run_native /tmp/build/zephyr/CMakeFiles/run_native\ncd /tmp/build && /tmp/build/zephyr/zephyr.exe\nninja: build stopped: subcommand failed.\nFATAL ERROR: command exited with status 1: /usr/bin/cmake --build /tmp/build --target run",
+    "protected_file_count": 13,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_real/b2/v3real_cap_start_from_qos_acd3b54",
+    "api_events": [],
+    "started_at": "2026-10-12T04:33:18+00:00",
+    "run_meta": {
+      "code_commit": "36999438f219a0a4e7f160420b6f921447f366c2",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

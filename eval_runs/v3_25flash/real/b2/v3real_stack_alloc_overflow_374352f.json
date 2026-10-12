@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3real_stack_alloc_overflow_374352f",
+    "category": "real_bug",
+    "pipeline": "b2",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 181.93136620521545,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b2_single_agent_rag",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 37442,
+            "output_tokens": 17022
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "The `test_stack_alloc_size_overflow` test case in `tests/kernel/stack/stack/src/test_stack_contexts.c` is designed to verify that `k_stack_alloc_init` returns `-ENOMEM` when an attempt is made to allocate a stack with a number of entries that would cause the total buffer size to overflow.\n\nThe test calculates `num_entries` as `(UINT32_MAX / sizeof(stack_data_t)) + 1U`. Assuming `stack_data_t` is `uint32_t` (size 4), `num_entries` becomes `0x40000000`. The total byte size for this stack would be `0x40000000 * 4 = 0x100000000`, which overflows a 32-bit `size_t` type. The test is configured to run only when `sizeof(size_t) <= sizeof(uint32_t)`, meaning `size_t` is 32-bit.\n\nThe `k_stack_alloc_init` function is a system call. In Zephyr, system call argument validation is typically performed in a `z_vrfy_` function, which is either explicitly defined or automatically generated. The `z_vrfy_` function for `k_stack_alloc_init` is expected to validate the `stack` pointer and ensure that `num_entries` does not lead to an overflow when calculating the total buffer size.\n\nThe error log indicates that `k_stack_alloc_init` is not returning `-ENOMEM` as expected, but likely 0 (success). This suggests that the `z_impl_k_stack_alloc_init` (the kernel implementation) is either missing the overflow check or performing the multiplication in a way that causes a silent overflow to 0, leading `k_malloc(0)` to succeed.\n\nTo fix this, we need to add an explicit overflow check for `num_entries` in the system call verification layer. Since `k_stack_alloc_init`'s `z_vrfy_` function is not explicitly provided in `kernel/userspace/userspace_handler.c` (unlike some other `k_object` syscalls), it is likely generated. However, we can override the generated `z_vrfy_` function by providing our own implementation in `kernel/userspace/userspace_handler.c`.\n\nThe fix involves:\n1.  Adding a `static inline int z_vrfy_k_stack_alloc_init(...)` function to `kernel/userspace/userspace_handler.c`.\n2.  Inside this function, validate the `stack` pointer using `validate_kernel_object`.\n3.  Add a `K_OOPS` check using `K_SYSCALL_VERIFY_MSG` and `size_mul_overflow` to detect if `num_entries * sizeof(stack_data_t)` would overflow.\n4.  Include the generated `k_stack_alloc_init_mrsh.c` to ensure the marshalling code is linked.\n\nThis approach ensures that the overflow is detected at the system call entry point, preventing the kernel from attempting to allocate an incorrectly sized buffer.\n\n```\nkernel/userspace/userspace_handler.c\n<<<<<<<< SEARCH\nstatic inline void *z_vrfy_k_object_alloc_size(enum k_objects otype, size_t size)\n{\n\treturn z_impl_k_object_alloc_size(otype, size);\n}\n#include <zephyr/syscalls/k_object_alloc_size_mrsh.c>\n========\nstatic inline void *z_vrfy_k_object_alloc_size(enum k_objects otype, size_t size)\n{\n\treturn z_impl_k_object_alloc_size(otype, size);\n}\n#include <zephyr/syscalls/k_object_alloc_size_mrsh.c>\n\nstatic inline int z_vrfy_k_stack_alloc_init(struct k_stack *stack, uint32_t num_entries)\n{\n\tstruct k_object *ko;\n\tsize_t buffer_size;\n\n\tko = validate_kernel_object(stack, K_OBJ_STACK, _OBJ_INIT_FALSE);\n\tK_OOPS(K_SYSCALL_VERIFY_MSG(ko != NULL, \"stack %p access denied or already initialized\", stack));\n\n\tK_OOPS(K_SYSCALL_VERIFY_MSG(!size_mul_overflow(num_entries, sizeof(stack_data_t), &buffer_size),\n\t\t\t\t    \"stack allocation size overflow: %u entries * %zu bytes/entry\",\n\t\t\t\t    num_entries, sizeof(stack_data_t)));\n\n\treturn z_impl_k_stack_alloc_init(stack, num_entries);\n}\n#include <zephyr/syscalls/k_stack_alloc_init_mrsh.c>\n>>>>>>>> REPLACE\n```",
+          "applied_files": [
+            "kernel/userspace/userspace_handler.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\n[105/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeslicing.c.obj\n[106/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/spinlock_validate.c.obj\n[107/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[108/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[109/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[110/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[111/115] Linking C static library zephyr/kernel/libkernel.a\n[112/115] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[113/115] Building native simulator runner, and linking final executable\n[114/115] Running utility command for native_runner_executable\n[114/115] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE stack_contexts\n===================================================================\nSTART - test_stack_alloc_null\nPASS - test_stack_alloc_null in 0.000 seconds\n===================================================================\nSTART - test_stack_alloc_size_overflow\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/stack/stack/src/test_stack_contexts.c:396: stack_contexts_test_stack_alloc_size_overflow: (ret not equal to -ENOMEM)",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": [
+            "kernel/userspace/userspace_handler.c",
+            "include/zephyr/sys/kobject.h",
+            "include/zephyr/sys/internal/kobject_internal.h",
+            "include/zephyr/types.h",
+            "kernel/userspace/userspace.c",
+            "subsys/bluetooth/services/ots/ots_dir_list.c",
+            "include/zephyr/internal/syscall_handler.h",
+            "include/zephyr/debug/object_tracing.h"
+          ],
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": [
+      "kernel/userspace/userspace_handler.c",
+      "include/zephyr/sys/kobject.h",
+      "include/zephyr/sys/internal/kobject_internal.h",
+      "include/zephyr/types.h",
+      "kernel/userspace/userspace.c",
+      "subsys/bluetooth/services/ots/ots_dir_list.c",
+      "include/zephyr/internal/syscall_handler.h",
+      "include/zephyr/debug/object_tracing.h"
+    ],
+    "initial_error_log": "[Fallback Raw Tail]\n[105/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeslicing.c.obj\n[106/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/spinlock_validate.c.obj\n[107/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[108/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[109/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[110/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[111/115] Linking C static library zephyr/kernel/libkernel.a\n[112/115] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[113/115] Building native simulator runner, and linking final executable\n[114/115] Running utility command for native_runner_executable\n[114/115] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE stack_contexts\n===================================================================\nSTART - test_stack_alloc_null\nPASS - test_stack_alloc_null in 0.000 seconds\n===================================================================\nSTART - test_stack_alloc_size_overflow\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/stack/stack/src/test_stack_contexts.c:396: stack_contexts_test_stack_alloc_size_overflow: (ret not equal to -ENOMEM)",
+    "protected_file_count": 6,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_real/b2/v3real_stack_alloc_overflow_374352f",
+    "api_events": [],
+    "started_at": "2026-10-12T05:30:32+00:00",
+    "run_meta": {
+      "code_commit": "36999438f219a0a4e7f160420b6f921447f366c2",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

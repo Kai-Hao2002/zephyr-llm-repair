@@ -1,0 +1,88 @@
+[
+  {
+    "case_id": "v3real_stream_flash_size_overflow_07f1481",
+    "category": "real_bug",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 335.2995910644531,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 431,
+            "output_tokens": 11654
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": {
+            "filepath": "tests/subsys/storage/stream/stream_flash/src/main.c",
+            "content": "#include <zephyr/ztest.h>\n#include <zephyr/storage/stream_flash.h>\n#include <zephyr/device.h>\n#include <zephyr/drivers/flash.h>\n#include <zephyr/logging/log.h>\n#include <zephyr/storage/flash_map.h>\n\nLOG_MODULE_REGISTER(STREAM_FLASH_TEST, LOG_LEVEL_DBG);\n\n/* Use the partition configured for stream_flash, typically 'storage_partition' */\n#define TEST_FLASH_AREA_ID FIXED_PARTITION_ID(storage_partition)\n\nstatic struct stream_flash_ctx sf_ctx;\nstatic uint8_t sf_buf[CONFIG_STREAM_FLASH_BUFFER_SIZE];\n\nstatic const struct device *flash_dev;\nstatic off_t flash_offset;\nstatic size_t flash_size;\nstatic size_t flash_page_size;\n\nstatic void stream_flash_setup(void)\n{\n    int rc;\n    const struct flash_area *fa;\n    struct flash_pages_info page_info;\n\n    rc = flash_area_open(TEST_FLASH_AREA_ID, &fa);\n    zassert_equal(rc, 0, \"Failed to open flash area %d\", TEST_FLASH_AREA_ID);\n\n    flash_dev = fa->fa_dev;\n    flash_offset = fa->fa_off;\n    flash_size = fa->fa_size;\n\n    zassert_true(device_is_ready(flash_dev), \"Flash device not ready\");\n\n    rc = flash_get_parameters(flash_dev, &page_info);\n    zassert_equal(rc, 0, \"Failed to get flash parameters\");\n    flash_page_size = page_info.size;\n\n    /* Ensure the flash area size is a multiple of page size for simplicity in tests */\n    zassert_equal(flash_size % flash_page_size, 0, \"Flash area size not page aligned\");\n\n    /* Erase the entire test flash area before running tests */\n    rc = flash_area_erase(fa, 0, flash_size);\n    zassert_equal(rc, 0, \"Failed to erase flash area\");\n\n    flash_area_close(fa);\n}\n\nZTEST_SUITE(stream_flash, NULL, stream_flash_setup, NULL, NULL, NULL);\n\nZTEST(stream_flash, test_stream_flash_init)\n{\n    int rc;\n\n    /* Initialize stream_flash with the parameters of the dedicated test flash area */\n    rc = stream_flash_init(&sf_ctx, flash_dev, flash_offset, flash_size, sf_buf, sizeof(sf_buf));\n    zassert_equal(rc, 0, \"stream_flash_init failed with %d\", rc);\n}\n\nZTEST(stream_flash, test_stream_flash_buffered_write_single_page)\n{\n    int rc;\n    uint8_t write_buf[flash_page_size];\n    uint8_t read_buf[flash_page_size];\n\n    for (size_t i = 0; i < sizeof(write_buf); i++) {\n        write_buf[i] = (uint8_t)i;\n    }\n\n    rc = stream_flash_init(&sf_ctx, flash_dev, flash_offset, flash_size, sf_buf, sizeof(sf_buf));\n    zassert_equal(rc, 0, \"stream_flash_init failed\");\n\n    rc = stream_flash_buffered_write(&sf_ctx, write_buf, sizeof(write_buf));\n    zassert_equal(rc, 0, \"stream_flash_buffered_write failed\");\n\n    rc = stream_flash_flush(&sf_ctx);\n    zassert_equal(rc, 0, \"stream_flash_flush failed\");\n\n    rc = flash_read(flash_dev, flash_offset, read_buf, sizeof(read_buf));\n    zassert_equal(rc, 0, \"flash_read failed\");\n\n    zassert_mem_equal(write_buf, read_buf, sizeof(write_buf), \"Data mismatch\");\n}\n\nZTEST(stream_flash, test_stream_flash_buffered_write_multi_page)\n{\n    int rc;\n    size_t num_pages = 2;\n    size_t total_size = num_pages * flash_page_size;\n    uint8_t write_buf[total_size];\n    uint8_t read_buf[total_size];\n\n    /* Ensure we don't write beyond the allocated flash_size */\n    zassert_true(total_size <= flash_size, \"Test data size exceeds flash area size\");\n\n    for (size_t i = 0; i < sizeof(write_buf); i++) {\n        write_buf[i] = (uint8_t)i;\n    }\n\n    rc = stream_flash_init(&sf_ctx, flash_dev, flash_offset, flash_size, sf_buf, sizeof(sf_buf));\n    zassert_equal(rc, 0, \"stream_flash_init failed\");\n\n    rc = stream_flash_buffered_write(&sf_ctx, write_buf, sizeof(write_buf));\n    zassert_equal(rc, 0, \"stream_flash_buffered_write failed\");\n\n    rc = stream_flash_flush(&sf_ctx);\n    zassert_equal(rc, 0, \"stream_flash_flush failed\");\n\n    rc = flash_read(flash_dev, flash_offset, read_buf, sizeof(read_buf));\n    zassert_equal(rc, 0, \"flash_read failed\");\n\n    zassert_mem_equal(write_buf, read_buf, sizeof(write_buf), \"Data mismatch\");\n}\n\nZTEST(stream_flash, test_stream_flash_buffered_write_unaligned)\n{\n    /* This test is skipped as stream_flash_buffered_write expects page-aligned writes */\n    ztest_test_skip();\n}\n\nZTEST(stream_flash, test_stream_flash_buffered_write_whole_page)\n{\n    int rc;\n    uint8_t write_buf[flash_page_size];\n    uint8_t read_buf[flash_page_size];\n\n    for (size_t i = 0; i < sizeof(write_buf); i++) {\n        write_buf[i] = (uint8_t)i;\n    }\n\n    rc = stream_flash_init(&sf_ctx, flash_dev, flash_offset, flash_size, sf_buf, sizeof(sf_buf));\n    zassert_equal(rc, 0, \"stream_flash_init failed\");\n\n    rc = stream_flash_buffered_write(&sf_ctx, write_buf, sizeof(write_buf));\n    zassert_equal(rc, 0, \"stream_flash_buffered_write failed\");\n\n    rc = stream_flash_flush(&sf_ctx);\n    zassert_equal(rc, 0, \"stream_flash_flush failed\");\n\n    rc = flash_read(flash_dev, flash_offset, read_buf, sizeof(read_buf));\n    zassert_equal(rc, 0, \"flash_read failed\");\n\n    zassert_mem_equal(write_buf, read_buf, sizeof(write_buf), \"Data mismatch\");\n}\n\nZTEST(stream_flash, test_stream_flash_bytes_buffered)\n{\n    int rc;\n    uint8_t write_buf[flash_page_size / 2]; /* Half a page */\n\n    for (size_t i = 0; i < sizeof(write_buf); i++) {\n        write_buf[i] = (uint8_t)i;\n    }\n\n    rc = stream_flash_init(&sf_ctx, flash_dev, flash_offset, flash_size, sf_buf, sizeof(sf_buf));\n    zassert_equal(rc, 0, \"stream_flash_init failed\");\n\n    rc = stream_flash_buffered_write(&sf_ctx, write_buf, sizeof(write_buf));\n    zassert_equal(rc, 0, \"stream_flash_buffered_write failed\");\n\n    zassert_equal(stream_flash_bytes_buffered(&sf_ctx), sizeof(write_buf), \"Incorrect bytes buffered\");\n\n    rc = stream_flash_flush(&sf_ctx);\n    zassert_equal(rc, 0, \"stream_flash_flush failed\");\n\n    zassert_equal(stream_flash_bytes_buffered(&sf_ctx), 0, \"Bytes buffered not cleared after flush\");\n}\n\nZTEST(stream_flash, test_stream_flash_bytes_written)\n{\n    int rc;\n    uint8_t write_buf[flash_page_size];\n\n    for (size_t i = 0; i < sizeof(write_buf); i++) {\n        write_buf[i] = (uint8_t)i;\n    }\n\n    rc = stream_flash_init(&sf_ctx, flash_dev, flash_offset, flash_size, sf_buf, sizeof(sf_buf));\n    zassert_equal(rc, 0, \"stream_flash_init failed\");\n\n    zassert_equal(stream_flash_bytes_written(&sf_ctx), 0, \"Initial bytes written not zero\");\n\n    rc = stream_flash_buffered_write(&sf_ctx, write_buf, sizeof(write_buf));\n    zassert_equal(rc, 0, \"stream_flash_buffered_write failed\");\n\n    rc = stream_flash_flush(&sf_ctx);\n    zassert_equal(rc, 0, \"stream_flash_flush failed\");\n\n    zassert_equal(stream_flash_bytes_written(&sf_ctx), sizeof(write_buf), \"Incorrect bytes written\");\n}\n\nZTEST(stream_flash, test_stream_flash_flush)\n{\n    int rc;\n    uint8_t write_buf[flash_page_size / 2]; /* Half a page */\n    uint8_t read_buf[flash_page_size];\n\n    for (size_t i = 0; i < sizeof(write_buf); i++) {\n        write_buf[i] = (uint8_t)i;\n    }\n\n    rc = stream_flash_init(&sf_ctx, flash_dev, flash_offset, flash_size, sf_buf, sizeof(sf_buf));\n    zassert_equal(rc, 0, \"stream_flash_init failed\");\n\n    rc = stream_flash_buffered_write(&sf_ctx, write_buf, sizeof(write_buf));\n    zassert_equal(rc, 0, \"stream_flash_buffered_write failed\");\n\n    /* Data should not be on flash yet */\n    rc = flash_read(flash_dev, flash_offset, read_buf, sizeof(read_buf));\n    zassert_equal(rc, 0, \"flash_read failed\");\n    zassert_not_mem_equal(write_buf, read_buf, sizeof(write_buf), \"Data written prematurely\");\n\n    rc = stream_flash_flush(&sf_ctx);\n    zassert_equal(rc, 0, \"stream_flash_flush failed\");\n\n    /* Data should now be on flash */\n    rc = flash_read(flash_dev, flash_offset, read_buf, sizeof(write_buf));\n    zassert_equal(rc, 0, \"flash_read failed\");\n    zassert_mem_equal(write_buf, read_buf, sizeof(write_buf), \"Data mismatch after flush\");\n}\n"
+          },
+          "applied_files": [
+            "tests/subsys/storage/stream/stream_flash/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nPASS - test_stream_flash_buffered_write_multi_page in 0.000 seconds\n===================================================================\nSTART - test_stream_flash_buffered_write_unaligned\nSKIP - test_stream_flash_buffered_write_unaligned in 0.000 seconds\n===================================================================\nSTART - test_stream_flash_buffered_write_whole_page\nPASS - test_stream_flash_buffered_write_whole_page in 0.000 seconds\n===================================================================\nSTART - test_stream_flash_bytes_buffered\nPASS - test_stream_flash_bytes_buffered in 0.000 seconds\n===================================================================\nSTART - test_stream_flash_bytes_written\nPASS - test_stream_flash_bytes_written in 0.000 seconds\n===================================================================\nSTART - test_stream_flash_flush\nPASS - test_stream_flash_flush in 0.000 seconds\n===================================================================\nSTART - test_stream_flash_init\n[00:00:00.000,000] <err> STREAM_FLASH: Requested range overflows device size\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/storage/stream/stream_flash/src/main.c:129: lib_stream_flash_test_stream_flash_init: (rc not equal to -EFAULT)",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/subsys/storage/stream/stream_flash/src/main.c"
+          ]
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nPASS - test_stream_flash_buffered_write_multi_page in 0.000 seconds\n===================================================================\nSTART - test_stream_flash_buffered_write_unaligned\nSKIP - test_stream_flash_buffered_write_unaligned in 0.000 seconds\n===================================================================\nSTART - test_stream_flash_buffered_write_whole_page\nPASS - test_stream_flash_buffered_write_whole_page in 0.000 seconds\n===================================================================\nSTART - test_stream_flash_bytes_buffered\nPASS - test_stream_flash_bytes_buffered in 0.000 seconds\n===================================================================\nSTART - test_stream_flash_bytes_written\nPASS - test_stream_flash_bytes_written in 0.000 seconds\n===================================================================\nSTART - test_stream_flash_flush\nPASS - test_stream_flash_flush in 0.000 seconds\n===================================================================\nSTART - test_stream_flash_init\n[00:00:00.000,000] <err> STREAM_FLASH: Requested range overflows device size\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/storage/stream/stream_flash/src/main.c:129: lib_stream_flash_test_stream_flash_init: (rc not equal to -EFAULT)",
+    "protected_file_count": 5,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_real/b1/v3real_stream_flash_size_overflow_07f1481",
+    "api_events": [
+      {
+        "kind": "retry",
+        "what": "b1_zero_shot",
+        "attempt": 1,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 139
+      }
+    ],
+    "started_at": "2026-10-12T03:50:23+00:00",
+    "run_meta": {
+      "code_commit": "36999438f219a0a4e7f160420b6f921447f366c2",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
