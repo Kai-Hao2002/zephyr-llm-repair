@@ -83,6 +83,11 @@ class ZephyrAgentState(TypedDict):
     # touched, not the whole tree).
     applied_files: List[str]
 
+    # 上一次 ApplyPatch 改動的每個檔案在 patch 之前的內容 {相對路徑: 內容}；StaticCheck 用它只回報這次
+    # patch 新增的 cppcheck 問題 (2026-10-13)。Pre-patch content of each file the last ApplyPatch changed;
+    # StaticCheck uses it to report only cppcheck findings the patch introduced (2026-10-13).
+    pre_patch_contents: Dict[str, str]
+
     # === 4. 評分指標蒐集 (Metrics Collection，見 evaluate.py/analyze_results.py) ===
 
     # 每次迭代結束時 (跟 attempt_history 完全同一組寫入點，見
@@ -252,6 +257,7 @@ def create_initial_state(workspace_path: str, initial_log: str, max_iters: int =
         "patch_content": "",
         "attempt_history": [],
         "applied_files": [],
+        "pre_patch_contents": {},
         "iteration_log": [],
         "pending_token_usage": [],
         "first_retrieval_files": None,

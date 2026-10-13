@@ -52,6 +52,10 @@ class PatchApplier:
 
         applied_files = []
         errors = []
+        # 每個檔案第一次被修改前的內容 (StaticCheck 用來只回報這次 patch 新增的 cppcheck 問題)。
+        # Each file's content before this patch first changed it (StaticCheck uses it to report only
+        # cppcheck findings the patch introduced).
+        original_contents: Dict[str, str] = {}
 
         for match in matches:
             filepath_raw, search_block, replace_block = match
@@ -93,6 +97,7 @@ class PatchApplier:
                 # 執行替換 (Execute replacement)
                 # 限制只替換第一次出現的位置，避免誤傷重複的程式碼片段
                 new_content = normalized_content.replace(normalized_search, normalized_replace, 1)
+                original_contents.setdefault(filepath, file_content)
 
                 with open(full_path, 'w', encoding='utf-8', newline='\n') as f:
                     f.write(new_content)
@@ -110,12 +115,14 @@ class PatchApplier:
             return {
                 "success": False,
                 "applied_files": applied_files,
+                "original_contents": original_contents,
                 "error": "\n".join(errors)
             }
         
         return {
             "success": True,
             "applied_files": applied_files,
+            "original_contents": original_contents,
             "error": ""
         }
 

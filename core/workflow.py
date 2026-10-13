@@ -290,6 +290,7 @@ def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     return {
         "error_type": "patch_applied",
         "applied_files": applied_files,
+        "pre_patch_contents": patch_result.get("original_contents", {}),
         "iterations": current_iter,
     }
 
@@ -319,7 +320,7 @@ def static_check_node(state: ZephyrAgentState) -> Dict[str, Any]:
     print(f"\n🔍 [StaticCheck] Running static analysis on the patch of iteration {current_iter}...")
     restore_protected_files(workspace_path)
     checker = StaticChecker()
-    result = checker.check(workspace_path, target_app, board, applied_files)
+    result = checker.check(workspace_path, target_app, board, applied_files, state.get("pre_patch_contents") or {})
 
     if result["passed"]:
         print("   ✅ Static analysis passed, proceeding to the full build.")
