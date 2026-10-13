@@ -95,6 +95,14 @@ def test_block_without_path_is_an_error():
     assert r["success"] and open(os.path.join(ws, "a.c")).read() == "X;\nY;\n"
 
 
+def test_angle_bracket_path_is_accepted():
+    ws = tempfile.mkdtemp()
+    os.makedirs(os.path.join(ws, "src"))
+    open(os.path.join(ws, "src/a.c"), "w").write("x;\n")
+    r = PatchApplier(ws).apply_patches("<src/a.c>\n<<<<<<<< SEARCH\nx;\n========\ny;\n>>>>>>>> REPLACE")
+    assert r["success"] and r["applied_files"] == ["src/a.c"] and open(os.path.join(ws, "src/a.c")).read() == "y;\n"
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):

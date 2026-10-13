@@ -67,6 +67,14 @@ class PatchApplier:
             # 清理檔案路徑 (通常 LLM 可能會在路徑前後加上空格或 Markdown 的 backticks)
             # Clean filepath (LLMs might add spaces or backticks around the path)
             filepath = filepath_raw.strip().strip("`").strip()
+            # prompt 範本用 "<relative path of the file>" 表示路徑，模型常連角括號一起照抄
+            # (2.5-flash：B2 15 筆、B3 12 筆、Proposed 16 筆因此套用失敗)；去掉包住整個路徑的一對角括號
+            # (2026-10-13)。"<<<<" 這類區塊標記不受影響。
+            # The prompt template writes the path as "<relative path of the file>" and models often copy
+            # the brackets (2.5-flash: 15 B2, 12 B3, 16 Proposed cases failed to apply because of it); strip
+            # one pair of brackets wrapping the whole path (2026-10-13). Block markers like "<<<<" are untouched.
+            if filepath.startswith("<") and filepath.endswith(">") and not filepath.startswith("<<"):
+                filepath = filepath[1:-1].strip()
             
             # 組合絕對路徑 (Assemble absolute path)
             full_path = os.path.join(self.workspace_path, filepath)
