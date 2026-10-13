@@ -17,6 +17,7 @@ from core.state import ZephyrAgentState
 from core.llm_usage import extract_usage, append_usage
 from core.llm_provider import get_chat_model, get_model_name
 from core.llm_retry import call_with_retry
+from agents.spec_rule import SPEC_RULE
 
 _LOG_PATH_PREFIX = "/zephyrproject/zephyr/"
 _LOG_EXT_PATH_RE = re.compile(re.escape(_LOG_PATH_PREFIX) + r"([\w\-./]+\.(?:c|h|conf|dts|dtsi|overlay))\b")
@@ -206,7 +207,9 @@ The code inside the SEARCH block must match the original file EXACTLY (including
 <original code to be replaced>
 ========
 <new code after the fix>
->>>>>>>> REPLACE"""),
+>>>>>>>> REPLACE
+
+""" + SPEC_RULE),
         ("human", """[Patches attempted earlier and their outcomes]
 {attempt_history}
 (How to read this: if a record says the patch application failed, the text of the SEARCH block did not match the file content character for character, so the source code was not modified at all. Re-check character by character, including indentation, against the latest source code below; the direction of the change is not necessarily wrong, so there is no need to switch direction because of it. If a record says the patch was applied but the build/run still failed, that direction has been shown not to work; please try a different approach or a different file.)

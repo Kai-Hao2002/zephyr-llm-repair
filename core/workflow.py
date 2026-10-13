@@ -243,6 +243,19 @@ def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
             "log": log_filter.compress_log(eval_result["log"])}
 
 
+def with_last_build_log(message: str, last_build_log: str, note: str) -> str:
+    """
+    patch 套用失敗或 StaticCheck 失敗時沒有 build；把最近一次 build/run 的 log 附在失敗訊息後面，
+    否則下一輪只看得到那則失敗訊息、看不到目前的錯誤 (2026-10-13；B3 共用)。
+    On a patch-apply or StaticCheck failure nothing is built; append the most recent build/run log to
+    the failure message, otherwise the next iteration sees only that message and loses the current
+    error (2026-10-13; shared with B3).
+    """
+    if not last_build_log:
+        return message
+    return f"{message}\n\n[Most recent build/run log ({note})]\n{last_build_log}"
+
+
 def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     """
     ApplyPatch：把 Patch Expert 產生的 SEARCH/REPLACE 區塊套用到 workspace
@@ -271,7 +284,9 @@ def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     if not patch_result["success"]:
         print("   ❌ Patch application failed! Bad format, or no matching original code found.")
         return {
-            "current_error_log": f"Patch Application Failed:\n{patch_result['error']}",
+            "current_error_log": with_last_build_log(
+                f"Patch Application Failed:\n{patch_result['error']}", state.get("last_build_log", ""),
+                "from before this patch; nothing was built after it"),
             "error_type": "patch_format_error",
             "applied_files": [],
             "iterations": current_iter,
@@ -328,7 +343,9 @@ def static_check_node(state: ZephyrAgentState) -> Dict[str, Any]:
 
     print("   ⚠️ Static analysis found problems; sending the patch straight back for regeneration and skipping the full build this time.")
     return {
-        "current_error_log": result["log"],
+        "current_error_log": with_last_build_log(
+            result["log"], state.get("last_build_log", ""),
+            "from before this patch; the patch is applied but was not built"),
         "error_type": "static_check_failed",
         "final_status": failure_final_status,
         **record_attempt_outcome(
@@ -427,6 +444,7 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
               + (f", the log pattern looks like the \"{conflict_tag}\" category" if conflict_tag else ""))
         return {
             "current_error_log": annotated_log,
+            "last_build_log": annotated_log,
             "error_type": eval_result["status"],
             "iterations": current_iter,
             "final_status": failure_final_status,
@@ -473,6 +491,7 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
         print(f"   ⚠️ [QA] The suite reported success, but the target test '{required_pass_test}' did not really pass. The patch looks like it games the check (deleting/skipping the test), so this does not count as a fix.")
         return {
             "current_error_log": eval_result["log"],
+            "last_build_log": eval_result["log"],
             "error_type": "missing_required_test",
             "iterations": current_iter,
             "final_status": failure_final_status,
@@ -506,6 +525,7 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
     print(f"   💥 [QA] Runtime verification failed (status: {eval_result['status']}), filtering the log...")
     return {
         "current_error_log": eval_result["log"],
+        "last_build_log": eval_result["log"],
         "error_type": eval_result["status"],
         "iterations": current_iter,
         "final_status": failure_final_status,

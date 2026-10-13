@@ -31,6 +31,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from core.llm_usage import extract_usage
 from core.llm_provider import get_chat_model, get_model_name
 from core.llm_retry import call_with_retry
+from agents.spec_rule import SPEC_RULE
 
 # 三個 baseline 的修補生成都用 "pro" 角色 (見 core/llm_provider.py)——跟
 # Proposed pipeline 的 Patch Expert 用同一個角色定位，維持公平比較 (三個
@@ -55,7 +56,9 @@ The code inside the SEARCH block must match the original file EXACTLY (including
 <original code to be replaced>
 ========
 <new code after the fix>
->>>>>>>> REPLACE"""
+>>>>>>>> REPLACE
+
+""" + SPEC_RULE
 
 
 class B1FullFilePatch(BaseModel):
@@ -97,7 +100,8 @@ def b1_generate_full_file_patch(error_log: str) -> Tuple[Dict[str, str], Dict[st
                     "You cannot see the actual content of any file in this project, you get no retrieval data, "
                     "and you have no tools available. "
                     "Relying purely on your existing knowledge of the Zephyr source code, work out the file that is most likely at fault, "
-                    "and directly output the complete content of that file as you believe it should be after the fix."),
+                    "and directly output the complete content of that file as you believe it should be after the fix.\n\n"
+                    + SPEC_RULE),
         ("human", "Error log:\n{error_log}"),
     ])
     chain = prompt | structured_llm
@@ -145,17 +149,25 @@ def b2_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
     return str(response.text), usage_entry
 
 
-def b3_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, Dict[str, Any]]:
+def b3_generate_patch(error_log: str, project_files_content: str,
+                      previous_attempts: str = "") -> Tuple[str, Dict[str, Any]]:
     """
     B3 Closed-Loop Single Agent (Table 2)："Build feedback, but no
     specialized multi-agent split"——單一 persona 身兼診斷與修補，closed
     loop 由 core/baseline_pipelines.py 的 run_b3 實作 (重複呼叫這個函式，
-    每次把最新一輪的 error_log 帶進來)。故意不接受、不傳入跨迭代記憶
-    (attempt_history)：提案原文把 Context Compression 明確歸屬 Supervisor
-    Node，屬於多代理人分工的一部分，B3 定義是「no specialized multi-agent
-    split」，給它記憶會讓「有沒有多代理人分工」這個變因跟「有沒有跨迭代
-    記憶」混在一起，稀釋掉 Proposed 相對 B3 的優勢歸因。也不給任何檢索——
-    B3 要對照的變因是「有沒有閉環重試」，不是「有沒有 RAG」。
+    每次把最新一輪的 error_log 帶進來)。不給任何檢索——B3 要對照的變因是
+    「有沒有閉環重試」，不是「有沒有 RAG」。
+
+    previous_attempts (2026-10-13 起)：這個 session 前幾輪的 patch 與結果，原文機械式截斷，
+    不經 LLM 壓縮 (壓縮屬於 Proposed 的 Supervisor)。之前的 B3 完全沒有跨迭代記憶，prompt 每輪都
+    一樣、temperature 0，2.5-flash 有 90/323 輪送出和上一輪相同的 patch；Table 2 只要求「沒有
+    多代理人分工」，沒有要求沒有記憶，一般的閉迴路單一 agent 本來就看得到自己的歷史。
+
+    previous_attempts (from 2026-10-13): this session's earlier patches and outcomes, mechanically
+    truncated, not LLM-compressed (compression belongs to Proposed's Supervisor). B3 used to have no
+    cross-iteration memory at all; with an identical prompt every round and temperature 0, 90/323 later
+    2.5-flash iterations resubmitted the previous patch. Table 2 only requires "no specialized
+    multi-agent split", not "no memory"; a plain closed-loop single agent sees its own history.
 
     回傳 (patch 內容, 這次呼叫的 token 用量)。
     Returns (patch content, this call's token usage).
@@ -172,12 +184,15 @@ def b3_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
     llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=300)
     prompt = ChatPromptTemplate.from_messages([
         ("system", _PATCH_FORMAT_SYSTEM_PROMPT),
-        ("human", "[Current project source and configuration file contents]\n{project_files}\n\n"
+        ("human", "[Your earlier attempts in this session and their outcomes (oldest first)]\n{previous_attempts}\n"
+                  "(Patches that applied successfully are already reflected in the current file contents below.)\n\n"
+                  "[Current project source and configuration file contents]\n{project_files}\n\n"
                   "[Current error log]\n{error_log}\n\nPlease start generating the patch blocks:"),
     ])
     chain = prompt | llm
-    response = call_with_retry(lambda: chain.invoke({"error_log": error_log, "project_files": project_files_content}),
-                               what="b3_closed_loop")
+    response = call_with_retry(lambda: chain.invoke({
+        "previous_attempts": previous_attempts or "(This is the first attempt; there is no history yet.)",
+        "error_log": error_log, "project_files": project_files_content}), what="b3_closed_loop")
     usage_entry = extract_usage(response, node="b3_closed_loop", model=get_model_name(_PATCH_ROLE))
     # gemini-3.x 的 content 可能是 content block 的 list (含 thinking/signature)，.text 只取文字部分
     # gemini-3.x may return content as a list of blocks (thinking/signature); .text keeps only the text

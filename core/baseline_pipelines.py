@@ -8,10 +8,8 @@ QemuOracle/LogFilter/build_devops_docker_cmd/evaluate_repair_attempt)，但
 刻意不重用 apply_patch_node/devops_node/qa_node 這幾個 LangGraph 節點：
 那幾個節點會呼叫 agents/supervisor.py 的 record_attempt_outcome，把結果
 寫進 attempt_history (Proposed 的跨迭代記憶機制)。B1/B2 是單發、用不到；
-B3 依 Table 2 定義 ("no specialized multi-agent split") 刻意不給跨迭代
-記憶——Context Compression 明確歸屬 Supervisor Node，屬於多代理人分工的
-一部分。重用那幾個節點會產生用不到的壓縮 LLM 呼叫成本，還會讓「B3 沒有
-記憶」這個實驗設計在程式碼裡沒有真的做到。B1/B2/B3 也同樣沒有 DevOps
+B3 不經過 Supervisor 的 LLM 壓縮記憶 (Context Compression 屬於多代理人
+分工)；2026-10-13 起 B3 自己保留原文截斷的前幾輪 patch 與結果 (見 run_b3)。B1/B2/B3 也同樣沒有 DevOps
 Expert/QA Expert 這種角色分工 (跟 Proposed 相比，這正是 Table 2 要對照的
 變因之一)，所以繼續共用同一個 evaluate_repair_attempt() 呼叫拿到「編譯+
 執行」合併後的單一結果，不像 Proposed 拆成 devops_node/qa_node 兩個階段。
@@ -26,21 +24,19 @@ evaluate_repair_attempt — but deliberately doesn't reuse the
 apply_patch_node/devops_node/qa_node LangGraph nodes. Those nodes call
 agents/supervisor.py's record_attempt_outcome, writing into attempt_history
 (Proposed's cross-iteration memory). B1/B2 are single-shot and never read
-it; B3, per Table 2's definition ("no specialized multi-agent split"),
-deliberately gets no cross-iteration memory — Context Compression is
-explicitly attributed to the Supervisor Node, part of the multi-agent split.
-Reusing those nodes would incur an unused compression-LLM cost and would
-leave "B3 has no memory" as a claim the code doesn't actually enforce.
+it; B3 does not get the Supervisor's LLM-compressed memory (Context Compression
+belongs to the multi-agent split); from 2026-10-13 B3 keeps its own
+mechanically truncated history of earlier patches and outcomes (see run_b3).
 B1/B2/B3 also have no DevOps Expert/QA Expert role split at all (exactly
 the variable Table 2 measures relative to Proposed), so they keep sharing
 one evaluate_repair_attempt() call that returns the combined build+execute
 result in one shot, rather than Proposed's two-stage devops_node/qa_node.
 """
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from core.state import ZephyrAgentState
-from core.workflow import evaluate_repair_attempt
+from core.workflow import evaluate_repair_attempt, with_last_build_log
 from core.trajectory import build_trajectory
 from core.protected_files import pop_restored
 from tools.patch_applier import PatchApplier
@@ -185,31 +181,57 @@ def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
     }
 
 
+# B3 歷史的機械式截斷上限 (每輪 patch / 每輪結果 log)。Mechanical truncation limits for B3's history.
+_B3_HISTORY_PATCH_CHARS = 6000
+_B3_HISTORY_LOG_CHARS = 3000
+
+
+def _clip_middle(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]}\n…[{len(text) - limit} chars omitted]…\n{text[-half:]}"
+
+
+def _render_b3_history(history: List[Dict[str, Any]]) -> str:
+    parts = []
+    for h in history:
+        parts.append(f"--- Attempt {h['iteration']} ---\n[Patch]\n{_clip_middle(h['patch'] or '', _B3_HISTORY_PATCH_CHARS)}\n"
+                     f"[Outcome: {h['outcome']}]\n{_clip_middle(h['log'] or '', _B3_HISTORY_LOG_CHARS)}")
+    return "\n\n".join(parts)
+
+
 def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
     """
     B3 Closed-Loop Single Agent：單一 LLM persona 身兼診斷+修補，重複
     apply→build 直到成功或用完 max_iters；不做 StaticCheck (DevOps Expert
-    的專門化分工)、不給 RAG (first_retrieval_files 永遠不設定)、不給跨迭代
-    記憶 (每次只帶最新 error_log，不是完整歷史——見 agents/baselines.py 的
-    b3_generate_patch 說明)。
+    的專門化分工)、不給 RAG (first_retrieval_files 永遠不設定)。2026-10-13 起
+    每輪附上這個 session 前幾輪的 patch 與結果 (原文機械式截斷，不經 LLM 壓縮)，
+    見 agents/baselines.py 的 b3_generate_patch 說明；patch 套用失敗時，最近一次
+    build/run 的 log 附在失敗訊息後面 (core/workflow.with_last_build_log)。
     """
     workspace_path = state["workspace_path"]
     target_app = state["target_app"]
     board = state["board"]
     required_pass_test = state.get("required_pass_test")
     error_log = state.get("current_error_log", "")
+    last_build_log = error_log
+    history: List[Dict[str, Any]] = []
     iteration_log = []
 
     for current_iter in range(1, max_iters + 1):
         print(f"\n🧪 [B3 Closed-Loop] Iteration {current_iter}/{max_iters}...")
         project_files_content = _read_context_files(workspace_path, target_app, error_log, [])
-        patch_text, usage_entry = b3_generate_patch(error_log, project_files_content)
+        patch_text, usage_entry = b3_generate_patch(error_log, project_files_content, _render_b3_history(history))
 
         applier = PatchApplier(workspace_path=workspace_path)
         apply_result = applier.apply_patches(patch_text)
         if not apply_result["success"]:
             print(f"   ❌ Patch application failed: {apply_result['error']}")
-            error_log = f"Patch Application Failed:\n{apply_result['error']}"
+            failure = f"Patch Application Failed:\n{apply_result['error']}"
+            history.append({"iteration": current_iter, "patch": patch_text,
+                            "outcome": "patch application failed (nothing was built)", "log": failure})
+            error_log = with_last_build_log(failure, last_build_log, "from before this patch; nothing was built after it")
             iteration_log.append(_iteration_log_entry(current_iter, False, False, True, [usage_entry], _trajectory(workspace_path,
                 "apply", "patch_format_error", patch=patch_text, applied_files=apply_result.get("applied_files", []), apply_error=apply_result["error"],
             )))
@@ -230,7 +252,10 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
                     "iteration_log": iteration_log}
 
         print(f"   💥 Build/run failed (status: {eval_result['status']})")
-        error_log = eval_result["log"]
+        error_log = last_build_log = eval_result["log"]
+        history.append({"iteration": current_iter, "patch": patch_text,
+                        "outcome": f"applied to {apply_result['applied_files']}; build/run failed with status {eval_result['status']}",
+                        "log": eval_result["log"]})
         if current_iter >= max_iters:
             return {"final_status": "failed_max_retries", "iterations": current_iter,
                     "error_type": eval_result["status"], "iteration_log": iteration_log}

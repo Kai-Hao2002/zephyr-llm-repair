@@ -22,7 +22,14 @@ class ZephyrAgentState(TypedDict):
     # 當前的錯誤日誌 (由 DevOps Expert 過濾後的精簡版本)
     # The current error log (compressed version from DevOps Expert)
     current_error_log: str
-    
+
+    # 最近一次真的 build/run 的 log (一開始是初始 log)。patch 套用失敗或 StaticCheck 失敗時沒有 build，
+    # current_error_log 會換成那則失敗訊息，這份 log 附在後面，讓下一輪仍看得到目前的錯誤 (2026-10-13)。
+    # The log of the most recent actual build/run (initially the initial log). On a patch-apply or
+    # StaticCheck failure nothing is built and current_error_log becomes that failure message; this log
+    # is appended so the next iteration still sees the current error (2026-10-13).
+    last_build_log: str
+
     # 錯誤類型 (例如: "build_error", "cmake_error", "qemu_crash", "success")
     # Error type categorization
     error_type: str
@@ -250,6 +257,7 @@ def create_initial_state(workspace_path: str, initial_log: str, max_iters: int =
     return {
         "messages": [],
         "current_error_log": initial_log,
+        "last_build_log": initial_log,
         "error_type": "initial_build_error",
         "search_keywords": [],
         "retrieved_context": "",

@@ -4,6 +4,9 @@ import re
 import logging
 from typing import Dict, Any, List
 
+_NOT_A_PATH_PREFIXES = (">>>>", "<<<<", "====", "---", "+++", "@@", "diff ")
+
+
 class PatchApplier:
     """
     解析 LLM 輸出的 SEARCH/REPLACE 區塊，並精確修改目標檔案。
@@ -70,6 +73,15 @@ class PatchApplier:
             # 驗證檔案是否存在 (Verify file exists)
             if not os.path.exists(full_path):
                 err_msg = f"TargetFileNotFound: Target file '{filepath}' not found."
+                # 解析規則不變 (2026-10-08 決定)；「檔名」其實是區塊標記或 diff 標頭時補一句說明，
+                # 否則 agent 只看到 "Target file '>>>>>>>> REPLACE' not found" 不知道錯在哪 (2026-10-13)。
+                # Parsing is unchanged (decided 2026-10-08); when the "path" is really a block marker or a
+                # diff header, explain why, since "Target file '>>>>>>>> REPLACE' not found" alone is
+                # unhelpful (2026-10-13).
+                if filepath.startswith(_NOT_A_PATH_PREFIXES):
+                    err_msg += (" Each SEARCH/REPLACE block must be immediately preceded by its own line containing "
+                                "only the file's relative path (repeat the path for every block, even in the same "
+                                "file); do not use diff headers such as '--- a/file' or '+++ b/file'.")
                 self.logger.error(err_msg)
                 errors.append(err_msg)
                 continue
