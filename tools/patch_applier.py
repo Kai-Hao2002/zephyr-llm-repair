@@ -5,6 +5,7 @@ import logging
 from typing import Dict, Any, List
 
 _NOT_A_PATH_PREFIXES = (">>>>", "<<<<", "====", "---", "+++", "@@", "diff ")
+_SEARCH_MARKER_RE = re.compile(r"^<<<<<<<<\s*SEARCH\s*$", re.MULTILINE)
 
 
 class PatchApplier:
@@ -123,6 +124,19 @@ class PatchApplier:
                 errors.append(err_msg)
 
         # 彙整結果 (Summarize results)
+        # 沒有路徑行的區塊 (例如同一個檔名底下連續寫第二個區塊) 不會被 block_pattern 解析到，之前會被
+        # 靜默略過、整體仍回報成功，agent 以為全部套用了。現在明確報錯 (2026-10-13)；能解析的區塊照常套用。
+        # Blocks without a path line (e.g. a second block under the same file name) are not captured by
+        # block_pattern; they used to be skipped silently while the patch reported success, so the agent
+        # believed everything applied. Now an explicit error (2026-10-13); parsable blocks still apply.
+        orphan_count = len(_SEARCH_MARKER_RE.findall(llm_output)) - len(matches)
+        if orphan_count > 0:
+            err_msg = (f"FormatError: {orphan_count} SEARCH/REPLACE block(s) had no file path line and were not "
+                       f"applied. Each SEARCH/REPLACE block must be immediately preceded by its own line containing "
+                       f"only the file's relative path (repeat the path for every block, even in the same file).")
+            self.logger.error(err_msg)
+            errors.append(err_msg)
+
         if errors:
             return {
                 "success": False,

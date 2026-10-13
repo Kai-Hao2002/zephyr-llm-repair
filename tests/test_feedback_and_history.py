@@ -81,6 +81,20 @@ def test_b3_history_truncation():
     assert len(text) < bp._B3_HISTORY_PATCH_CHARS + bp._B3_HISTORY_LOG_CHARS + 500 and "chars omitted" in text
 
 
+def test_block_without_path_is_an_error():
+    ws = tempfile.mkdtemp()
+    open(os.path.join(ws, "a.c"), "w").write("x;\ny;\n")
+    two = ("a.c\n<<<<<<<< SEARCH\nx;\n========\nX;\n>>>>>>>> REPLACE\n"
+           "<<<<<<<< SEARCH\ny;\n========\nY;\n>>>>>>>> REPLACE")
+    r = PatchApplier(ws).apply_patches(two)
+    assert not r["success"] and "1 SEARCH/REPLACE block(s) had no file path line" in r["error"]
+    assert r["applied_files"] == ["a.c"] and open(os.path.join(ws, "a.c")).read() == "X;\ny;\n"
+    ok = two.replace(">>>>>>>> REPLACE\n<<<<<<<< SEARCH\ny;", ">>>>>>>> REPLACE\na.c\n<<<<<<<< SEARCH\ny;")
+    open(os.path.join(ws, "a.c"), "w").write("x;\ny;\n")
+    r = PatchApplier(ws).apply_patches(ok)
+    assert r["success"] and open(os.path.join(ws, "a.c")).read() == "X;\nY;\n"
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):
