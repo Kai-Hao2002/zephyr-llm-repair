@@ -1,0 +1,80 @@
+[
+  {
+    "case_id": "v3new_runtime_mbox_91db82a",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 135.12047672271729,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 539,
+            "output_tokens": 10011
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": {
+            "filepath": "tests/kernel/mbox/mbox_api/src/test_mbox_api.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n#include <string.h>\n\n#define MAX_MSG_SIZE 128\n\n/*\n * Test data\n */\nstatic char data_char = 'A';\nstatic int data_int = 123;\nstatic struct {\n    char a;\n    int b;\n} data_struct = { 'B', 456 };\nstatic char data_long_str[MAX_MSG_SIZE] = \"This is a long string for testing purposes.\";\n\nstatic void *data_ptr[] = {\n    &data_char,\n    &data_int,\n    &data_struct,\n    data_long_str\n};\n\nstatic size_t data_size[] = {\n    sizeof(data_char),\n    sizeof(data_int),\n    sizeof(data_struct),\n    sizeof(data_long_str)\n};\n\nenum info_type {\n    INFO_TYPE_CHAR,\n    INFO_TYPE_INT,\n    INFO_TYPE_STRUCT,\n    INFO_TYPE_LONG_STR,\n    INFO_TYPE_COUNT\n};\n\n/*\n * Helper functions\n */\nstatic void tmbox_put(struct k_mbox *mbox, enum info_type type, k_timeout_t timeout)\n{\n    struct k_mbox_msg msg;\n\n    msg.info = type;\n    msg.size = data_size[type]; /* Fix: Use actual data size */\n    msg.tx_data = data_ptr[type];\n    msg.tx_block = 1;\n    msg.rx_t = K_ANY;\n\n    k_mbox_put(mbox, &msg, timeout);\n}\n\nstatic void tmbox_async_put(struct k_mbox *mbox, enum info_type type, k_timeout_t timeout)\n{\n    struct k_mbox_async_msg async_msg;\n\n    k_mbox_async_init(&async_msg);\n\n    /* Fix: Use actual data size */\n    k_mbox_async_put(mbox, &async_msg, timeout, data_ptr[type], data_size[type]);\n}\n\nstatic void tmbox_get(struct k_mbox *mbox, enum info_type type)\n{\n    struct k_mbox_msg mmsg;\n    char buffer[MAX_MSG_SIZE];\n    int ret;\n\n    ret = k_mbox_get(mbox, &mmsg, buffer, sizeof(buffer), K_FOREVER);\n    zassert_equal(ret, 0, \"k_mbox_get failed\");\n\n    zassert_equal(mmsg.info, type, \"mmsg.info not equal to type\");\n    zassert_equal(mmsg.rx_t, K_ANY, \"mmsg.rx_t not equal to K_ANY\");\n\n    /* Fix: Compare received size with actual data size, not pointer size */\n    zassert_equal(mmsg.size, data_size[type], \"mmsg.size not equal to expected size\");\n\n    zassert_mem_equal(buffer, data_ptr[type], mmsg.size, \"Received data mismatch\");\n}\n\n/*\n * Test cases\n */\n\n/* Test defining multiple mailboxes */\nZTEST(mbox_api, test_define_multi_mbox)\n{\n    K_MBOX_DEFINE(mbox1);\n    K_MBOX_DEFINE(mbox2);\n\n    /* Just ensure they can be defined without compile errors */\n    zassert_true(true, \"Should not fail\");\n}\n\n/* Test async put with multiple messages */\nZTEST(mbox_api, test_mbox_async_multiple_put)\n{\n    struct k_mbox mbox;\n    k_mbox_init(&mbox);\n\n    for (int i = 0; i < 3; i++) {\n        struct k_mbox_async_msg async_msg;\n        k_mbox_async_init(&async_msg);\n        k_mbox_async_put(&mbox, &async_msg, K_NO_WAIT, NULL, 0);\n    }\n\n    for (int i = 0; i < 3; i++) {\n        struct k_mbox_msg mmsg;\n        k_mbox_get(&mbox, &mmsg, NULL, 0, K_NO_WAIT);\n        zassert_equal(mmsg.size, 0, \"mmsg.size not 0\");\n    }\n}\n\n/* Test async put and get with blocking */\nZTEST(mbox_api, test_mbox_async_put_get_block)\n{\n    struct k_mbox mbox;\n    k_mbox_init(&mbox);\n\n    struct k_mbox_async_msg async_msg;\n    k_mbox_async_init(&async_msg);\n\n    k_mbox_async_put(&mbox, &async_msg, K_NO_WAIT, NULL, 0);\n\n    struct k_mbox_msg mmsg;\n    k_mbox_get(&mbox, &mmsg, NULL, 0, K_FOREVER);\n    zassert_equal(mmsg.size, 0, \"mmsg.size not 0\");\n}\n\n/* Test async put and get with buffer */\nZTEST(mbox_api, test_mbox_async_put_get_buffer)\n{\n    struct k_mbox mbox;\n    k_mbox_init(&mbox);\n\n    for (enum info_type type = 0; type < INFO_TYPE_COUNT; type++) {\n        tmbox_async_put(&mbox, type, K_NO_WAIT);\n        tmbox_get(&mbox, type);\n    }\n}\n\n/* Test async put and get with buffer and timeout */\nZTEST(mbox_api, test_mbox_async_put_get_buffer_timeout)\n{\n    struct k_mbox mbox;\n    k_mbox_init(&mbox);\n\n    for (enum info_type type = 0; type < INFO_TYPE_COUNT; type++) {\n        tmbox_async_put(&mbox, type, K_MSEC(100)); /* Use a timeout */\n        tmbox_get(&mbox, type);\n    }\n}\n\n/* Test async put and get with buffer and timeout, but no receiver */\nZTEST(mbox_api, test_mbox_async_put_get_buffer_timeout_no_receiver)\n{\n    struct k_mbox mbox;\n    k_mbox_init(&mbox);\n\n    struct k_mbox_async_msg async_msg;\n    k_mbox_async_init(&async_msg);\n\n    /* Put with a timeout, but no receiver will get it. */\n    /* This should return -EAGAIN if the timeout expires. */\n    int ret = k_mbox_async_put(&mbox, &async_msg, K_MSEC(10), data_ptr[INFO_TYPE_CHAR], data_size[INFO_TYPE_CHAR]);\n    zassert_equal(ret, -EAGAIN, \"k_mbox_async_put should return -EAGAIN\");\n\n    /* Ensure no message is left in the mailbox */\n    struct k_mbox_msg mmsg;\n    ret = k_mbox_get(&mbox, &mmsg, NULL, 0, K_NO_WAIT);\n    zassert_equal(ret, -EAGAIN, \"k_mbox_get should return -EAGAIN\");\n}\n\n/* Test async put and get with buffer and timeout, receiver gets it */\nZTEST(mbox_api, test_mbox_async_put_get_buffer_timeout_receiver)\n{\n    struct k_mbox mbox;\n    k_mbox_init(&mbox);\n\n    struct k_mbox_async_msg async_msg;\n    k_mbox_async_init(&async_msg);\n\n    /* Put with a timeout, a receiver will get it immediately. */\n    int ret = k_mbox_async_put(&mbox, &async_msg, K_MSEC(100), data_ptr[INFO_TYPE_CHAR], data_size[INFO_TYPE_CHAR]);\n    zassert_equal(ret, 0, \"k_mbox_async_put failed\");\n\n    tmbox_get(&mbox, INFO_TYPE_CHAR);\n}\n\n/* Test async put and get with buffer and timeout, receiver gets it after delay */\nstatic K_THREAD_STACK_DEFINE(receiver_stack, 512);\nstatic struct k_thread receiver_thread;\nstatic struct k_mbox *g_mbox;\nstatic enum info_type g_info_type;\n\nvoid receiver_entry(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    k_sleep(K_MSEC(50)); /* Simulate some delay before getting */\n    tmbox_get(g_mbox, g_info_type);\n}\n\nZTEST(mbox_api, test_mbox_async_put_get_buffer_timeout_receiver_delay)\n{\n    struct k_mbox mbox;\n    k_mbox_init(&mbox);\n\n    g_mbox = &mbox;\n    g_info_type = INFO_TYPE_INT;\n\n    k_thread_create(&receiver_thread, receiver_stack,\n                    K_THREAD_STACK_SIZEOF(receiver_stack),\n                    receiver_entry, NULL, NULL, NULL,\n                    K_PRIO_PREEMPT(5), 0, K_NO_WAIT);\n\n    k_thread_name_set(&receiver_thread, \"mbox_receiver\");\n\n    struct k_mbox_async_msg async_msg;\n    k_mbox_async_init(&async_msg);\n\n    /* Put with a timeout, receiver will get it after a delay. */\n    /* The put operation should block until the receiver gets it. */\n    int ret = k_mbox_async_put(&mbox, &async_msg, K_MSEC(200), data_ptr[INFO_TYPE_INT], data_size[INFO_TYPE_INT]);\n    zassert_equal(ret, 0, \"k_mbox_async_put failed\");\n\n    k_thread_join(&receiver_thread, K_FOREVER);\n}\n\nZTEST_SUITE(mbox_api, NULL, NULL, NULL, NULL, NULL);\n"
+          },
+          "applied_files": [
+            "tests/kernel/mbox/mbox_api/src/test_mbox_api.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\n[107/111] Linking C static library zephyr/kernel/libkernel.a\n[108/111] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[109/111] Building native simulator runner, and linking final executable\n[110/111] Running utility command for native_runner_executable\n[110/111] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE mbox_api\n===================================================================\nSTART - test_define_multi_mbox\nPASS - test_define_multi_mbox in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_multiple_put\nPASS - test_mbox_async_multiple_put in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_put_get_block\nPASS - test_mbox_async_put_get_block in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_put_get_buffer\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/mbox/mbox_api/src/test_mbox_api.c:282: tmbox_get: mmsg.size not equal to sizeof(data[info_type])",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/kernel/mbox/mbox_api/src/test_mbox_api.c"
+          ]
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[107/111] Linking C static library zephyr/kernel/libkernel.a\n[108/111] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[109/111] Building native simulator runner, and linking final executable\n[110/111] Running utility command for native_runner_executable\n[110/111] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE mbox_api\n===================================================================\nSTART - test_define_multi_mbox\nPASS - test_define_multi_mbox in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_multiple_put\nPASS - test_mbox_async_multiple_put in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_put_get_block\nPASS - test_mbox_async_put_get_block in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_put_get_buffer\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/mbox/mbox_api/src/test_mbox_api.c:282: tmbox_get: mmsg.size not equal to sizeof(data[info_type])",
+    "protected_file_count": 6,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b1/v3new_runtime_mbox_91db82a",
+    "api_events": [],
+    "started_at": "2026-10-14T01:09:07+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

@@ -1,0 +1,80 @@
+[
+  {
+    "case_id": "v3_thread_priority_swap_device_init_level_713cdff",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 153.74437308311462,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 469,
+            "output_tokens": 13280
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": {
+            "filepath": "tests/kernel/device/src/main.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/device.h>\n#include <zephyr/ztest.h>\n#include <string.h>\n\n#define MAX_INIT_LEVEL_DEVICES 5\nstatic const struct device *init_sequence[MAX_INIT_LEVEL_DEVICES];\nstatic int init_count;\n\nstatic int init_level_dummy_init_func(const struct device *dev)\n{\n    if (init_count < MAX_INIT_LEVEL_DEVICES) {\n        init_sequence[init_count++] = dev;\n    }\n    return 0;\n}\n\n// Define devices for test_device_init_level with distinct levels and priorities\nDEVICE_DEFINE(dev_pre_k1_0, \"pre_k1_0\", init_level_dummy_init_func, NULL, NULL, NULL, PRE_KERNEL_1, 0);\nDEVICE_DEFINE(dev_pre_k1_1, \"pre_k1_1\", init_level_dummy_init_func, NULL, NULL, NULL, PRE_KERNEL_1, 1); // Priority 1 to ensure order\nDEVICE_DEFINE(dev_pre_k2_0, \"pre_k2_0\", init_level_dummy_init_func, NULL, NULL, NULL, PRE_KERNEL_2, 0);\nDEVICE_DEFINE(dev_post_k_0, \"post_k_0\", init_level_dummy_init_func, NULL, NULL, NULL, POST_KERNEL, 0);\nDEVICE_DEFINE(dev_app_0, \"app_0\", init_level_dummy_init_func, NULL, NULL, NULL, APPLICATION, 0);\n\n// --- Device definitions for other tests ---\n\n// For test_deinit_not_supported\nstatic int deinit_not_supported_init(const struct device *dev) { return 0; }\nDEVICE_DEFINE(deinit_not_supported_dev, \"deinit_not_supported\", deinit_not_supported_init, NULL, NULL, NULL, POST_KERNEL, 0);\n\n// For test_deinit_success_and_redeinit\nstatic int deinit_success_init(const struct device *dev) { return 0; }\nstatic int deinit_success_deinit(const struct device *dev) { return 0; } // Defined before use\nDEVICE_DEFINE(deinit_success_dev, \"deinit_success\", deinit_success_init, deinit_success_deinit, NULL, NULL, NULL, POST_KERNEL, 0);\n\n// For test_device_api\nstatic int api_init(const struct device *dev) { return 0; }\nDEVICE_DEFINE(api_dev, \"api_dev\", api_init, NULL, NULL, NULL, POST_KERNEL, 0);\n\n// For test_device_api_extends, etc.\nstruct parent_api {\n    void (*func)(void);\n};\nstruct child_api {\n    struct parent_api parent;\n    void (*child_func)(void);\n};\nstatic void parent_func(void) {}\nstatic void child_func(void) {}\nstatic int parent_dev_init(const struct device *dev) { return 0; }\nstatic int child_dev_init(const struct device *dev) { return 0; }\nstatic const struct parent_api parent_api_impl = { .func = parent_func };\nstatic const struct child_api child_api_impl = { .parent = { .func = parent_func }, .child_func = child_func };\n\nDEVICE_DEFINE(parent_dev, \"parent_dev\", parent_dev_init, NULL, &parent_api_impl, NULL, POST_KERNEL, 0);\nDEVICE_DEFINE(child_dev, \"child_dev\", child_dev_init, NULL, &child_api_impl, NULL, POST_KERNEL, 0);\nDEVICE_DEFINE(grandchild_dev, \"grandchild_dev\", child_dev_init, NULL, &child_api_impl, NULL, POST_KERNEL, 0);\nDEVICE_DEFINE(sibling_dev, \"sibling_dev\", child_dev_init, NULL, &child_api_impl, NULL, POST_KERNEL, 0);\n\n\nZTEST_SUITE(device_api, NULL, NULL, NULL, NULL, NULL);\n\nZTEST(device_api, test_deinit_not_supported)\n{\n    const struct device *dev = DEVICE_GET(deinit_not_supported_dev);\n    zassert_not_null(dev, \"Device not found\");\n    zassert_equal(-ENOTSUP, device_deinit(dev), \"Expected -ENOTSUP for deinit\");\n}\n\nZTEST(device_api, test_deinit_success_and_redeinit)\n{\n    const struct device *dev = DEVICE_GET(deinit_success_dev);\n    zassert_not_null(dev, \"Device not found\");\n    zassert_equal(0, device_deinit(dev), \"Expected successful deinit\");\n    zassert_equal(0, device_init(dev), \"Expected successful re-init\");\n}\n\nZTEST(device_api, test_device_api)\n{\n    const struct device *dev = DEVICE_GET(api_dev);\n    zassert_not_null(dev, \"Device not found\");\n}\n\nZTEST(device_api, test_device_api_extends)\n{\n    const struct device *dev = DEVICE_GET(child_dev);\n    zassert_not_null(dev, \"Child device not found\");\n    const struct child_api *api = (const struct child_api *)dev->api;\n    zassert_not_null(api, \"Child device API is NULL\");\n    api->parent.func(); // Call parent function\n    api->child_func();  // Call child function\n}\n\nZTEST(device_api, test_device_api_extends_grandchild)\n{\n    const struct device *dev = DEVICE_GET(grandchild_dev);\n    zassert_not_null(dev, \"Grandchild device not found\");\n    const struct child_api *api = (const struct child_api *)dev->api;\n    zassert_not_null(api, \"Grandchild device API is NULL\");\n    api->parent.func();\n    api->child_func();\n}\n\nZTEST(device_api, test_device_api_extends_sibling)\n{\n    const struct device *dev = DEVICE_GET(sibling_dev);\n    zassert_not_null(dev, \"Sibling device not found\");\n    const struct child_api *api = (const struct child_api *)dev->api;\n    zassert_not_null(api, \"Sibling device API is NULL\");\n    api->parent.func();\n    api->child_func();\n}\n\nZTEST(device_api, test_device_init_level)\n{\n    // The devices are initialized by the kernel before ztest runs.\n    // We just need to verify the recorded sequence.\n\n    const struct device *expected_sequence[] = {\n        &dev_pre_k1_0,\n        &dev_pre_k1_1,\n        &dev_pre_k2_0,\n        &dev_post_k_0,\n        &dev_app_0,\n    };\n    int expected_count = ARRAY_SIZE(expected_sequence);\n\n    bool seq_correct = true;\n\n    if (init_count != expected_count) {\n        seq_correct = false;\n    } else {\n        for (int i = 0; i < expected_count; i++) {\n            if (init_sequence[i] != expected_sequence[i]) {\n                seq_correct = false;\n                break;\n            }\n        }\n    }\n\n    zassert_true(seq_correct, \"Device initialization sequence is incorrect\");\n}\n"
+          },
+          "applied_files": [
+            "tests/kernel/device/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nSTART - test_deinit_not_supported\nPASS - test_deinit_not_supported in 0.001 seconds\n===================================================================\nSTART - test_deinit_success_and_redeinit\nPASS - test_deinit_success_and_redeinit in 0.001 seconds\n===================================================================\nSTART - test_device_api\nPASS - test_device_api in 0.001 seconds\n===================================================================\nSTART - test_device_api_extends\nPASS - test_device_api_extends in 0.001 seconds\n===================================================================\nSTART - test_device_api_extends_grandchild\nPASS - test_device_api_extends_grandchild in 0.001 seconds\n===================================================================\nSTART - test_device_api_extends_sibling\nPASS - test_device_api_extends_sibling in 0.001 seconds\n===================================================================\nSTART - test_device_init_level\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/device/src/main.c:333: device_test_device_init_level: ((seq_correct == true) is false)",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/kernel/device/src/main.c"
+          ]
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_deinit_not_supported\nPASS - test_deinit_not_supported in 0.001 seconds\n===================================================================\nSTART - test_deinit_success_and_redeinit\nPASS - test_deinit_success_and_redeinit in 0.001 seconds\n===================================================================\nSTART - test_device_api\nPASS - test_device_api in 0.001 seconds\n===================================================================\nSTART - test_device_api_extends\nPASS - test_device_api_extends in 0.001 seconds\n===================================================================\nSTART - test_device_api_extends_grandchild\nPASS - test_device_api_extends_grandchild in 0.001 seconds\n===================================================================\nSTART - test_device_api_extends_sibling\nPASS - test_device_api_extends_sibling in 0.001 seconds\n===================================================================\nSTART - test_device_init_level\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/device/src/main.c:333: device_test_device_init_level: ((seq_correct == true) is false)",
+    "protected_file_count": 15,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b1/v3_thread_priority_swap_device_init_level_713cdff",
+    "api_events": [],
+    "started_at": "2026-10-13T19:34:43+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

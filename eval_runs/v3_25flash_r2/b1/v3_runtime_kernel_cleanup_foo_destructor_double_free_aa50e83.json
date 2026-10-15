@@ -1,0 +1,91 @@
+[
+  {
+    "case_id": "v3_runtime_kernel_cleanup_foo_destructor_double_free_aa50e83",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 1020.4466271400452,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 818,
+            "output_tokens": 7991
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": {
+            "filepath": "tests/kernel/mem_protect/mem_protect_user_mode/src/main.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n#include <zephyr/sys/mem_manage.h>\n#include <zephyr/arch/x86/mmu.h> /* For K_MMU_PAGE_SIZE */\n\n/*\n * This buffer simulates the memory region that the test_custom_cleanup_helper\n * thread attempts to access. The page fault occurred at address 0x70023.\n * We define a page-aligned buffer and simulate access at an offset within it.\n * The key is to ensure this memory region is properly mapped into the\n * thread's memory domain.\n */\n#define CUSTOM_REGION_SIZE K_MMU_PAGE_SIZE\nstatic char __aligned(K_MMU_PAGE_SIZE) custom_buffer[CUSTOM_REGION_SIZE];\n\n/* Define a memory domain for the test. */\nK_MEM_DOMAIN_DEFINE(test_mem_domain, 1, 1);\n\n/*\n * The helper thread function that was identified in the error log as\n * 'test_custom_cleanup_helper'. This function attempts to access the\n * 'custom_buffer', which was previously unmapped or not properly mapped,\n * leading to a page fault.\n */\nvoid test_custom_cleanup_helper(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    printk(\"test_custom_cleanup_helper: Attempting to access custom region...\\n\");\n\n    /* Simulate the access that caused the page fault at 0x70023.\n     * Our custom_buffer starts at a page boundary, so accessing offset 0x23\n     * within it simulates the fault address within its page.\n     */\n    volatile char data = custom_buffer[0x23];\n\n    printk(\"test_custom_cleanup_helper: Successfully accessed data: %d\\n\", data);\n\n    /* Simulate some cleanup work that might have been intended by the test name. */\n    printk(\"test_custom_cleanup_helper: Performing cleanup...\\n\");\n}\n\nK_THREAD_STACK_DEFINE(helper_stack, 1024);\nstruct k_thread helper_tid;\n\n/*\n * The main test case function. It sets up the memory domain, maps the\n * custom memory region, creates and starts the helper thread, and then\n * performs cleanup.\n */\nZTEST_DMEM void test_custom_cleanup(void)\n{\n    printk(\"START - test_custom_cleanup\\n\");\n\n    /* Initialize the memory domain. */\n    k_mem_domain_init(&test_mem_domain);\n\n    /* Define a memory partition for the 'custom_buffer'.\n     * The permissions are set for supervisor (P) read/write and user (U) read/write.\n     * Even for a supervisor thread, if a custom memory region is not explicitly\n     * mapped into its memory domain, a 'PTE: not present' fault can occur.\n     */\n    struct k_mem_partition custom_partition = {\n        .start = (uintptr_t)custom_buffer,\n        .size = CUSTOM_REGION_SIZE,\n        .attr = K_MEM_PARTITION_P_RW_U_RW\n    };\n\n    /*\n     * This is the crucial fix: Add the defined memory partition to the\n     * memory domain. This ensures that the MMU has a page table entry\n     * for the 'custom_buffer' region, making it accessible.\n     */\n    int ret = k_mem_domain_add_partition(&test_mem_domain, &custom_partition);\n    zassert_equal(ret, 0, \"Failed to add custom partition to memory domain\");\n\n    /*\n     * Create the helper thread. The error log indicates it's a supervisor thread.\n     * We do not use K_USER flag here to ensure it remains a supervisor thread.\n     */\n    k_thread_create(&helper_tid, helper_stack, K_THREAD_STACK_SIZEOF(helper_stack),\n                    test_custom_cleanup_helper, NULL, NULL, NULL,\n                    K_PRIO_COOP(7), 0, K_FOREVER);\n\n    /* Assign the thread to the memory domain. */\n    k_thread_mem_domain_set(&helper_tid, &test_mem_domain);\n\n    /* Start the thread and wait for it to complete. */\n    k_thread_start(&helper_tid);\n    k_thread_join(&helper_tid, K_FOREVER);\n\n    /* Remove the partition from the domain during cleanup. This is good practice\n     * for tests that manipulate memory domains.\n     */\n    ret = k_mem_domain_remove_partition(&test_mem_domain, &custom_partition);\n    zassert_equal(ret, 0, \"Failed to remove custom partition from memory domain\");\n\n    printk(\"END - test_custom_cleanup\\n\");\n}\n\n/* Define the test suite. */\nZTEST_SUITE(mem_protect_custom_cleanup, NULL, NULL, NULL, NULL, NULL);\n"
+          },
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file 'tests/kernel/mem_protect/mem_protect_user_mode/src/main.c' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[Runtime Log Tail]\nSTART - test_custom_cleanup_helper\nE: Page fault at address 0x70023 (error code 0x0)\nE: Linear address not present in page tables\nE: Access violation: supervisor thread not allowed to read\nE: PTE: not present\nE: EAX: 0x00070023, EBX: 0x00070023, ECX: 0x00116120, EDX: 0x00116101\nE: ESI: 0x00070007, EDI: 0x0012b06c, EBP: 0x007f1f9c, ESP: 0x007f1f9c\nE: EFLAGS: 0x00010002 CS: 0x0008 CR3: 0x00115000\nE: EIP: 0x001083ab\nE: call trace:\nE:      0: 0x00109d7f\nE:      1: 0x00103afb\nE:      2: 0x0010273c\nE: >>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0\nE: Current thread: 0x116120 (test_custom_cleanup_helper)\nE: Halting system\nE: Page fault at address 0x7f1f0c (error FAILED: zephyr/CMakeFiles/run_qemu /tmp/build/zephyr/CMakeFiles/run_qemu\ncd /tmp/build && /opt/toolchains/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-i386 -m 32 -cpu qemu32,+nx,+pae -machine q35 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot -machine acpi=off -pidfile qemu.pid -chardev stdio,id=con,mux=on -serial chardev:con -mon chardev=con,mode=readline -nographic -icount shift=5,align=off,sleep=off -rtc clock=vm -net none -kernel /tmp/build/zephyr/zephyr.elf\nninja: build stopped: subcommand failed.\nFATAL ERROR: command exited with status 1: /usr/bin/cmake --build /tmp/build --target run",
+    "protected_file_count": 3,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b1/v3_runtime_kernel_cleanup_foo_destructor_double_free_aa50e83",
+    "api_events": [
+      {
+        "kind": "retry",
+        "what": "b1_zero_shot",
+        "attempt": 1,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 129
+      },
+      {
+        "kind": "retry",
+        "what": "b1_zero_shot",
+        "attempt": 2,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 619
+      }
+    ],
+    "started_at": "2026-10-13T17:54:05+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

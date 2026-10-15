@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3new_c_syntax_fifo_usage_daad7c5",
+    "category": "c_syntax",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 782.3281600475311,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 383,
+            "output_tokens": 7128
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/kernel/fifo/fifo_usage/src/main.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n\n#define STACK_SIZE (512 + K_THREAD_STACK_SIZEOF(128))\n#define THREAD_PRIORITY K_PRIO_PREEMPT(10)\n\nstruct data_item {\n\tvoid *fifo_reserved; /* 1st word reserved for use by k_fifo */\n\tuint32_t value;\n\tuint32_t id;\n};\n\n/* FIFOs for testing */\nstruct k_fifo fifo1;\nstruct k_fifo fifo2;\n\n/* Thread stacks and data */\nstatic K_THREAD_STACK_DEFINE(producer_stack, STACK_SIZE);\nstatic K_THREAD_STACK_DEFINE(consumer_stack, STACK_SIZE);\nstatic struct k_thread producer_thread_data;\nstatic struct k_thread consumer_thread_data;\n\n/* Data items for testing */\nstatic struct data_item item_a = {.value = 0xAAAAAAAA, .id = 1};\nstatic struct data_item item_b = {.value = 0xBBBBBBBB, .id = 2};\nstatic struct data_item item_c = {.value = 0xCCCCCCCC, .id = 3};\nstatic struct data_item item_d = {.value = 0xDDDDDDDD, .id = 4};\n\n/* Producer thread */\nvoid producer_thread(void *p1, void *p2, void *p3)\n{\n\tstruct k_fifo *fifo = (struct k_fifo *)p1;\n\tstruct data_item *item = (struct data_item *)p2;\n\n\tk_fifo_put(fifo, item);\n\tk_msleep(10); /* Give consumer a chance to run */\n}\n\n/* Consumer thread */\nvoid consumer_thread(void *p1, void *p2, void *p3)\n{\n\tstruct k_fifo *fifo = (struct k_fifo *)p1;\n\tstruct data_item *expected_item = (struct data_item *)p2;\n\tstruct data_item *received_item;\n\n\treceived_item = k_fifo_get(fifo, K_FOREVER);\n\tzassert_equal_ptr(received_item, expected_item, \"Received item pointer mismatch\");\n\tzassert_equal(received_item->value, expected_item->value, \"Received item value mismatch\");\n\tzassert_equal(received_item->id, expected_item->id, \"Received item ID mismatch\");\n}\n\nZTEST_SUITE(fifo_usage, NULL, NULL, NULL, NULL, NULL);\n\n/* Test 1: Basic put/get */\nZTEST_USER_F(fifo_usage, test_fifo_put_get)\n{\n\tk_fifo_init(&fifo1);\n\tk_fifo_put(&fifo1, &item_a);\n\tstruct data_item *received_item = k_fifo_get(&fifo1, K_NO_WAIT);\n\tzassert_equal_ptr(received_item, &item_a, \"Item A not retrieved\");\n\tzassert_equal(received_item->value, item_a.value, \"Item A value mismatch\");\n}\n\n/* Test 2: Multiple items */\nZTEST_USER_F(fifo_usage, test_fifo_multiple_items)\n{\n\tk_fifo_init(&fifo1);\n\tk_fifo_put(&fifo1, &item_a);\n\tk_fifo_put(&fifo1, &item_b);\n\n\tstruct data_item *received_item = k_fifo_get(&fifo1, K_NO_WAIT);\n\tzassert_equal_ptr(received_item, &item_a, \"Item A not retrieved first\");\n\treceived_item = k_fifo_get(&fifo1, K_NO_WAIT);\n\tzassert_equal_ptr(received_item, &item_b, \"Item B not retrieved second\");\n}\n\n/* Test 3: FIFO with threads */\nZTEST_USER_F(fifo_usage, test_fifo_threads)\n{\n\tk_fifo_init(&fifo1);\n\n\tk_thread_create(&producer_thread_data, producer_stack, STACK_SIZE,\n\t\t\t\t\tproducer_thread, &fifo1, &item_c, NULL,\n\t\t\t\t\tTHREAD_PRIORITY, 0, K_NO_WAIT);\n\n\tk_thread_create(&consumer_thread_data, consumer_stack, STACK_SIZE,\n\t\t\t\t\tconsumer_thread, &fifo1, &item_c, NULL,\n\t\t\t\t\tTHREAD_PRIORITY, 0, K_NO_WAIT);\n\n\tk_thread_join(&consumer_thread_data, K_FOREVER);\n\tk_thread_join(&producer_thread_data, K_FOREVER);\n}\n\n/* Test 4: Multiple FIFOs */\nZTEST_USER_F(fifo_usage, test_fifo_multiple_fifos)\n{\n\tk_fifo_init(&fifo1);\n\tk_fifo_init(&fifo2);\n\n\tk_fifo_put(&fifo1, &item_a);\n\tk_fifo_put(&fifo2, &item_b);\n\n\tstruct data_item *received_item_1 = k_fifo_get(&fifo1, K_NO_WAIT);\n\tstruct data_item *received_item_2 = k_fifo_get(&fifo2, K_NO_WAIT);\n\n\tzassert_equal_ptr(received_item_1, &item_a, \"Item A not retrieved from fifo1\");\n\tzassert_equal_ptr(received_item_2, &item_b, \"Item B not retrieved from fifo2\");\n}\n\n/* Test 5: FIFO get_peek */\nZTEST_USER_F(fifo_usage, test_fifo_get_peek)\n{\n\tk_fifo_init(&fifo1);\n\tk_fifo_put(&fifo1, &item_a);\n\tk_fifo_put(&fifo1, &item_b);\n\n\tstruct data_item *peeked_item = k_fifo_get_peek(&fifo1);\n\tzassert_equal_ptr(peeked_item, &item_a, \"Peeked item A mismatch\");\n\n\tstruct data_item *received_item = k_fifo_get(&fifo1, K_NO_WAIT);\n\tzassert_equal_ptr(received_item, &item_a, \"Retrieved item A mismatch\");\n\n\tpeeked_item = k_fifo_get_peek(&fifo1);\n\tzassert_equal_ptr(peeked_item, &item_b, \"Peeked item B mismatch\");\n\n\treceived_item = k_fifo_get(&fifo1, K_NO_WAIT);\n\tzassert_equal_ptr(received_item, &item_b, \"Retrieved item B mismatch\");\n\n\tpeeked_item = k_fifo_get_peek(&fifo1);\n\tzassert_is_null(peeked_item, \"FIFO should be empty after all gets\");\n}\n"
+          },
+          "applied_files": [
+            "tests/kernel/fifo/fifo_usage/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/fifo/fifo_usage/src/main.c:55:14: error: conflicting types for ‘fifo_usage_test_fifo_put_get’; have ‘void(struct fifo_usage_fixture *)’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/fifo/fifo_usage/src/main.c:65:14: error: conflicting types for ‘fifo_usage_test_fifo_multiple_items’; have ‘void(struct fifo_usage_fixture *)’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/fifo/fifo_usage/src/main.c:78:14: error: conflicting types for ‘fifo_usage_test_fifo_threads’; have ‘void(struct fifo_usage_fixture *)’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/fifo/fifo_usage/src/main.c:95:14: error: conflicting types for ‘fifo_usage_test_fifo_multiple_fifos’; have ‘void(struct fifo_usage_fixture *)’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/fifo/fifo_usage/src/main.c:111:14: error: conflicting types for ‘fifo_usage_test_fifo_get_peek’; have ‘void(struct fifo_usage_fixture *)’\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/fifo/fifo_usage/src/main.c:47:1: error: expected ‘,’ or ‘;’ before ‘static’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/fifo/fifo_usage/src/main.c:189:64: error: ‘fifo2’ undeclared (first use in this function); did you mean ‘fifo1’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/fifo/fifo_usage/src/main.c:221:63: error: ‘fifo2’ undeclared (first use in this function); did you mean ‘fifo1’?\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+    "protected_file_count": 3,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b1/v3new_c_syntax_fifo_usage_daad7c5",
+    "api_events": [
+      {
+        "kind": "retry",
+        "what": "b1_zero_shot",
+        "attempt": 1,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 138
+      },
+      {
+        "kind": "retry",
+        "what": "b1_zero_shot",
+        "attempt": 2,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 503
+      }
+    ],
+    "started_at": "2026-10-13T20:58:27+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

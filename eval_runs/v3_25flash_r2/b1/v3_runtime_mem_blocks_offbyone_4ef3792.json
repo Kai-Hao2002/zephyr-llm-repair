@@ -1,0 +1,88 @@
+[
+  {
+    "case_id": "v3_runtime_mem_blocks_offbyone_4ef3792",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 282.8073151111603,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 631,
+            "output_tokens": 6827
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": {
+            "filepath": "tests/lib/mem_blocks_stats/src/main.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n#include <zephyr/sys/mem_blocks.h>\n\n#define BLOCK_SIZE 32\n#define NUM_BLOCKS 4\n\n/*\n * The original K_MEM_BLOCKS_DEFINE might have used an alignment value\n * that is not a power of 2 (e.g., 3 or 5). This can lead to incorrect\n * memory block initialization and subsequent runtime errors when\n * attempting to use the memory blocks, such as getting or freeing blocks,\n * or retrieving statistics.\n *\n * The fix is to ensure the alignment parameter is a valid power of 2.\n * Using '8' provides a common and safe alignment for many architectures.\n * Alternatively, '0' could be used to default to K_MEM_BLOCK_ALIGN_DEFAULT\n * (which is sizeof(void *)).\n */\nK_MEM_BLOCKS_DEFINE(test_mem_blocks, BLOCK_SIZE, NUM_BLOCKS, 8);\n\nstatic void test_mem_blocks_runtime_stats(void)\n{\n    struct k_mem_blocks_stats stats;\n    int status;\n    void *block_ptr[NUM_BLOCKS];\n\n    /* Test initial stats */\n    status = k_mem_blocks_stats_get(&test_mem_blocks, &stats);\n    zassert_equal(status, 0, \"Failed to get initial stats (status: %d)\", status);\n    zassert_equal(stats.num_blocks_used, 0, \"Initial blocks used not 0\");\n    zassert_equal(stats.num_blocks_free, NUM_BLOCKS, \"Initial blocks free not %d\", NUM_BLOCKS);\n    zassert_equal(stats.max_blocks_used, 0, \"Initial max blocks used not 0\");\n\n    /* Allocate all blocks */\n    for (int i = 0; i < NUM_BLOCKS; i++) {\n        status = k_mem_blocks_get(&test_mem_blocks, &block_ptr[i], K_NO_WAIT);\n        zassert_equal(status, 0, \"Failed to get block %d (status: %d)\", i, status);\n        zassert_not_null(block_ptr[i], \"Block %d is NULL\", i);\n    }\n\n    /* Test stats after allocating all blocks */\n    status = k_mem_blocks_stats_get(&test_mem_blocks, &stats);\n    zassert_equal(status, 0, \"Failed to get stats after allocation (status: %d)\", status);\n    zassert_equal(stats.num_blocks_used, NUM_BLOCKS, \"Blocks used not %d after full allocation\", NUM_BLOCKS);\n    zassert_equal(stats.num_blocks_free, 0, \"Blocks free not 0 after full allocation\");\n    zassert_equal(stats.max_blocks_used, NUM_BLOCKS, \"Max blocks used not %d after full allocation\", NUM_BLOCKS);\n\n    /* Try to allocate one more (should fail) */\n    void *extra_block;\n    status = k_mem_blocks_get(&test_mem_blocks, &extra_block, K_NO_WAIT);\n    zassert_not_equal(status, 0, \"Unexpectedly got an extra block (status: %d)\", status);\n    zassert_is_null(extra_block, \"Extra block pointer not NULL\");\n\n    /* Free some blocks */\n    for (int i = 0; i < NUM_BLOCKS / 2; i++) {\n        status = k_mem_blocks_free(&test_mem_blocks, block_ptr[i]);\n        zassert_equal(status, 0, \"Failed to free block %d (status: %d)\", i, status);\n    }\n\n    /* Test stats after freeing some blocks */\n    status = k_mem_blocks_stats_get(&test_mem_blocks, &stats);\n    zassert_equal(status, 0, \"Failed to get stats after partial free (status: %d)\", status);\n    zassert_equal(stats.num_blocks_used, NUM_BLOCKS / 2, \"Blocks used not %d after partial free\", NUM_BLOCKS / 2);\n    zassert_equal(stats.num_blocks_free, NUM_BLOCKS / 2, \"Blocks free not %d after partial free\", NUM_BLOCKS / 2);\n    zassert_equal(stats.max_blocks_used, NUM_BLOCKS, \"Max blocks used changed after partial free\");\n\n    /* Free remaining blocks */\n    for (int i = NUM_BLOCKS / 2; i < NUM_BLOCKS; i++) {\n        status = k_mem_blocks_free(&test_mem_blocks, block_ptr[i]);\n        zassert_equal(status, 0, \"Failed to free block %d (status: %d)\", i, status);\n    }\n\n    /* Test final stats */\n    status = k_mem_blocks_stats_get(&test_mem_blocks, &stats);\n    zassert_equal(status, 0, \"Failed to get final stats (status: %d)\", status);\n    zassert_equal(stats.num_blocks_used, 0, \"Final blocks used not 0\");\n    zassert_equal(stats.num_blocks_free, NUM_BLOCKS, \"Final blocks free not %d\", NUM_BLOCKS);\n    zassert_equal(stats.max_blocks_used, NUM_BLOCKS, \"Max blocks used changed after full free\");\n}\n\nZTEST_SUITE(lib_mem_blocks_stats_test, NULL, NULL, NULL, NULL, NULL);\n\nZTEST(lib_mem_blocks_stats_test, test_mem_blocks_runtime_stats)\n{\n    test_mem_blocks_runtime_stats();\n}\n"
+          },
+          "applied_files": [
+            "tests/lib/mem_blocks_stats/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\n[138/146] Generating irq_int_vector_map.bin, staticIdt.bin, irq_vectors_alloc.bin\n[139/146] Generating staticIdt.o\n[140/146] Generating irq_int_vector_map.o\n[141/146] Generating irq_vectors_alloc.o\n[142/146] Generating pagetables.bin\n[143/146] Generating pagetables.o\n[144/146] Building C object zephyr/CMakeFiles/zephyr_final.dir/misc/empty_file.c.obj\n[145/146] Linking C executable zephyr/zephyr.elf\nMemory region         Used Size  Region Size  %age Used\nRAM:      168504 B        31 MB      0.52%\nIDT_LIST:           0 B         2 KB      0.00%\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: qemu_x86/atom\n[145/146] To exit from QEMU enter: 'CTRL+a, x'[QEMU] CPU: qemu32,+nx,+pae\nSeaBIOS (version zephyr-v1.16.3-2-0-gf8da0cc-zephyr)\nBooting from ROM..\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE lib_mem_blocks_stats_test\n===================================================================\nSTART - test_mem_blocks_runtime_stats\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/mem_blocks_stats/src/main.c:144: lib_mem_blocks_stats_test_test_mem_blocks_runtime_stats: (status not equal to 0)",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/lib/mem_blocks_stats/src/main.c"
+          ]
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[138/146] Generating irq_int_vector_map.bin, staticIdt.bin, irq_vectors_alloc.bin\n[139/146] Generating staticIdt.o\n[140/146] Generating irq_int_vector_map.o\n[141/146] Generating irq_vectors_alloc.o\n[142/146] Generating pagetables.bin\n[143/146] Generating pagetables.o\n[144/146] Building C object zephyr/CMakeFiles/zephyr_final.dir/misc/empty_file.c.obj\n[145/146] Linking C executable zephyr/zephyr.elf\nMemory region         Used Size  Region Size  %age Used\nRAM:      168504 B        31 MB      0.52%\nIDT_LIST:           0 B         2 KB      0.00%\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: qemu_x86/atom\n[145/146] To exit from QEMU enter: 'CTRL+a, x'[QEMU] CPU: qemu32,+nx,+pae\nSeaBIOS (version zephyr-v1.16.3-2-0-gf8da0cc-zephyr)\nBooting from ROM..\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE lib_mem_blocks_stats_test\n===================================================================\nSTART - test_mem_blocks_runtime_stats\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/mem_blocks_stats/src/main.c:144: lib_mem_blocks_stats_test_test_mem_blocks_runtime_stats: (status not equal to 0)",
+    "protected_file_count": 4,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b1/v3_runtime_mem_blocks_offbyone_4ef3792",
+    "api_events": [
+      {
+        "kind": "retry",
+        "what": "b1_zero_shot",
+        "attempt": 1,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 136
+      }
+    ],
+    "started_at": "2026-10-13T18:19:24+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

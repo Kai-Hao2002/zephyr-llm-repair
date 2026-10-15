@@ -1,0 +1,80 @@
+[
+  {
+    "case_id": "v3new_runtime_notify_30bef2a",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 139.83108592033386,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 655,
+            "output_tokens": 13370
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": {
+            "filepath": "tests/lib/notify/src/main.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/sys/notify.h>\n#include <zephyr/ztest.h>\n\n#define STACK_SIZE (512 + CONFIG_TEST_EXTRA_STACK_SIZE)\n\n/* Callback test */\nstatic K_SEM_DEFINE(callback_sem, 0, 1);\nstatic int callback_result;\n\nstatic void my_callback(struct sys_notify *obj, void *user_data, int result)\n{\n    ARG_UNUSED(obj);\n    ARG_UNUSED(user_data);\n    callback_result = result;\n    k_sem_give(&callback_sem);\n}\n\nZTEST_USER(sys_notify_api, test_callback)\n{\n    struct sys_notify cb_notify;\n    int rc;\n\n    callback_result = 0;\n\n    sys_notify_callback_init(&cb_notify, my_callback, NULL);\n\n    rc = sys_notify_callback_submit(&cb_notify, k_current_get(), 123);\n    zassert_equal(rc, 0, \"sys_notify_callback_submit failed with %d\", rc);\n\n    k_sem_take(&callback_sem, K_FOREVER);\n    zassert_equal(callback_result, 123, \"Callback result mismatch\");\n}\n\n/* Signal test */\nstatic K_SEM_DEFINE(signal_sem_ready, 0, 1);\nstatic K_SEM_DEFINE(signal_sem_done, 0, 1);\n\nstatic void signal_thread_entry(void *p1, void *p2, void *p3)\n{\n    struct sys_notify *notify_obj = (struct sys_notify *)p1;\n    int *result_ptr = (int *)p2;\n    int rc;\n\n    k_sem_give(&signal_sem_ready); /* Signal that thread is ready */\n\n    /* Wait for the main thread to submit the signal */\n    k_sem_take(&signal_sem_done, K_FOREVER);\n\n    rc = sys_notify_signal_fetch(notify_obj, result_ptr, K_FOREVER);\n    zassert_equal(rc, 0, \"sys_notify_signal_fetch failed with %d\", rc);\n\n    k_sem_give(&signal_sem_done); /* Signal that fetch is complete */\n}\n\nK_THREAD_STACK_DEFINE(signal_thread_stack, STACK_SIZE);\nstatic struct k_thread signal_thread_data;\n\nstatic void sys_notify_api_test_signal(void)\n{\n    int rc;\n    k_tid_t tid;\n    struct sys_notify signal_notify; /* Make it local to the test function */\n    int signal_result_val; /* Local variable to store the result */\n\n    k_sem_reset(&signal_sem_ready);\n    k_sem_reset(&signal_sem_done);\n\n    tid = k_thread_create(&signal_thread_data, signal_thread_stack,\n                          K_THREAD_STACK_SIZEOF(signal_thread_stack),\n                          signal_thread_entry, &signal_notify, &signal_result_val, NULL,\n                          K_PRIO_PREEMPT(0), 0, K_NO_WAIT);\n    zassert_not_equal(tid, NULL, \"Failed to create thread\");\n\n    k_sem_take(&signal_sem_ready, K_FOREVER); /* Wait for helper thread to be ready */\n\n    sys_notify_signal_init(&signal_notify);\n\n    rc = sys_notify_signal_submit(&signal_notify, tid, 456);\n    zassert_equal(rc, 0, \"sys_notify_signal_submit failed with %d\", rc);\n\n    k_sem_give(&signal_sem_done); /* Tell helper thread to fetch */\n\n    k_sem_take(&signal_sem_done, K_FOREVER); /* Wait for helper thread to complete fetch */\n\n    zassert_equal(signal_result_val, 456, \"Fetched signal result mismatch\");\n\n    k_thread_abort(tid);\n}\n\nZTEST_SUITE(sys_notify_api, NULL, NULL, NULL, NULL, NULL);\n\nZTEST_USER(sys_notify_api, test_signal)\n{\n    sys_notify_api_test_signal();\n}\n"
+          },
+          "applied_files": [
+            "tests/lib/notify/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\n[130/136] Linking C executable zephyr/zephyr_pre0.elf\n[131/136] Generating linker.cmd\n[132/136] Generating isr_tables.c, isr_tables_vt.ld, isr_tables_swi.ld\n[133/136] Building C object zephyr/CMakeFiles/zephyr_final.dir/misc/empty_file.c.obj\n[134/136] Building C object zephyr/CMakeFiles/zephyr_final.dir/isr_tables.c.obj\n[135/136] Linking C executable zephyr/zephyr.elf\nMemory region         Used Size  Region Size  %age Used\nRAM:       57936 B       256 MB      0.02%\nIDT_LIST:           0 B         4 KB      0.00%\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: qemu_riscv32/qemu_virt_riscv32\n[135/136] To exit from QEMU enter: 'CTRL+a, x'[QEMU] CPU: rv32i,i=on,m=on,a=on,f=on,d=on,c=on,zicsr=on,zifencei=on,pmp=on,u=on\nqemu-system-riscv32: warning: No satp mode set. Defaulting to 'bare'\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE sys_notify_api\n===================================================================\nSTART - test_callback\nPASS - test_callback in 0.001 seconds\n===================================================================\nSTART - test_signal\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/notify/src/main.c:120: sys_notify_api_test_signal: (rc not equal to -EINVAL)",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/lib/notify/src/main.c"
+          ]
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[130/136] Linking C executable zephyr/zephyr_pre0.elf\n[131/136] Generating linker.cmd\n[132/136] Generating isr_tables.c, isr_tables_vt.ld, isr_tables_swi.ld\n[133/136] Building C object zephyr/CMakeFiles/zephyr_final.dir/misc/empty_file.c.obj\n[134/136] Building C object zephyr/CMakeFiles/zephyr_final.dir/isr_tables.c.obj\n[135/136] Linking C executable zephyr/zephyr.elf\nMemory region         Used Size  Region Size  %age Used\nRAM:       57936 B       256 MB      0.02%\nIDT_LIST:           0 B         4 KB      0.00%\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: qemu_riscv32/qemu_virt_riscv32\n[135/136] To exit from QEMU enter: 'CTRL+a, x'[QEMU] CPU: rv32i,i=on,m=on,a=on,f=on,d=on,c=on,zicsr=on,zifencei=on,pmp=on,u=on\nqemu-system-riscv32: warning: No satp mode set. Defaulting to 'bare'\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE sys_notify_api\n===================================================================\nSTART - test_callback\nPASS - test_callback in 0.001 seconds\n===================================================================\nSTART - test_signal\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/notify/src/main.c:120: sys_notify_api_test_signal: (rc not equal to -EINVAL)",
+    "protected_file_count": 4,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b1/v3new_runtime_notify_30bef2a",
+    "api_events": [],
+    "started_at": "2026-10-14T01:29:21+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

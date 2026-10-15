@@ -1,0 +1,84 @@
+[
+  {
+    "case_id": "v3_runtime_can_loopback_nullcheck_6182bc0",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 425.7958838939667,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 426,
+            "output_tokens": 65472
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": {
+            "filepath": "tests/drivers/can/can_driver_api/src/main.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/drivers/can.h>\n#include <zephyr/ztest.h>\n\n#define CAN_NODE DT_ALIAS(can0)\n\nstatic const struct device *can_dev;\n\nstatic void test_can_setup(void)\n{\n\tcan_dev = DEVICE_DT_GET(CAN_NODE);\n\tzassert_true(device_is_ready(can_dev), \"CAN device not ready\");\n}\n\nstatic void test_can_teardown(void)\n{\n\t/* Reset CAN controller to a known state (stopped) after each test */\n\tint ret = can_stop(can_dev);\n\tzassert_equal(ret, 0, \"can_stop failed in teardown\");\n}\n\nZTEST(can_driver_api, test_bitrate_limits)\n{\n\tconst struct can_capabilities *cap = can_get_capabilities(can_dev);\n\tzassert_not_null(cap, \"Failed to get CAN capabilities\");\n\n\t/* Test setting various valid bitrates */\n\tconst uint32_t test_bitrates[] = {10000, 125000, 500000, 1000000};\n\n\tfor (size_t i = 0; i < ARRAY_SIZE(test_bitrates); i++) {\n\t\tif (test_bitrates[i] < cap->max_bitrate && test_bitrates[i] > cap->min_bitrate) {\n\t\t\tint ret = can_set_bitrate(can_dev, test_bitrates[i]);\n\t\t\tzassert_equal(ret, 0, \"Failed to set valid bitrate %d\", test_bitrates[i]);\n\t\t}\n\t}\n\n\t/* Test setting invalid bitrates (too low/high) */\n\tint ret = can_set_bitrate(can_dev, cap->min_bitrate - 1);\n\tzassert_not_equal(ret, 0, \"Set bitrate below min_bitrate\");\n\n\tret = can_set_bitrate(can_dev, cap->max_bitrate + 1);\n\tzassert_not_equal(ret, 0, \"Set bitrate above max_bitrate\");\n}\n\nZTEST(can_driver_api, test_classic_get_capabilities)\n{\n\tconst struct can_capabilities *cap = can_get_capabilities(can_dev);\n\n\tzassert_not_null(cap, \"Failed to get CAN capabilities\");\n\tzassert_true(cap->max_bitrate > 0, \"Max bitrate not set\");\n\tzassert_true(cap->min_bitrate > 0, \"Min bitrate not set\");\n\tzassert_true(cap->max_bitrate >= cap->min_bitrate, \"Max bitrate less than min bitrate\");\n\tzassert_true(cap->sample_point_min > 0, \"Sample point min not set\");\n\tzassert_true(cap->sample_point_max > 0, \"Sample point max not set\");\n\tzassert_true(cap->sample_point_max >= cap->sample_point_min, \"Max sample point less than min\");\n\tzassert_true(cap->tseg1_min > 0, \"TSEG1 min not set\");\n\tzassert_true(cap->tseg1_max > 0, \"TSEG1 max not set\");\n\tzassert_true(cap->tseg1_max >= cap->tseg1_min, \"Max TSEG1 less than min\");\n\tzassert_true(cap->tseg2_min > 0, \"TSEG2 min not set\");\n\tzassert_true(cap->tseg2_max > 0, \"TSEG2 max not set\");\n\tzassert_true(cap->tseg2_max >= cap->tseg2_min, \"Max TSEG2 less than min\");\n\tzassert_true(cap->sjw_max > 0, \"SJW max not set\");\n\tzassert_true(cap->sjw_max >= cap->sjw_min, \"Max SJW less than min\");\n\tzassert_true(cap->prop_seg_max >= cap->prop_seg_min, \"Max prop_seg less than min\");\n\n\t/* Check supported modes */\n\tzassert_true(cap->supported_modes & CAN_MODE_NORMAL, \"Normal mode not supported\");\n\tzassert_true(cap->supported_modes & CAN_MODE_LOOPBACK, \"Loopback mode not supported\");\n\tzassert_true(cap->supported_modes & CAN_MODE_LISTENONLY, \"Listen-only mode not supported\");\n\n\t/* Check supported features */\n\tzassert_true(cap->supported_features & CAN_TX_TIMESTAMP, \"TX timestamp not supported\");\n\tzassert_true(cap->supported_features & CAN_RX_TIMESTAMP, \"RX timestamp not supported\");\n}\n\nZTEST(can_driver_api, test_filters_added_while_stopped)\n{\n\tstruct can_filter filter = {\n\t\t.id = 0x123,\n\t\t.mask = 0x7FF,\n\t\t.flags = CAN_FILTER_DATA | CAN_FILTER_STD_ID,\n\t};\n\n\tint filter_id = can_add_rx_filter(can_dev, NULL, &filter);\n\tzassert_true(filter_id >= 0, \"Failed to add filter while stopped\");\n\n\tint ret = can_remove_rx_filter(can_dev, filter_id);\n\tzassert_equal(ret, 0, \"Failed to remove filter\");\n}\n\nZTEST(can_driver_api, test_filters_preserved_through_bitrate_change)\n{\n\tstruct can_filter filter = {\n\t\t.id = 0x123,\n\t\t.mask = 0x7FF,\n\t\t.flags = CAN_FILTER_DATA | CAN_FILTER_STD_ID,\n\t};\n\n\tint filter_id = can_add_rx_filter(can_dev, NULL, &filter);\n\tzassert_true(filter_id >= 0, \"Failed to add filter\");\n\n\tint ret = can_set_bitrate(can_dev, 250000);\n\tzassert_equal(ret, 0, \"Failed to change bitrate\");\n\n\t/* Filters should be preserved, try to remove it */\n\tret = can_remove_rx_filter(can_dev, filter_id);\n\tzassert_equal(ret, 0, \"Filter not preserved after bitrate change\");\n}\n\nZTEST(can_driver_api, test_filters_preserved_through_mode_change)\n{\n\tstruct can_filter filter = {\n\t\t.id = 0x123,\n\t\t.mask = 0x7FF,\n\t\t.flags = CAN_FILTER_DATA | CAN_FILTER_STD_ID,\n\t};\n\n\tint filter_id = can_add_rx_filter(can_dev, NULL, &filter);\n\tzassert_true(filter_id >= 0, \"Failed to add filter\");\n\n\tint ret = can_set_mode(can_dev, CAN_MODE_LOOPBACK);\n\tzassert_equal(ret, 0, \"Failed to change mode\");\n\n\t/* Filters should be preserved, try to remove it */\n\tret = can_remove_rx_filter(can_dev, filter_id);\n\tzassert_equal(ret, 0, \"Filter not preserved after mode change\");\n}\n\nZTEST(can_driver_api, test_get_core_clock)\n{\n\tuint32_t clock = can_get_core_clock(can_dev);\n\tzassert_true(clock > 0, \"CAN core clock not set\");\n}\n\nZTEST(can_driver_api, test_get_state)\n{\n\tenum can_state state;\n\tstruct can_bus_err_cnt err_cnt;\n\tint ret;\n\n\t/* Ensure the device is stopped initially for a predictable state */\n\tret = can_stop(can_dev);\n\tzassert_equal(ret, 0, \"can_stop failed\");\n\n\tret = can_get_state(can_dev, &state, &err_cnt);\n\tzassert_equal(ret, 0, \"can_get_state failed with %d\", ret);\n\n\tzassert_equal(state, CAN_STATE_STOPPED, \"Initial state not STOPPED\");\n\tzassert_equal(err_cnt.tx_err_cnt, 0, \"Initial TX error count not 0\");\n\tzassert_equal(err_cnt.rx_err_cnt, 0, \"Initial RX error count not 0\");\n\n\t/* Start the CAN controller and check state */\n\tret = can_start(can_dev);\n\tzassert_equal(ret, 0, \"can_start failed\");\n\n\tret = can_get_state(can_dev, &state, &err_cnt);\n\tzassert_equal(ret, 0, \"can_get_state failed after start with %d\", ret);\n\n\tzassert_equal(state, CAN_STATE_ERROR_ACTIVE, \"State not ERROR_ACTIVE after start\");\n\n\t/* Stop the CAN controller and check state again */\n\tret = can_stop(can_dev);\n\tzassert_equal(ret, 0, \"can_stop failed\");\n\n\tret = can_get_state(can_dev, &state, &err_cnt);\n\tzassert_equal(ret, 0, \"can_get_state failed after stop with %d\", ret);\n\n\tzassert_equal(state, CAN_STATE_STOPPED, \"State not STOPPED after stop\");\n}\n\nZTEST_SUITE(can_driver_api, NULL, test_can_setup, NULL, test_can_teardown, NULL);\n"
+          },
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file 'tests/drivers/can/can_driver_api/src/main.c' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_bitrate_limits\nPASS - test_bitrate_limits in 0.000 seconds\n===================================================================\nSTART - test_classic_get_capabilities\nPASS - test_classic_get_capabilities in 0.000 seconds\n===================================================================\nSTART - test_filters_added_while_stopped\nPASS - test_filters_added_while_stopped in 0.000 seconds\n===================================================================\nSTART - test_filters_preserved_through_bitrate_change\nPASS - test_filters_preserved_through_bitrate_change in 0.000 seconds\n===================================================================\nSTART - test_filters_preserved_through_mode_change\nPASS - test_filters_preserved_through_mode_change in 0.000 seconds\n===================================================================\nSTART - test_get_core_clock\nPASS - test_get_core_clock in 0.000 seconds\n===================================================================\nSTART - test_get_state\nSegmentation fault",
+    "protected_file_count": 18,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b1/v3_runtime_can_loopback_nullcheck_6182bc0",
+    "api_events": [
+      {
+        "kind": "retry",
+        "what": "b1_zero_shot",
+        "attempt": 1,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 110
+      }
+    ],
+    "started_at": "2026-10-13T16:57:30+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

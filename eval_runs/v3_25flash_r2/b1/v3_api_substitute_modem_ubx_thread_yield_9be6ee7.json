@@ -1,0 +1,78 @@
+[
+  {
+    "case_id": "v3_api_substitute_modem_ubx_thread_yield_9be6ee7",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 120.82130599021912,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 665,
+            "output_tokens": 13579
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/subsys/modem/modem_ubx/src/main.c",
+            "content": "#include <zephyr/ztest.h>\n#include <zephyr/drivers/modem/modem_ubx.h>\n#include <zephyr/drivers/modem/modem_context.h>\n#include <zephyr/drivers/modem/modem_iface.h>\n#include \"test_script_runner.h\"\n\n#include <string.h>\n#include <stdio.h>\n\n/* Define a modem context and interface for the test */\nstatic struct modem_iface_uart_data uart_data;\nstatic struct modem_iface_data iface_data = {\n    .uart = &uart_data,\n};\nstatic struct modem_context modem_ctx;\nstatic struct modem_ubx_data ubx_data;\n\n/* Semaphore to signal response reception */\nstatic K_SEM_DEFINE(rsp_sem, 0, 1);\n\n/* Response handler for modem_ubx_send */\nstatic void ubx_response_handler(struct modem_ubx_data *data,\n                                 enum ubx_msg_type type,\n                                 uint8_t msg_class, uint8_t msg_id,\n                                 uint16_t len, uint8_t *payload)\n{\n    printk(\"UBX response received: class=0x%02x, id=0x%02x, len=%d\\n\",\n           msg_class, msg_id, len);\n\n    /* Check if it's an ACK for the command we sent */\n    if (type == UBX_MSG_ACK && msg_class == UBX_CLASS_ACK && msg_id == UBX_ID_ACK) {\n        if (len == 2 && payload[0] == UBX_CLASS_CFG && payload[1] == UBX_ID_CFG_PRT) {\n            printk(\"Received ACK for CFG-PRT\\n\");\n            k_sem_give(&rsp_sem);\n        }\n    } else if (type == UBX_MSG_ACK && msg_class == UBX_CLASS_ACK && msg_id == UBX_ID_NAK) {\n        printk(\"Received NAK for CFG-PRT\\n\");\n        k_sem_give(&rsp_sem); /* Still a response, just a negative one */\n    }\n}\n\n/* Test script runner instance */\nstatic struct test_script_runner test_script_runner;\n\n/* Setup function for tests */\nstatic void test_modem_ubx_setup(void)\n{\n    /* Initialize modem context and UBX data */\n    modem_context_init(&modem_ctx, &iface_data);\n    modem_ubx_init(&ubx_data, &modem_ctx);\n\n    /* Initialize test script runner */\n    test_script_runner_init(&test_script_runner, &iface_data);\n}\n\n/* Teardown function for tests */\nstatic void test_modem_ubx_teardown(void)\n{\n    test_script_runner_deinit(&test_script_runner);\n    modem_ubx_deinit(&ubx_data);\n    modem_context_deinit(&modem_ctx);\n}\n\n/* Test case: Command with response blocks and receives response */\nZTEST(modem_ubx, test_cmd_rsp_blocks_and_receives_rsp)\n{\n    /* UBX-CFG-PRT command (example: default UART1 config) */\n    /* Class: 0x06 (CFG), ID: 0x00 (PRT) */\n    /* Length: 20 bytes */\n    /* Payload: 01 00 00 00 D0 08 00 00 00 00 00 00 07 00 03 00 00 00 00 00 */\n    /* Checksum: 0xFD 0x18 (recalculated) */\n    static const uint8_t ubx_cfg_prt_cmd[] = {\n        0xB5, 0x62, 0x06, 0x00, 0x14, 0x00, /* Header, Class, ID, Length */\n        0x01, 0x00, 0x00, 0x00, 0xD0, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* Payload */\n        0x07, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* Payload */\n        0xFD, 0x18 /* Checksum (CK_A, CK_B) */\n    };\n\n    /* Expected UBX-ACK-ACK for UBX-CFG-PRT (Class 0x06, ID 0x00) */\n    /* Class: 0x05 (ACK), ID: 0x01 (ACK) */\n    /* Length: 2 bytes */\n    /* Payload: 06 00 (ACKed Class, ACKed ID) */\n    /* Checksum: 0x0E 0x37 (recalculated) */\n    static const uint8_t ubx_ack_ack_rsp[] = {\n        0xB5, 0x62, 0x05, 0x01, 0x02, 0x00, /* Header, Class, ID, Length */\n        0x06, 0x00, /* Payload */\n        0x0E, 0x37 /* Checksum (CK_A, CK_B) */\n    };\n\n    /* Define the test script */\n    static const struct test_script_entry script[] = {\n        TEST_SCRIPT_ENTRY_TX(ubx_cfg_prt_cmd, sizeof(ubx_cfg_prt_cmd)),\n        TEST_SCRIPT_ENTRY_RX(ubx_ack_ack_rsp, sizeof(ubx_ack_ack_rsp)),\n    };\n\n    /* Reset semaphore before test */\n    k_sem_reset(&rsp_sem);\n\n    /* Start the script runner */\n    test_script_runner_start(&test_script_runner, script, ARRAY_SIZE(script), K_SECONDS(5));\n\n    /* Send the UBX command and expect a response */\n    int ret = modem_ubx_send(&ubx_data, UBX_CLASS_CFG, UBX_ID_CFG_PRT,\n                             &ubx_cfg_prt_cmd[6], 20, /* Payload starts after 6 bytes, length is 20 */\n                             ubx_response_handler, K_SECONDS(2));\n\n    zassert_equal(ret, 0, \"modem_ubx_send failed with error %d\", ret);\n\n    /* Wait for the response semaphore to be given by the handler */\n    ret = k_sem_take(&rsp_sem, K_SECONDS(2));\n    zassert_equal(ret, 0, \"Did not receive UBX ACK within timeout\");\n\n    /* Stop the script runner and check if it completed successfully */\n    test_script_runner_stop(&test_script_runner);\n    zassert_true(test_script_runner.result.done, \"Test script runner did not complete\");\n    zassert_equal(test_script_runner.result.error, 0, \"Test script runner error: %d\", test_script_runner.result.error);\n}\n\n/* Test case: Command with no response is non-blocking */\nZTEST(modem_ubx, test_cmd_no_rsp_is_non_blocking)\n{\n    /* Example: UBX-NAV-POSECEF (Class 0x01, ID 0x01), no payload, no expected ACK */\n    /* B5 62 01 01 00 00 02 09 */\n    /* Checksum: 0x02 0x09 (recalculated) */\n    static const uint8_t dummy_cmd[] = {\n        0xB5, 0x62, 0x01, 0x01, 0x00, 0x00, /* Header, Class, ID, Length */\n        0x02, 0x09 /* Checksum (CK_A, CK_B) */\n    };\n\n    static const struct test_script_entry script[] = {\n        TEST_SCRIPT_ENTRY_TX(dummy_cmd, sizeof(dummy_cmd)),\n    };\n\n    k_sem_reset(&rsp_sem); /* Ensure semaphore is reset */\n\n    test_script_runner_start(&test_script_runner, script, ARRAY_SIZE(script), K_MSEC(500));\n\n    /* Send a command that doesn't expect a response (or we don't care about it for this test) */\n    int ret = modem_ubx_send(&ubx_data, 0x01, 0x01, NULL, 0, NULL, K_MSEC(100));\n\n    zassert_equal(ret, 0, \"modem_ubx_send failed with error %d\", ret);\n\n    /* The key for \"non-blocking\" is that the test doesn't wait for a response. */\n    /* The script runner should still complete if the TX data is matched. */\n    test_script_runner_stop(&test_script_runner);\n    zassert_true(test_script_runner.result.done, \"Test script runner did not complete for non-blocking cmd\");\n    zassert_equal(test_script_runner.result.error, 0, \"Test script runner error: %d\", test_script_runner.result.error);\n}\n\nZTEST_SUITE(modem_ubx, NULL, NULL, test_modem_ubx_setup, test_modem_ubx_teardown, NULL);\n"
+          },
+          "applied_files": [
+            "tests/subsys/modem/modem_ubx/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/modem/modem_ubx/src/main.c:2:10: fatal error: zephyr/drivers/modem/modem_ubx.h: No such file or directory\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[105/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[106/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/events.c.obj\n[107/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[108/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[109/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[110/115] Building C object zephyr/kernel/CMakeFiles/kernel.dir/sched.c.obj\n[111/115] Linking C static library zephyr/kernel/libkernel.a\n[112/115] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[113/115] Building native simulator runner, and linking final executable\n[114/115] Running utility command for native_runner_executable\n[114/115] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE modem_ubx\n===================================================================\nSTART - test_cmd_no_rsp_is_non_blocking\nPASS - test_cmd_no_rsp_is_non_blocking in 0.000 seconds\n===================================================================\nSTART - test_cmd_rsp_blocks_and_receives_rsp\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/modem/modem_ubx/src/main.c:224: modem_ubx_test_cmd_rsp_blocks_and_receives_rsp: (test_script_runner.result.done is false)",
+    "protected_file_count": 3,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b1/v3_api_substitute_modem_ubx_thread_yield_9be6ee7",
+    "api_events": [],
+    "started_at": "2026-10-13T13:54:37+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
