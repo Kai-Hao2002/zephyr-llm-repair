@@ -1,0 +1,95 @@
+[
+  {
+    "case_id": "v3new_runtime_cobs_c79b1e8_r3",
+    "category": "runtime_crash",
+    "pipeline": "b2",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 200.42994475364685,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b2_single_agent_rag",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 25750,
+            "output_tokens": 24644
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "The `test_decode_stream_frame_complete` test case fails because the `cobs_encoder` and `cobs_decoder` objects are initialized once outside the loop, but the test iterates through `cobs_dataset` items that may have different COBS flags (e.g., `COBS_FLAG_CUSTOM_DELIMITER`).\n\nThe `cobs_encoder_init` and `cobs_decoder_init` calls in `test_decode_stream_frame_complete` currently use only `COBS_FLAG_TRAILING_DELIMITER`. This means that for test items that specify a `COBS_FLAG_CUSTOM_DELIMITER` (e.g., `0x7F`), the encoder and decoder would incorrectly use the default delimiter (`0x00`). This inconsistency in delimiter usage across different frames, combined with the reuse of the encoder/decoder objects, can lead to incorrect encoding/decoding and state corruption.\n\nThe `test_encode_decode_stream` test, which passes, correctly initializes the encoder and decoder *inside* the loop for each test item, passing `test->flags` to ensure the correct delimiter is used.\n\nTo fix `test_decode_stream_frame_complete`, the encoder and decoder should be re-initialized for each frame with the appropriate flags from the `cobs_dataset` item, and their `close` functions should be called after each frame to ensure proper state management.\n\n```c\ntests/lib/cobs/src/main.c\n<<<<<<<< SEARCH\nZTEST_F(cobs_tests, test_decode_stream_frame_complete)\n{\n\tstruct cobs_encoder enc;\n\tstruct cobs_decoder dec;\n\tint ret;\n\n\t/* This test re-uses the same encoder/decoder pair and streams multiple frames */\n\n\tret = cobs_encoder_init(&enc, cobs_forward_to_decoder, &dec, COBS_FLAG_TRAILING_DELIMITER);\n\tzassert_ok(ret, \"encoder init failed (%d)\", ret);\n\n\tret = cobs_decoder_init(&dec, cobs_frame_tester, fixture->decoded,\n\t\t\t\tCOBS_FLAG_TRAILING_DELIMITER);\n\tzassert_ok(ret, \"decoder init failed (%d)\", ret);\n\n\tARRAY_FOR_EACH(cobs_dataset, idx) {\n\t\tret = cobs_encoder_write(&enc, cobs_dataset[idx].decoded,\n\t\t\t\t\t cobs_dataset[idx].decoded_len);\n\t\tzassert_equal(ret, cobs_dataset[idx].decoded_len);\n\n\t\t/* Closing will write a delimiter and reset the state */\n\t\tret = cobs_encoder_close(&enc);\n\t\tzassert_ok(ret);\n\t}\n\n\tzassert_equal(frame_test_idx, ARRAY_SIZE(cobs_dataset));\n}\n========\nZTEST_F(cobs_tests, test_decode_stream_frame_complete)\n{\n\tint ret;\n\n\t/* This test re-uses the same encoder/decoder pair and streams multiple frames */\n\n\tARRAY_FOR_EACH(cobs_dataset, idx) {\n\t\tconst struct cobs_test_item *test = &cobs_dataset[idx];\n\t\tstruct cobs_encoder enc;\n\t\tstruct cobs_decoder dec;\n\n\t\tret = cobs_encoder_init(&enc, cobs_forward_to_decoder, &dec,\n\t\t\t\t\tCOBS_FLAG_TRAILING_DELIMITER | test->flags);\n\t\tzassert_ok(ret, \"encoder init failed for %s (%d)\", test->name, ret);\n\n\t\tret = cobs_decoder_init(&dec, cobs_frame_tester, fixture->decoded,\n\t\t\t\t\tCOBS_FLAG_TRAILING_DELIMITER | test->flags);\n\t\tzassert_ok(ret, \"decoder init failed for %s (%d)\", test->name, ret);\n\n\t\tret = cobs_encoder_write(&enc, test->decoded, test->decoded_len);\n\t\tzassert_equal(ret, test->decoded_len, \"encoder write failed for %s (%d)\",\n\t\t\t      test->name, ret);\n\n\t\t/* Closing will write a delimiter and reset the state */\n\t\tret = cobs_encoder_close(&enc);\n\t\tzassert_ok(ret, \"encoder close failed for %s (%d)\", test->name, ret);\n\n\t\tret = cobs_decoder_close(&dec);\n\t\tzassert_ok(ret, \"decoder close failed for %s (%d)\", test->name, ret);\n\t}\n\n\tzassert_equal(frame_test_idx, ARRAY_SIZE(cobs_dataset));\n}\n>>>>>>>> REPLACE\n```",
+          "applied_files": [
+            "tests/lib/cobs/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE cobs_tests\n===================================================================\nSTART - test_cobs_consecutive_delims\nPASS - test_cobs_consecutive_delims in 0.000 seconds\n===================================================================\nSTART - test_cobs_invalid_delim_pos\nPASS - test_cobs_invalid_delim_pos in 0.000 seconds\n===================================================================\nSTART - test_cobs_invalid_overrun\nPASS - test_cobs_invalid_overrun in 0.000 seconds\n===================================================================\nSTART - test_decode\nPASS - test_decode in 0.000 seconds\n===================================================================\nSTART - test_decode_stream\nPASS - test_decode_stream in 0.000 seconds\n===================================================================\nSTART - test_decode_stream_frame_complete\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/cobs/src/main.c:529: cobs_frame_tester: test->decoded_len not equal to dst->len",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": [
+            "tests/kernel/multiprocessing/mp/src/main.c",
+            "tests/bsim/bluetooth/ll/conn/src/test_connect2.c",
+            "tests/drivers/counter/counter_seconds/src/main.c",
+            "tests/bsim/net/sockets/echo_test/src/echo_test.c",
+            "tests/bsim/bluetooth/samples/central_hr_peripheral_hr/src/sample_test.c",
+            "tests/bsim/bluetooth/audio_samples/cap/acceptor/src/cap_acceptor_sample_test.c",
+            "tests/bsim/bluetooth/audio_samples/bap_unicast_client/src/unicast_client_sample_test.c",
+            "tests/bsim/bluetooth/audio_samples/bap_broadcast_sink/src/broadcast_sink_test.c"
+          ],
+          "restored_files": [
+            "tests/lib/cobs/src/main.c"
+          ]
+        }
+      }
+    ],
+    "first_retrieval_files": [
+      "tests/kernel/multiprocessing/mp/src/main.c",
+      "tests/bsim/bluetooth/ll/conn/src/test_connect2.c",
+      "tests/drivers/counter/counter_seconds/src/main.c",
+      "tests/bsim/net/sockets/echo_test/src/echo_test.c",
+      "tests/bsim/bluetooth/samples/central_hr_peripheral_hr/src/sample_test.c",
+      "tests/bsim/bluetooth/audio_samples/cap/acceptor/src/cap_acceptor_sample_test.c",
+      "tests/bsim/bluetooth/audio_samples/bap_unicast_client/src/unicast_client_sample_test.c",
+      "tests/bsim/bluetooth/audio_samples/bap_broadcast_sink/src/broadcast_sink_test.c"
+    ],
+    "initial_error_log": "[Fallback Raw Tail]\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE cobs_tests\n===================================================================\nSTART - test_cobs_consecutive_delims\nPASS - test_cobs_consecutive_delims in 0.000 seconds\n===================================================================\nSTART - test_cobs_invalid_delim_pos\nPASS - test_cobs_invalid_delim_pos in 0.000 seconds\n===================================================================\nSTART - test_cobs_invalid_overrun\nPASS - test_cobs_invalid_overrun in 0.000 seconds\n===================================================================\nSTART - test_decode\nPASS - test_decode in 0.000 seconds\n===================================================================\nSTART - test_decode_stream\nPASS - test_decode_stream in 0.000 seconds\n===================================================================\nSTART - test_decode_stream_frame_complete\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/cobs/src/main.c:529: cobs_frame_tester: test->decoded_len not equal to dst->len",
+    "protected_file_count": 4,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b2/v3new_runtime_cobs_c79b1e8_r3",
+    "api_events": [],
+    "started_at": "2026-10-14T13:43:28+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
