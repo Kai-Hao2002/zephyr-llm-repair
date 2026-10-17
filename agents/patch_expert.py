@@ -212,7 +212,7 @@ The code inside the SEARCH block must match the original file EXACTLY (including
 """ + SPEC_RULE),
         ("human", """[Patches attempted earlier and their outcomes]
 {attempt_history}
-(How to read this: if a record says the patch application failed, the text of the SEARCH block did not match the file content character for character, so the source code was not modified at all. Re-check character by character, including indentation, against the latest source code below; the direction of the change is not necessarily wrong, so there is no need to switch direction because of it. If a record says the patch was applied but the build/run still failed, that direction has been shown not to work; please try a different approach or a different file.)
+(How to read this: if a record says the patch application failed, the text of the SEARCH block did not match the file content character for character, so the source code was not modified at all. Re-check character by character, including indentation, against the latest source code below; the direction of the change is not necessarily wrong, so there is no need to switch direction because of it. If a record says the patch was applied but the build/run still failed, that direction has been shown not to work; please try a different approach or a different file. Always write SEARCH blocks against the current source code below: if changes from an earlier patch do not appear there, they were reverted or never applied.)
 
 [Current project source and configuration file contents]
 {project_files}

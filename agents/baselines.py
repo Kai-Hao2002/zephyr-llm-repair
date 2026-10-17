@@ -185,7 +185,8 @@ def b3_generate_patch(error_log: str, project_files_content: str,
     prompt = ChatPromptTemplate.from_messages([
         ("system", _PATCH_FORMAT_SYSTEM_PROMPT),
         ("human", "[Your earlier attempts in this session and their outcomes (oldest first)]\n{previous_attempts}\n"
-                  "(Patches that applied successfully are already reflected in the current file contents below.)\n\n"
+                  "(Always write SEARCH blocks against the current file contents below. If changes from an earlier "
+                  "patch do not appear there, they were reverted or never applied.)\n\n"
                   "[Current project source and configuration file contents]\n{project_files}\n\n"
                   "[Current error log]\n{error_log}\n\nPlease start generating the patch blocks:"),
     ])
