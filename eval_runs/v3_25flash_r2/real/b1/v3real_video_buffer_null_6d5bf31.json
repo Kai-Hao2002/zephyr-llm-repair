@@ -1,0 +1,76 @@
+[
+  {
+    "case_id": "v3real_video_buffer_null_6d5bf31",
+    "category": "real_bug",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 29.668514013290405,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 815,
+            "output_tokens": 6877
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": {
+            "filepath": "subsys/video/video_buffer.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/logging/log.h>\n#include <zephyr/drivers/video.h>\n#include <zephyr/sys/slist.h>\n#include <errno.h>\n#include <string.h>\n\nLOG_MODULE_REGISTER(video_buffer, CONFIG_VIDEO_BUFFER_LOG_LEVEL);\n\n#ifndef CONFIG_VIDEO_MAX_BUFFERS\n#define CONFIG_VIDEO_MAX_BUFFERS 4\n#endif\n\n/* Internal buffer state flags */\n#define VIDEO_BUF_INTERNAL_FLAG_FREE        BIT(0)\n#define VIDEO_BUF_INTERNAL_FLAG_ALLOCATED   BIT(1)\n\nstruct video_buffer_internal {\n    struct video_buffer vbuf;\n    uint32_t internal_flags;\n};\n\nstatic struct video_buffer_internal video_buffers[CONFIG_VIDEO_MAX_BUFFERS];\nstatic K_MUTEX_DEFINE(video_buffer_mutex);\n\nstatic int video_buffer_module_init(void)\n{\n    for (int i = 0; i < CONFIG_VIDEO_MAX_BUFFERS; i++) {\n        memset(&video_buffers[i].vbuf, 0, sizeof(struct video_buffer));\n        video_buffers[i].internal_flags = VIDEO_BUF_INTERNAL_FLAG_FREE;\n    }\n    LOG_DBG(\"Video buffer pool initialized with %d buffers\", CONFIG_VIDEO_MAX_BUFFERS);\n    return 0;\n}\n\nSYS_INIT(video_buffer_module_init, APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);\n\nstruct video_buffer *video_buffer_alloc(size_t size)\n{\n    k_mutex_lock(&video_buffer_mutex, K_FOREVER);\n\n    for (int i = 0; i < CONFIG_VIDEO_MAX_BUFFERS; i++) {\n        if (video_buffers[i].internal_flags & VIDEO_BUF_INTERNAL_FLAG_FREE) {\n            video_buffers[i].internal_flags &= ~VIDEO_BUF_INTERNAL_FLAG_FREE;\n            video_buffers[i].internal_flags |= VIDEO_BUF_INTERNAL_FLAG_ALLOCATED;\n\n            /* Initialize the public video_buffer structure */\n            memset(&video_buffers[i].vbuf, 0, sizeof(struct video_buffer));\n            video_buffers[i].vbuf.size = size;\n            /* The actual buffer memory (vbuf.buffer) is expected to be set by the driver */\n\n            LOG_DBG(\"Allocated buffer %d (ptr: %p)\", i, &video_buffers[i].vbuf);\n            k_mutex_unlock(&video_buffer_mutex);\n            return &video_buffers[i].vbuf;\n        }\n    }\n\n    k_mutex_unlock(&video_buffer_mutex);\n    LOG_WRN(\"No free video buffers available\");\n    return NULL;\n}\n\nint video_buffer_release(struct video_buffer *vbuf)\n{\n    if (vbuf == NULL) {\n        LOG_ERR(\"Attempted to release a NULL video buffer\");\n        return -EINVAL;\n    }\n\n    k_mutex_lock(&video_buffer_mutex, K_FOREVER);\n\n    for (int i = 0; i < CONFIG_VIDEO_MAX_BUFFERS; i++) {\n        if (&video_buffers[i].vbuf == vbuf) {\n            if (video_buffers[i].internal_flags & VIDEO_BUF_INTERNAL_FLAG_FREE) {\n                LOG_ERR(\"Buffer %d (%p) is already released\", i, vbuf);\n                k_mutex_unlock(&video_buffer_mutex);\n                return -EALREADY;\n            }\n\n            video_buffers[i].internal_flags &= ~VIDEO_BUF_INTERNAL_FLAG_ALLOCATED;\n            video_buffers[i].internal_flags |= VIDEO_BUF_INTERNAL_FLAG_FREE;\n\n            /* Clear public video_buffer structure fields */\n            memset(&video_buffers[i].vbuf, 0, sizeof(struct video_buffer));\n\n            LOG_DBG(\"Released buffer %d (ptr: %p)\", i, vbuf);\n            k_mutex_unlock(&video_buffer_mutex);\n            return 0;\n        }\n    }\n\n    k_mutex_unlock(&video_buffer_mutex);\n    LOG_ERR(\"Invalid video buffer pointer %p: not found in pool\", vbuf);\n    return -EINVAL;\n}\n\n/*\n * The error log also mentions \"Invalid buffer index: 1\".\n * This suggests there might be an index-based release function.\n * This function is not typically part of the public API, but might be used by tests.\n */\nint video_buffer_release_idx(int index)\n{\n    if (index < 0 || index >= CONFIG_VIDEO_MAX_BUFFERS) {\n        LOG_ERR(\"Invalid buffer index: %d (max: %d)\", index, CONFIG_VIDEO_MAX_BUFFERS - 1);\n        return -EINVAL;\n    }\n    return video_buffer_release(&video_buffers[index].vbuf);\n}\n\n/*\n * Helper to get a buffer by index, mainly for testing or internal use.\n * Not typically part of the public API, but useful for the test context.\n */\nstruct video_buffer *video_buffer_get_by_idx(int index)\n{\n    if (index < 0 || index >= CONFIG_VIDEO_MAX_BUFFERS) {\n        LOG_ERR(\"Invalid buffer index: %d (max: %d)\", index, CONFIG_VIDEO_MAX_BUFFERS - 1);\n        return NULL;\n    }\n    return &video_buffers[index].vbuf;\n}\n"
+          },
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file 'subsys/video/video_buffer.c' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000001 to 0x04\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000020 to 0x05\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x0000007f to 0x09\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_set_mode: Applying mode 0x8062180 at 15 FPS\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000032 to 0x04\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000024 to 0x05\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000001 to 0x0a\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE video_common\n===================================================================\nSTART - test_video_buffer_alloc_release\n[00:00:00.000,000] <err> video_buffer: Buffer 0 is already released\nPASS - test_video_buffer_alloc_release in 0.000 seconds\n===================================================================\nSTART - test_video_buffer_release_bad_index\n[00:00:00.000,000] <err> video_buffer: Invalid buffer index: 1\nPASS - test_video_buffer_release_bad_index in 0.000 seconds\n===================================================================\nSTART - test_video_buffer_release_null\nSegmentation fault",
+    "protected_file_count": 7,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_real/b1/v3real_video_buffer_null_6d5bf31",
+    "api_events": [],
+    "started_at": "2026-10-17T02:43:47+00:00",
+    "run_meta": {
+      "code_commit": "e86a76e5a2e6e5088fb194e2e6e51d4f50ef5321",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

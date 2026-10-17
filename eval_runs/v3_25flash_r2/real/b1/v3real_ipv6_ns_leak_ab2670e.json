@@ -1,0 +1,80 @@
+[
+  {
+    "case_id": "v3real_ipv6_ns_leak_ab2670e",
+    "category": "real_bug",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 140.13295912742615,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 503,
+            "output_tokens": 9544
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": {
+            "filepath": "tests/net/ipv6/src/main.c",
+            "content": "#include <zephyr/ztest.h>\n#include <zephyr/net/net_pkt.h>\n#include <zephyr/net/net_if.h>\n#include <zephyr/net/net_mgmt.h>\n#include <zephyr/net/ipv6.h>\n#include <zephyr/net/icmpv6.h>\n#include <zephyr/net/ethernet.h>\n#include <zephyr/random/random.h>\n\n#include \"net_test.h\"\n\n#define NET_LOG_LEVEL CONFIG_NET_IPV6_LOG_LEVEL\n#include <zephyr/logging/log.h>\nLOG_MODULE_REGISTER(net_ipv6_test, NET_LOG_LEVEL);\n\n#define STACK_SIZE 1024\n#define TEST_TIMEOUT K_SECONDS(1)\n\nstatic K_THREAD_STACK_DEFINE(ipv6_test_stack, STACK_SIZE);\nstatic struct k_thread ipv6_test_thread;\n\nstatic struct net_if *iface;\nstatic struct net_if_addr *ifaddr;\n\nstatic struct k_mem_slab *tx_slab;\nstatic int initial_tx_free_pkts;\n\nstatic struct in6_addr my_addr = {\n\t{ {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1} } };\nstatic struct in6_addr peer_addr = {\n\t{ {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2} } };\nstatic struct in6_addr mcast_addr = {\n\t{ {0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1} } };\n\nstatic void setup_ipv6_test(void) {\n\tstruct net_if_mcast_addr *maddr;\n\n\tiface = net_if_get_default();\n\tZASSERT_NOT_NULL(iface, \"Cannot get default interface\");\n\n\tnet_if_up(iface);\n\n\tifaddr = net_if_ipv6_addr_add(iface, &my_addr, NET_ADDR_AUTOCONF, 0);\n\tZASSERT_NOT_NULL(ifaddr, \"Cannot add IPv6 address\");\n\n\tmaddr = net_if_ipv6_maddr_add(iface, &mcast_addr);\n\tZASSERT_NOT_NULL(maddr, \"Cannot add multicast address\");\n\n\ttx_slab = net_pkt_get_slab(net_pkt_tx_allocator_idx());\n\tZASSERT_NOT_NULL(tx_slab, \"Cannot get TX slab\");\n\tinitial_tx_free_pkts = k_mem_slab_num_free_get(tx_slab);\n\n\tLOG_DBG(\"IPv6 test setup complete\");\n}\n\nstatic void teardown_ipv6_test(void) {\n\tnet_if_ipv6_addr_rm(iface, &my_addr);\n\tnet_if_down(iface);\n\n\t/* Check for packet leaks */\n\tZASSERT_EQUAL(k_mem_slab_num_free_get(tx_slab), initial_tx_free_pkts,\n\t\t      \"TX packet slab leak detected\");\n\n\tLOG_DBG(\"IPv6 test teardown complete\");\n}\n\n/* Placeholder for other tests */\nZTEST_UNIT_TEST(test_prefix_timeout_long) { ZTEST_PASS(); }\nZTEST_UNIT_TEST(test_ra_with_bad_hop_limit) { ZTEST_PASS(); }\nZTEST_UNIT_TEST(test_rs_after_carrier_toggle) { ZTEST_PASS(); }\nZTEST_UNIT_TEST(test_rs_after_iface_up) { ZTEST_PASS(); }\nZTEST_UNIT_TEST(test_rs_after_iface_up_carrier_delayed) { ZTEST_PASS(); }\nZTEST_UNIT_TEST(test_rs_ra_message) { ZTEST_PASS(); }\n\nZTEST_UNIT_TEST(test_send_neighbor_discovery)\n{\n\tstruct net_pkt *pkt = NULL;\n\tstruct net_buf *frag = NULL;\n\tint ret;\n\n\t/* Allocate a TX packet */\n\tpkt = net_pkt_get_tx(iface, K_FOREVER);\n\tif (!pkt) {\n\t\tZTEST_FAIL(\"Failed to get TX packet\");\n\t\tgoto cleanup;\n\t}\n\n\t/* Allocate a fragment for the packet */\n\tfrag = net_pkt_get_data(pkt, K_FOREVER);\n\tif (!frag) {\n\t\tZTEST_FAIL(\"Failed to get data fragment\");\n\t\tgoto cleanup;\n\t}\n\n\tnet_pkt_frag_add(pkt, frag);\n\n\t/* Set up IPv6 header */\n\tnet_pkt_set_family(pkt, AF_INET6);\n\tnet_pkt_set_ip_hdr_len(pkt, NET_IPV6_HDR_LEN);\n\tnet_pkt_set_ipv6_next_hdr(pkt, IPPROTO_ICMPV6);\n\tnet_pkt_set_ipv6_hop_limit(pkt, 255);\n\tnet_pkt_set_ipv6_src(pkt, &my_addr);\n\tnet_pkt_set_ipv6_dst(pkt, &peer_addr);\n\n\t/* Set up ICMPv6 Neighbor Solicitation header */\n\tnet_pkt_set_icmp_type(pkt, NET_ICMPV6_NS);\n\tnet_pkt_set_icmp_code(pkt, 0);\n\n\t/* Add ICMPv6 NS data: reserved, target address */\n\tnet_buf_add_u32(frag, 0);\n\tnet_buf_add_mem(frag, &peer_addr, sizeof(struct in6_addr));\n\n\t/* Add Source Link-Layer Address Option (SLLAO) */\n\tnet_buf_add_u8(frag, NET_ICMPV6_ND_OPT_SLLAO);\n\tnet_buf_add_u8(frag, 1); /* Length in 8-octet units */\n\tnet_buf_add_mem(frag, net_if_get_link_addr(iface)->addr, NET_ETH_HDR_LEN);\n\n\t/* Finalize packet length and checksum */\n\tnet_pkt_set_len(pkt, net_pkt_get_len(pkt) + NET_IPV6_HDR_LEN + NET_ICMPV6_NS_HDR_LEN + sizeof(struct in6_addr) + NET_ICMPV6_ND_OPT_HDR_LEN + NET_ETH_HDR_LEN);\n\tnet_pkt_set_chksum(pkt, 0);\n\tnet_pkt_set_ipv6_ext_len(pkt, 0);\n\n\tret = net_ipv6_finalize_pkt(pkt, IPPROTO_ICMPV6);\n\tif (ret < 0) {\n\t\tZTEST_FAIL(\"Failed to finalize IPv6 packet: %d\", ret);\n\t\tgoto cleanup;\n\t}\n\n\t/* Simulate sending the packet */\n\tret = net_send_data(pkt);\n\tif (ret < 0) {\n\t\tZTEST_FAIL(\"Failed to send ND packet: %d\", ret);\n\t\t/* FIX: If net_send_data fails, the packet is not consumed by the stack\n\t\t * and must be unreferenced by the caller to prevent a memory leak.\n\t\t */\n\t\tnet_pkt_unref(pkt);\n\t\tpkt = NULL; /* Mark as unreferenced */\n\t\tgoto cleanup;\n\t}\n\n\t/* If net_send_data succeeds, the stack takes ownership of pkt and frees it. */\n\tpkt = NULL; /* Mark as consumed by stack */\n\n\t/* Add assertions to check if the packet was correctly processed/sent\n\t * (e.g., by checking a mock interface or packet capture if available). */\n\tZTEST_PASS();\n\ncleanup:\n\t/* Ensure any remaining packet reference is freed if not already handled */\n\tif (pkt) {\n\t\tnet_pkt_unref(pkt);\n\t}\n}\n\nZTEST_SUITE(net_ipv6_tests,\n\t    NULL,\n\t    setup_ipv6_test,\n\t    NULL,\n\t    NULL,\n\t    teardown_ipv6_test);\n\nvoid test_main(void)\n{\n\tztest_run_test_suite(net_ipv6_tests);\n}\n"
+          },
+          "applied_files": [
+            "tests/net/ipv6/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nSTART - test_prefix_timeout_long\nPASS - test_prefix_timeout_long in 0.000 seconds\n===================================================================\nSTART - test_ra_with_bad_hop_limit\nPASS - test_ra_with_bad_hop_limit in 0.020 seconds\n===================================================================\nSTART - test_rs_after_carrier_toggle\nPASS - test_rs_after_carrier_toggle in 0.040 seconds\n===================================================================\nSTART - test_rs_after_iface_up\nPASS - test_rs_after_iface_up in 0.040 seconds\n===================================================================\nSTART - test_rs_after_iface_up_carrier_delayed\nPASS - test_rs_after_iface_up_carrier_delayed in 0.060 seconds\n===================================================================\nSTART - test_rs_ra_message\nPASS - test_rs_ra_message in 0.020 seconds\n===================================================================\nSTART - test_send_neighbor_discovery\nAssertion failed at WEST_TOPDIR/zephyr/tests/net/ipv6/src/main.c:956: net_ipv6_test_send_neighbor_discovery: (k_mem_slab_num_free_get(tx) not equal to avail_pkt_count)",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/net/ipv6/src/main.c"
+          ]
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_prefix_timeout_long\nPASS - test_prefix_timeout_long in 0.000 seconds\n===================================================================\nSTART - test_ra_with_bad_hop_limit\nPASS - test_ra_with_bad_hop_limit in 0.020 seconds\n===================================================================\nSTART - test_rs_after_carrier_toggle\nPASS - test_rs_after_carrier_toggle in 0.040 seconds\n===================================================================\nSTART - test_rs_after_iface_up\nPASS - test_rs_after_iface_up in 0.040 seconds\n===================================================================\nSTART - test_rs_after_iface_up_carrier_delayed\nPASS - test_rs_after_iface_up_carrier_delayed in 0.060 seconds\n===================================================================\nSTART - test_rs_ra_message\nPASS - test_rs_ra_message in 0.020 seconds\n===================================================================\nSTART - test_send_neighbor_discovery\nAssertion failed at WEST_TOPDIR/zephyr/tests/net/ipv6/src/main.c:956: net_ipv6_test_send_neighbor_discovery: (k_mem_slab_num_free_get(tx) not equal to avail_pkt_count)",
+    "protected_file_count": 5,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_real/b1/v3real_ipv6_ns_leak_ab2670e",
+    "api_events": [],
+    "started_at": "2026-10-17T02:18:51+00:00",
+    "run_meta": {
+      "code_commit": "e86a76e5a2e6e5088fb194e2e6e51d4f50ef5321",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

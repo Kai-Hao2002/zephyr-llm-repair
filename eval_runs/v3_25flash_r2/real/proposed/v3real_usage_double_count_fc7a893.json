@@ -1,0 +1,285 @@
+[
+  {
+    "case_id": "v3real_usage_double_count_fc7a893",
+    "category": "real_bug",
+    "pipeline": "proposed",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "resolved",
+    "iterations": 4,
+    "ttr_seconds": 787.3143229484558,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 809,
+            "output_tokens": 849
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 17371,
+            "output_tokens": 10335
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "```\nkernel/usage.c\n<<<<<<<< SEARCH\n\t\t\tsched_thread_update_usage(thread, cycles);\n\t\t\tsched_cpu_update_usage(cpu, cycles);\n\t\t}\n\t}\n\n\tk_spin_unlock(&usage_lock, key);\n========\n\t\t\tsched_thread_update_usage(thread, cycles);\n\t\t\tsched_cpu_update_usage(cpu, cycles);\n\t\t\t/*\n\t\t\t * Update the CPU's usage0 to reflect that cycles up to\n\t\t\t * this point have been accounted for. This prevents\n\t\t\t * double-counting if z_sched_usage_stop() is called\n\t\t\t * later for the same execution window.\n\t\t\t */\n\t\t\tcpu->usage0 = usage_now();\n\t\t}\n\t}\n\n\tk_spin_unlock(&usage_lock, key);\n>>>>>>>> REPLACE\n```",
+          "applied_files": [
+            "kernel/usage.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nRAM:      188472 B        31 MB      0.58%\nIDT_LIST:           0 B         2 KB      0.00%\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: qemu_x86/atom\n[148/149] To exit from QEMU enter: 'CTRL+a, x'[QEMU] CPU: qemu32,+nx,+pae\nSeaBIOS (version zephyr-v1.16.3-2-0-gf8da0cc-zephyr)\nBooting from ROM..\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE usage_api\n===================================================================\nSTART - test_all_stats_usage\nPASS - test_all_stats_usage in 0.120 seconds\n===================================================================\nSTART - test_sys_stats_enable_disable\nPASS - test_sys_stats_enable_disable in 0.040 seconds\n===================================================================\nSTART - test_thread_stats_enable_disable\nPASS - test_thread_stats_enable_disable in 0.130 seconds\n===================================================================\nSTART - test_thread_stats_enable_disable_current\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/usage/thread_runtime_stats/src/test_thread_runtime_stats.c:335: usage_api_test_thread_stats_enable_disable_current: (thread_delta <= (uint64_t)tolerance is false)",
+          "conflict_tag": null,
+          "analyzer_diagnosis": {
+            "iteration": 1,
+            "reasoning": "The error is a runtime assertion failure within a test for thread runtime statistics. This usually points to a misconfiguration of the Kconfig options that enable or control these statistics, or an underlying issue with the platform's cycle counter implementation. Graph retrieval is needed to inspect relevant Kconfig symbols.",
+            "error_category": "kconfig",
+            "search_keywords": [
+              "THREAD_RUNTIME_STATS",
+              "KERNEL_USAGE_STATS",
+              "CPU_IDLE_STATS",
+              "kernel usage"
+            ]
+          },
+          "retrieved_files": [
+            "subsys/debug/thread_analyzer/Kconfig",
+            "kernel/usage.c",
+            "kernel/include/usage.h",
+            "subsys/shell/modules/kernel_service/thread/mask.c",
+            "tests/kernel/profiling/profiling_api/src/main.c",
+            "include/zephyr/kernel/stats.h",
+            "subsys/portability/posix/options/Kconfig.procN",
+            "include/zephyr/cleanup/kernel.h"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 2,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 805,
+            "output_tokens": 1506
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 24046,
+            "output_tokens": 20506
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "The error log indicates an assertion failure in `test_thread_stats_enable_disable_current` within `tests/kernel/usage/thread_runtime_stats/src/test_thread_runtime_stats.c` at line 335. The failing assertion is `(thread_delta <= (uint64_t)tolerance is false)`. This means `thread_delta` is unexpectedly large.\n\nThe `test_thread_stats_enable_disable_current` test aims to verify that cycles accumulated by a thread while its runtime statistics are disabled are *not* credited to its `execution_cycles` counter.\n\nUpon inspecting the `k_thread_base` structure in `include/zephyr/kernel_structs.h`, it's clear that `_cpu_cycles_start` and `_cpu_cycles_spent` are `uint64_t`. However, the `kernel/usage.c` file (which implements the runtime statistics functions) uses `k_cycle_get_32()` (which returns `uint32_t`) when interacting with these `uint64_t` fields.\n\nThis type mismatch can lead to incorrect cycle calculations, especially if the 32-bit cycle counter wraps around or if the implicit type promotion results in unexpected values when subtracting a `uint64_t` from a `uint32_t` (or vice-versa in the context of the expression). Given that `CONFIG_TIMEOUT_64BIT` is enabled by default, the system is configured to use 64-bit precision for timekeeping, making it essential to use `k_cycle_get_64()` for consistency and correctness with `uint64_t` cycle counters.\n\nThe fix involves replacing all instances of `k_cycle_get_32()` with `k_cycle_get_64()` when updating or reading the `uint64_t` `_cpu_cycles_start` and `_cpu_cycles_spent` fields in `kernel/usage.c`. Additionally, the literal `0` assigned to a `uint64_t` field should be `0ULL` for type correctness.\n\nThis ensures that the cycle calculations are performed with the correct 64-bit precision, preventing the `execution_cycles` from accumulating incorrectly during the disabled period and resolving the assertion failure.\n\n**File: kernel/usage.c**\n\n```c\nkernel/usage.c\n<<<<<<<< SEARCH\n\t\t\tthread->base._cpu_cycles_spent += k_cycle_get_32() - thread->base._cpu_cycles_start;\n\t\t\tthread->base._cpu_cycles_start = k_cycle_get_32();\n========\n\t\t\tthread->base._cpu_cycles_spent += k_cycle_get_64() - thread->base._cpu_cycles_start;\n\t\t\tthread->base._cpu_cycles_start = k_cycle_get_64();\n>>>>>>>> REPLACE\n\nkernel/usage.c\n<<<<<<<< SEARCH\n\tthread->base._cpu_cycles_start = k_cycle_get_32();\n========\n\tthread->base._cpu_cycles_start = k_cycle_get_64();\n>>>>>>>> REPLACE\n\nkernel/usage.c\n<<<<<<<< SEARCH\n\t\tthread->base._cpu_cycles_spent += k_cycle_get_32() - thread->base._cpu_cycles_start;\n\t}\n\n\tthread->base._thread_runtime_stats_enabled = false;\n\tthread->base._cpu_cycles_start = 0;\n========\n\t\tthread->base._cpu_cycles_spent += k_cycle_get_64() - thread->base._cpu_cycles_start;\n\t}\n\n\tthread->base._thread_runtime_stats_enabled = false;\n\tthread->base._cpu_cycles_start = 0ULL;\n>>>>>>>> REPLACE\n```",
+          "applied_files": [],
+          "apply_error": "SearchMatchFailed: No exactly matching SEARCH block was found in 'kernel/usage.c'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).\nSearchMatchFailed: No exactly matching SEARCH block was found in 'kernel/usage.c'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).\nSearchMatchFailed: No exactly matching SEARCH block was found in 'kernel/usage.c'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": {
+            "iteration": 2,
+            "reasoning": "The error is a runtime assertion failure in a test related to thread runtime statistics. The assertion `(thread_delta <= (uint64_t)tolerance is false)` indicates that the measured thread execution time exceeded the expected tolerance. This behavior is often influenced by Kconfig options that control the enabling, granularity, or specific implementation of kernel and thread statistics. Therefore, graph retrieval for relevant Kconfig symbols is needed to investigate potential configuration issues that might lead to this unexpected runtime behavior.",
+            "error_category": "kconfig",
+            "search_keywords": [
+              "thread_runtime_stats",
+              "kernel_stats",
+              "usage_api"
+            ]
+          },
+          "retrieved_files": [
+            "tests/kernel/usage/thread_runtime_stats/src/test_thread_runtime_stats.c",
+            "lib/os/cpu_load/Kconfig",
+            "subsys/portability/posix/options/Kconfig.procN",
+            "subsys/debug/thread_analyzer/Kconfig",
+            "kernel/Kconfig.obj_core",
+            "kernel/Kconfig",
+            "subsys/testsuite/ztest/Kconfig"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 3,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 971,
+            "output_tokens": 1733
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 33975,
+            "output_tokens": 10405
+          },
+          {
+            "node": "supervisor_compression",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 110,
+            "output_tokens": 181
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "```\nkernel/usage.c\n<<<<<<<< SEARCH\n\t\t\tcpu->usage0 = usage_now();\n========\n\t\t\tcpu->usage0 = 0;\n>>>>>>>> REPLACE\n\nkernel/usage.c\n<<<<<<<< SEARCH\n\t\tif (thread == cpu->current) {\n\t\t\tuint32_t cycles = usage_now() - cpu->usage0;\n\n\t\t\tsched_thread_update_usage(thread, cycles);\n\t\t\tsched_cpu_update_usage(cpu, cycles);\n\t\t\t/*\n\t\t\t * Update the CPU's usage0 to reflect that cycles up to\n\t\t\t * this point have been accounted for. This prevents\n\t\t\t * double-counting if z_sched_usage_stop() is called\n\t\t\t * later for the same execution window.\n\t\t\t */\n\t\t\tcpu->usage0 = usage_now();\n\t\t}\n========\n\t\tif (thread == cpu->current) {\n\t\t\t/*\n\t\t\t * When enabling tracking for the current thread,\n\t\t\t * reset cpu->usage0 to usage_now() to start a new\n\t\t\t * tracking window. Do not account for cycles accumulated\n\t\t\t * since the last cpu->usage0 update, as these cycles\n\t\t\t * were untracked.\n\t\t\t */\n\t\t\tcpu->usage0 = usage_now();\n\t\t}\n>>>>>>>> REPLACE\n```",
+          "applied_files": [
+            "kernel/usage.c"
+          ],
+          "apply_error": "SearchMatchFailed: No exactly matching SEARCH block was found in 'kernel/usage.c'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": {
+            "iteration": 3,
+            "reasoning": "The assertion failure `(thread_delta <= (uint64_t)tolerance is false)` indicates that the measured runtime or overhead for thread statistics collection exceeded the expected tolerance. This suggests a change in the kernel's thread runtime statistics behavior or system timing, likely influenced by Kconfig options. Graph retrieval is needed to investigate relevant Kconfig symbols related to kernel usage statistics and thread runtime.",
+            "error_category": "kconfig",
+            "search_keywords": [
+              "usage",
+              "kernel usage",
+              "thread runtime stats"
+            ]
+          },
+          "retrieved_files": [
+            "kernel/usage.c",
+            "kernel/include/usage.h",
+            "include/zephyr/kernel/stats.h",
+            "kernel/thread.c",
+            "subsys/shell/modules/kernel_service/heap.c",
+            "subsys/debug/thread_analyzer/Kconfig",
+            "tests/kernel/usage/thread_runtime_stats/src/test_thread_runtime_stats.c",
+            "tests/kernel/profiling/profiling_api/src/main.c"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 4,
+        "compiled": true,
+        "resolved": true,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 877,
+            "output_tokens": 1272
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 18621,
+            "output_tokens": 16581
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "success",
+          "patch": "kernel/usage.c\n<<<<<<<< SEARCH\nvoid z_sched_usage_start(struct k_thread *thread)\n{\n#ifdef CONFIG_SCHED_THREAD_USAGE_ANALYSIS\n\tk_spinlock_key_t  key;\n\n\tkey = k_spin_lock(&usage_lock);\n\n\t_current_cpu->usage0 = usage_now();   /* Always update */\n\n\tif (thread->base.usage.track_usage) {\n\t\tthread->base.usage.num_windows++;\n\t\tthread->base.usage.current = 0;\n\t}\n\n\tk_spin_unlock(&usage_lock, key);\n#else\n\t/* One write through a volatile pointer doesn't require\n\t * synchronization as long as _usage() treats it as volatile\n\t * (we can't race with _stop() by design).\n\t */\n\n\t_current_cpu->usage0 = usage_now();\n#endif /* CONFIG_SCHED_THREAD_USAGE_ANALYSIS */\n}\n========\nvoid z_sched_usage_start(struct k_thread *thread)\n{\n#ifdef CONFIG_SCHED_THREAD_USAGE_ANALYSIS\n\tk_spinlock_key_t  key;\n\n\tkey = k_spin_lock(&usage_lock);\n\n\tif (thread->base.usage.track_usage) {\n\t\t_current_cpu->usage0 = usage_now();\n\t\tthread->base.usage.num_windows++;\n\t\tthread->base.usage.current = 0;\n\t} else {\n\t\t_current_cpu->usage0 = 0;\n\t}\n\n\tk_spin_unlock(&usage_lock, key);\n#else\n\t/* One write through a volatile pointer doesn't require\n\t * synchronization as long as _usage() treats it as volatile\n\t * (we can't race with _stop() by design).\n\t */\n\n\t_current_cpu->usage0 = usage_now();\n#endif /* CONFIG_SCHED_THREAD_USAGE_ANALYSIS */\n}\n>>>>>>>> REPLACE\n\nkernel/usage.c\n<<<<<<<< SEARCH\n\tif (cpu == _current_cpu) {\n\t\tuint32_t  now = usage_now();\n\t\tuint32_t cycles = now - cpu->usage0;\n\n\t\t/*\n\t\t * Getting stats for the current CPU. Update both its\n\t\t * current thread stats and the CPU stats as the CPU's\n\t\t * [usage0] field will also get updated. This keeps all\n\t\t * that information up-to-date.\n\t\t */\n\n\t\tif (cpu->current->base.usage.track_usage) {\n\t\t\tsched_thread_update_usage(cpu->current, cycles);\n\t\t}\n\n\t\tsched_cpu_update_usage(cpu, cycles);\n\n\t\tcpu->usage0 = now;\n\t} else if (cpu->usage->track_usage) {\n\t\t/*\n\t\t * Getting stats for another CPU. Its counters only advance when\n\t\t * it context switches or reports on itself, so the time it has\n\t\t * spent in its current thread since then is not in them yet.\n\t\t * Fold that in for the returned view only: mutating another\n\t\t * CPU's accounting here would double count it once that CPU\n\t\t * updates itself.\n\t\t *\n\t\t * Without this, a CPU that ran and then went idle reports all of\n\t\t * the elapsed time as execution time, i.e. a 100% load.\n\t\t */\n\t\tpending = usage_now() - cpu->usage0;\n\t\tpending_is_idle = (cpu->current == cpu->idle_thread);\n\t}\n========\n\tif (cpu == _current_cpu) {\n\t\tuint32_t  now = usage_now();\n\t\tuint32_t u0 = cpu->usage0;\n\n\t\tif (u0 != 0) {\n\t\t\tuint32_t cycles = now - u0;\n\n\t\t\t/*\n\t\t\t * Getting stats for the current CPU. Update both its\n\t\t\t * current thread stats and the CPU stats as the CPU's\n\t\t\t * [usage0] field will also get updated. This keeps all\n\t\t\t * that information up-to-date.\n\t\t\t */\n\n\t\t\tif (cpu->current->base.usage.track_usage) {\n\t\t\t\tsched_thread_update_usage(cpu->current, cycles);\n\t\t\t}\n\n\t\t\tsched_cpu_update_usage(cpu, cycles);\n\n\t\t\tcpu->usage0 = now;\n\t\t}\n\t} else if (cpu->usage->track_usage) {\n\t\t/*\n\t\t * Getting stats for another CPU. Its counters only advance when\n\t\t * it context switches or reports on itself, so the time it has\n\t\t * spent in its current thread since then is not in them yet.\n\t\t * Fold that in for the returned view only: mutating another\n\t\t * CPU's accounting here would double count it once that CPU\n\t\t * updates itself.\n\t\t *\n\t\t * Without this, a CPU that ran and then went idle reports all of\n\t\t * the elapsed time as execution time, i.e. a 100% load.\n\t\t */\n\t\tpending = usage_now() - cpu->usage0;\n\t\tpending_is_idle = (cpu->current == cpu->idle_thread);\n\t}\n>>>>>>>> REPLACE\n\nkernel/usage.c\n<<<<<<<< SEARCH\n\tif (thread == cpu->current) {\n\t\tuint32_t now = usage_now();\n\t\tuint32_t cycles = now - cpu->usage0;\n\n\t\t/*\n\t\t * Getting stats for the current thread. Update both the\n\t\t * current thread stats and its CPU stats as the CPU's\n\t\t * [usage0] field will also get updated. This keeps all\n\t\t * that information up-to-date.\n\t\t */\n\n\t\tif (thread->base.usage.track_usage) {\n\t\t\tsched_thread_update_usage(thread, cycles);\n\t\t}\n\n\t\tsched_cpu_update_usage(cpu, cycles);\n\n\t\tcpu->usage0 = now;\n\t}\n========\n\tif (thread == cpu->current) {\n\t\tuint32_t now = usage_now();\n\t\tuint32_t u0 = cpu->usage0;\n\n\t\tif (u0 != 0) {\n\t\t\tuint32_t cycles = now - u0;\n\n\t\t\t/*\n\t\t\t * Getting stats for the current thread. Update both the\n\t\t\t * current thread stats and its CPU stats as the CPU's\n\t\t\t * [usage0] field will also get updated. This keeps all\n\t\t\t * that information up-to-date.\n\t\t\t */\n\n\t\t\tif (thread->base.usage.track_usage) {\n\t\t\t\tsched_thread_update_usage(thread, cycles);\n\t\t\t}\n\n\t\t\tsched_cpu_update_usage(cpu, cycles);\n\n\t\t\tcpu->usage0 = now;\n\t\t}\n\t}\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "kernel/usage.c",
+            "kernel/usage.c",
+            "kernel/usage.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "Zephyr OS successfully booted.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": {
+            "iteration": 4,
+            "reasoning": "The error is a runtime assertion failure in a kernel test (`test_thread_runtime_stats.c`) indicating that `thread_delta` exceeded `tolerance`. This suggests an issue with the collection or calculation of thread runtime statistics, which is often controlled by Kconfig options. Graph retrieval is needed to inspect relevant Kconfig symbols that might affect the accuracy or behavior of these statistics.",
+            "error_category": "kconfig",
+            "search_keywords": [
+              "kernel",
+              "thread",
+              "runtime_stats",
+              "usage"
+            ]
+          },
+          "retrieved_files": [
+            "kernel/include/usage.h",
+            "kernel/usage.c",
+            "subsys/debug/thread_analyzer/Kconfig",
+            "subsys/shell/modules/kernel_service/thread/mask.c",
+            "include/zephyr/kernel/stats.h",
+            "tests/kernel/profiling/profiling_api/src/main.c",
+            "subsys/shell/modules/kernel_service/thread/pin.c",
+            "subsys/shell/modules/kernel_service/thread/list.c"
+          ],
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": [
+      "subsys/debug/thread_analyzer/Kconfig",
+      "kernel/usage.c",
+      "kernel/include/usage.h",
+      "subsys/shell/modules/kernel_service/thread/mask.c",
+      "tests/kernel/profiling/profiling_api/src/main.c",
+      "include/zephyr/kernel/stats.h",
+      "subsys/portability/posix/options/Kconfig.procN",
+      "include/zephyr/cleanup/kernel.h"
+    ],
+    "initial_error_log": "[Fallback Raw Tail]\nRAM:      188472 B        31 MB      0.58%\nIDT_LIST:           0 B         2 KB      0.00%\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: qemu_x86/atom\n[148/149] To exit from QEMU enter: 'CTRL+a, x'[QEMU] CPU: qemu32,+nx,+pae\nSeaBIOS (version zephyr-v1.16.3-2-0-gf8da0cc-zephyr)\nBooting from ROM..\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE usage_api\n===================================================================\nSTART - test_all_stats_usage\nPASS - test_all_stats_usage in 0.120 seconds\n===================================================================\nSTART - test_sys_stats_enable_disable\nPASS - test_sys_stats_enable_disable in 0.040 seconds\n===================================================================\nSTART - test_thread_stats_enable_disable\nPASS - test_thread_stats_enable_disable in 0.130 seconds\n===================================================================\nSTART - test_thread_stats_enable_disable_current\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/usage/thread_runtime_stats/src/test_thread_runtime_stats.c:316: usage_api_test_thread_stats_enable_disable_current: (cpu_delta <= (uint64_t)elapsed_cycles + tolerance is false)",
+    "protected_file_count": 5,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_real/proposed/v3real_usage_double_count_fc7a893",
+    "api_events": [
+      {
+        "kind": "retry",
+        "what": "patch_expert",
+        "attempt": 1,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 141
+      }
+    ],
+    "started_at": "2026-10-17T10:01:41+00:00",
+    "run_meta": {
+      "code_commit": "75227d254a845750e16c37839a6f32e5c9bafd0d",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

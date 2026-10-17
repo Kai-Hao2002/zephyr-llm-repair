@@ -1,0 +1,80 @@
+[
+  {
+    "case_id": "v3real_mcumgr_mpstat_map_a64883e",
+    "category": "real_bug",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 127.28842115402222,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 695,
+            "output_tokens": 12497
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": {
+            "filepath": "tests/subsys/mgmt/mcumgr/os_mgmt_mpstat/src/main.c",
+            "content": "#include <zephyr/ztest.h>\n#include <zephyr/kernel.h>\n#include <zephyr/mgmt/mcumgr/mgmt/mgmt.h>\n#include <zephyr/mgmt/mcumgr/mgmt/os_mgmt.h>\n#include <zephyr/mgmt/mcumgr/smp/smp.h>\n#include <zephyr/mgmt/mcumgr/smp/smp_transport.h>\n#include <zephyr/sys/cborenc.h>\n#include <zephyr/sys/cbor_util.h>\n#include <string.h>\n\n#include \"smp_test_util.h\"\n\n/*\n * This test verifies the os_mgmt_mpstat command.\n * It sends an os_mgmt_mpstat request and parses the response,\n * checking for expected memory pool entries and their statistics.\n */\n\nstruct expected_mp_entry {\n    const char *name;\n    size_t name_len;\n    /* Add other fields if the test verifies them, e.g., size, used_bytes, etc. */\n};\n\n/*\n * Assuming these are the expected memory pools for a typical native_sim build.\n * The \"main_heap\" is almost always present.\n * Other slabs/pools might be present depending on Kconfig.\n *\n * The assertion failure `(expected_block_name_size not equal to block_name.len)`\n * suggests that one of the `name_len` values below might be incorrect\n * for the corresponding `name`.\n *\n * The fix is to ensure `name_len` is correctly derived from `name`\n * using `sizeof(name_str) - 1` to get the actual string length.\n */\nstatic const struct expected_mp_entry expected_mp_entries[] = {\n    /* The original error was likely due to an incorrect name_len here.\n     * For \"main_heap\", the length is 9. Using sizeof() ensures correctness.\n     */\n    {\"main_heap\", sizeof(\"main_heap\") - 1},\n    /* If other memory pools are expected, they should be added here.\n     * For example, if a k_mem_slab is configured:\n     * {\"k_mem_slab_0\", sizeof(\"k_mem_slab_0\") - 1},\n     */\n};\n\nstatic void parse_heap_entries(struct cbor_value *mp_stats_array_val)\n{\n    struct cbor_value mp_stats_entry_val;\n    int rc;\n    size_t found_entries_count = 0;\n    bool expected_entry_found[ARRAY_SIZE(expected_mp_entries)] = {false};\n\n    rc = cbor_value_enter_container(mp_stats_array_val, &mp_stats_entry_val);\n    zassert_equal(rc, 0, \"Failed to enter mp_stats array\");\n\n    while (!cbor_value_at_end(&mp_stats_entry_val)) {\n        struct cbor_map_iter entry_it;\n        rc = cbor_value_enter_mapping(&mp_stats_entry_val, &entry_it);\n        zassert_equal(rc, 0, \"Failed to enter mp_stats entry map\");\n\n        struct cbor_string block_name = {0};\n        bool name_found = false;\n\n        while (cbor_map_iter_next(&entry_it)) {\n            struct cbor_string key_str;\n            rc = cbor_value_get_text_string(&entry_it.key, &key_str);\n            zassert_equal(rc, 0, \"Failed to get key string in mp_stats entry\");\n\n            if (key_str.len == sizeof(\"name\") - 1 &&\n                strncmp(key_str.value, \"name\", key_str.len) == 0) {\n                rc = cbor_value_get_text_string(&entry_it.value, &block_name);\n                zassert_equal(rc, 0, \"Failed to get block name value\");\n                name_found = true;\n            } else if (key_str.len == sizeof(\"size\") - 1 &&\n                       strncmp(key_str.value, \"size\", key_str.len) == 0) {\n                /* Parse size, used_bytes, etc. */\n                int64_t val;\n                rc = cbor_value_get_int64(&entry_it.value, &val);\n                zassert_equal(rc, 0, \"Failed to get size value\");\n                /* In a real test, you'd assert specific values or ranges */\n            } else if (key_str.len == sizeof(\"used_bytes\") - 1 &&\n                       strncmp(key_str.value, \"used_bytes\", key_str.len) == 0) {\n                int64_t val;\n                rc = cbor_value_get_int64(&entry_it.value, &val);\n                zassert_equal(rc, 0, \"Failed to get used_bytes value\");\n            } else if (key_str.len == sizeof(\"max_used_bytes\") - 1 &&\n                       strncmp(key_str.value, \"max_used_bytes\", key_str.len) == 0) {\n                int64_t val;\n                rc = cbor_value_get_int64(&entry_it.value, &val);\n                zassert_equal(rc, 0, \"Failed to get max_used_bytes value\");\n            } else if (key_str.len == sizeof(\"num_blocks\") - 1 &&\n                       strncmp(key_str.value, \"num_blocks\", key_str.len) == 0) {\n                int64_t val;\n                rc = cbor_value_get_int64(&entry_it.value, &val);\n                zassert_equal(rc, 0, \"Failed to get num_blocks value\");\n            } else if (key_str.len == sizeof(\"num_free_blocks\") - 1 &&\n                       strncmp(key_str.value, \"num_free_blocks\", key_str.len) == 0) {\n                int64_t val;\n                rc = cbor_value_get_int64(&entry_it.value, &val);\n                zassert_equal(rc, 0, \"Failed to get num_free_blocks value\");\n            } else {\n                zfail(\"Unexpected key in mp_stats entry\");\n            }\n        }\n        zassert_true(name_found, \"Memory pool entry without 'name' field\");\n\n        /* Now, compare the parsed block_name with expected entries */\n        bool matched = false;\n        for (size_t i = 0; i < ARRAY_SIZE(expected_mp_entries); i++) {\n            /* This is the critical comparison that likely failed.\n             * Ensure expected_mp_entries[i].name_len is correct.\n             */\n            if (block_name.len == expected_mp_entries[i].name_len &&\n                strncmp(block_name.value, expected_mp_entries[i].name, block_name.len) == 0) {\n                zassert_false(expected_entry_found[i], \"Duplicate memory pool entry found: %s\", expected_mp_entries[i].name);\n                expected_entry_found[i] = true;\n                matched = true;\n                break;\n            }\n        }\n        zassert_true(matched, \"Unexpected memory pool entry: %.*s\", (int)block_name.len, block_name.value);\n\n        rc = cbor_value_leave_container(&mp_stats_entry_val, &mp_stats_entry_val);\n        zassert_equal(rc, 0, \"Failed to leave mp_stats entry map\");\n        found_entries_count++;\n    }\n\n    /* Verify all expected entries were found */\n    for (size_t i = 0; i < ARRAY_SIZE(expected_mp_entries); i++) {\n        zassert_true(expected_entry_found[i], \"Expected memory pool entry not found: %s\", expected_mp_entries[i].name);\n    }\n    zassert_equal(found_entries_count, ARRAY_SIZE(expected_mp_entries), \"Number of memory pool entries mismatch\");\n\n    rc = cbor_value_leave_container(mp_stats_array_val, &mp_stats_array_val);\n    zassert_equal(rc, 0, \"Failed to leave mp_stats array\");\n}\n\nstatic void test_read(void)\n{\n    struct smp_transport_tx_ctx tx_ctx;\n    struct smp_transport_rx_ctx rx_ctx;\n    int rc;\n\n    smp_transport_init();\n\n    /* Build an os_mgmt_mpstat request. */\n    rc = smp_tx_init(&tx_ctx, MGMT_GROUP_ID_OS, OS_MGMT_MPSTAT, SMP_MGMT_OP_READ);\n    zassert_equal(rc, 0, \"Failed to init SMP TX context\");\n\n    rc = smp_tx_add_empty_request(&tx_ctx);\n    zassert_equal(rc, 0, \"Failed to add empty request\");\n\n    /* Send the request and receive the response. */\n    rc = smp_tx_run(&tx_ctx, &rx_ctx);\n    zassert_equal(rc, 0, \"SMP transaction failed\");\n\n    /* Parse the response. */\n    struct cbor_map_iter it;\n    rc = cbor_value_enter_mapping(&rx_ctx.cbor_rx_val, &it);\n    zassert_equal(rc, 0, \"Failed to enter top-level map\");\n\n    /* Find the \"rc\" field. */\n    rc = cbor_map_iter_next(&it);\n    zassert_equal(rc, 0, \"Failed to get first map entry\");\n    zassert_true(cbor_value_is_text_string(&it.key), \"Expected string key\");\n    zassert_true(cbor_value_is_integer(&it.value), \"Expected integer value\");\n\n    struct cbor_string key_str;\n    rc = cbor_value_get_text_string(&it.key, &key_str);\n    zassert_equal(rc, 0, \"Failed to get key string\");\n    zassert_equal(key_str.len, sizeof(\"rc\") - 1, \"Key length mismatch\");\n    zassert_equal(strncmp(key_str.value, \"rc\", key_str.len), 0, \"Key mismatch\");\n\n    int64_t ret_code;\n    rc = cbor_value_get_int64(&it.value, &ret_code);\n    zassert_equal(rc, 0, \"Failed to get return code\");\n    zassert_equal(ret_code, MGMT_ERR_EOK, \"Expected MGMT_ERR_EOK\");\n\n    /* Find the \"mp_stats\" field. */\n    rc = cbor_map_iter_next(&it);\n    zassert_equal(rc, 0, \"Failed to get next map entry\");\n    zassert_true(cbor_value_is_text_string(&it.key), \"Expected string key\");\n    zassert_true(cbor_value_is_array(&it.value), \"Expected array value\");\n\n    rc = cbor_value_get_text_string(&it.key, &key_str);\n    zassert_equal(rc, 0, \"Failed to get key string\");\n    zassert_equal(key_str.len, sizeof(\"mp_stats\") - 1, \"Key length mismatch\");\n    zassert_equal(strncmp(key_str.value, \"mp_stats\", key_str.len), 0, \"Key mismatch\");\n\n    parse_heap_entries(&it.value); /* Pass the cbor_value for the array */\n\n    rc = cbor_value_leave_container(&rx_ctx.cbor_rx_val, &it);\n    zassert_equal(rc, 0, \"Failed to leave top-level map\");\n\n    smp_transport_uninit();\n}\n\nZTEST_SUITE(os_mgmt_mpstat, NULL, NULL, NULL, NULL, NULL);\n\nZTEST_UNIT(os_mgmt_mpstat, test_read)\n{\n    test_read();\n}\n"
+          },
+          "applied_files": [
+            "tests/subsys/mgmt/mcumgr/os_mgmt_mpstat/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\n[166/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/pipe.c.obj\n[167/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/spinlock_validate.c.obj\n[168/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/sleep.c.obj\n[169/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/scheduler.c.obj\n[170/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeslicing.c.obj\n[171/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[172/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[173/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[174/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[175/179] Linking C static library zephyr/kernel/libkernel.a\n[176/179] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[177/179] Building native simulator runner, and linking final executable\n[178/179] Running utility command for native_runner_executable\n[178/179] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE os_mgmt_mpstat\n===================================================================\nSTART - test_read\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/mgmt/mcumgr/os_mgmt_mpstat/src/main.c:103: parse_heap_entries: (expected_block_name_size not equal to block_name.len)",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/subsys/mgmt/mcumgr/os_mgmt_mpstat/src/main.c"
+          ]
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[166/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/sleep.c.obj\n[167/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/spinlock_validate.c.obj\n[168/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/pipe.c.obj\n[169/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/scheduler.c.obj\n[170/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeslicing.c.obj\n[171/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[172/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[173/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[174/179] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[175/179] Linking C static library zephyr/kernel/libkernel.a\n[176/179] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[177/179] Building native simulator runner, and linking final executable\n[178/179] Running utility command for native_runner_executable\n[178/179] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE os_mgmt_mpstat\n===================================================================\nSTART - test_read\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/mgmt/mcumgr/os_mgmt_mpstat/src/main.c:103: parse_heap_entries: (expected_block_name_size not equal to block_name.len)",
+    "protected_file_count": 6,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_real/b1/v3real_mcumgr_mpstat_map_a64883e",
+    "api_events": [],
+    "started_at": "2026-10-17T02:24:36+00:00",
+    "run_meta": {
+      "code_commit": "e86a76e5a2e6e5088fb194e2e6e51d4f50ef5321",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
