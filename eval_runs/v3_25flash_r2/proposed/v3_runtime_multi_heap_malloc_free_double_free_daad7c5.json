@@ -1,0 +1,345 @@
+[
+  {
+    "case_id": "v3_runtime_multi_heap_malloc_free_double_free_daad7c5",
+    "category": "runtime_crash",
+    "pipeline": "proposed",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 5,
+    "ttr_seconds": 900.0988850593567,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 831,
+            "output_tokens": 1636
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 22874,
+            "output_tokens": 10839
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "The CPU exception observed in the error log, especially within a memory allocation test suite (`multi_heap`), often points to issues with stack management, memory corruption, or incorrect memory access.\n\nUpon reviewing `include/zephyr/arch/riscv/arch.h`, the macros `ARCH_THREAD_STACK_RESERVED` and `ARCH_THREAD_STACK_SIZE_ADJUST` define how thread stacks are sized and allocated, particularly when Physical Memory Protection (PMP) and user-space features are enabled.\n\nThe `K_THREAD_STACK_DEFINE(sym, size)` macro expects `size` to be the *usable* stack size for the thread. However, the Zephyr kernel's `z_setup_new_thread` function subtracts `ARCH_THREAD_STACK_RESERVED` (which includes space for the PMP guard and, in some configurations, the privileged stack) from the *total allocated buffer size* to determine the `thread->stack_info.size` (the usable stack size).\n\nThe current definition of `ARCH_THREAD_STACK_SIZE_ADJUST(size)` for the `!CONFIG_PMP_POWER_OF_TWO_ALIGNMENT` case only rounds up the `size` parameter itself. This means if a user requests a `size` of, say, 512 bytes, and `ARCH_THREAD_STACK_RESERVED` is 64 bytes, the actual usable stack becomes `512 - 64 = 448` bytes. This can lead to stack underflow and CPU exceptions if the thread uses more stack than the reduced usable size.\n\nThe fix involves modifying `ARCH_THREAD_STACK_SIZE_ADJUST` to correctly account for `ARCH_THREAD_STACK_RESERVED` when calculating the *total buffer size* that needs to be allocated. This ensures that the `size` specified by the user for `K_THREAD_STACK_DEFINE` truly represents the *usable* stack space available to the thread.\n\nAdditionally, for the `CONFIG_PMP_POWER_OF_TWO_ALIGNMENT` case, the comment indicates that the privileged stack is \"located in another area of memory\". Therefore, `CONFIG_PRIVILEGED_STACK_SIZE` should not influence the sizing of the main thread's stack buffer. The `MAX` calculation for `ARCH_THREAD_STACK_SIZE_ADJUST` is adjusted to reflect this, ensuring the main stack is sized for the usable stack plus its guard, and aligned appropriately.\n\nThis change ensures that the allocated stack buffer is large enough to accommodate both the reserved areas and the requested usable stack size, preventing potential stack overflows.\n\ninclude/zephyr/arch/riscv/arch.h\n<<<<<<<< SEARCH\n#define ARCH_THREAD_STACK_RESERVED Z_RISCV_STACK_GUARD_SIZE\n#define ARCH_THREAD_STACK_SIZE_ADJUST(size) \\\n\tZ_POW2_CEIL(MAX(MAX(size, CONFIG_PRIVILEGED_STACK_SIZE), \\\n\t\t\tZ_RISCV_STACK_PMP_ALIGN))\n#define ARCH_THREAD_STACK_OBJ_ALIGN(size) \\\n\t\tARCH_THREAD_STACK_SIZE_ADJUST(size)\n\n#else /* !CONFIG_PMP_POWER_OF_TWO_ALIGNMENT */\n\n/* The stack object will contain the PMP guard, the privilege stack, and then\n * the usermode stack buffer in that order:\n *\n * +------------+ <- thread.stack_obj\n * | Guard      | } Z_RISCV_STACK_GUARD_SIZE\n * +------------+\n * | Priv Stack | } CONFIG_PRIVILEGED_STACK_SIZE\n * +------------+ <- thread.stack_info.start\n * | Thread     |\n * | stack      |\n * |            |\n * +............|\n * | TLS        | } thread.stack_info.delta\n * +------------+ <- thread.stack_info.start + thread.stack_info.size\n */\n#define ARCH_THREAD_STACK_RESERVED \\\n\tROUND_UP(Z_RISCV_STACK_GUARD_SIZE + CONFIG_PRIVILEGED_STACK_SIZE, \\\n\t\t Z_RISCV_STACK_PMP_ALIGN)\n#define ARCH_THREAD_STACK_SIZE_ADJUST(size) \\\n\tROUND_UP(size, Z_RISCV_STACK_PMP_ALIGN)\n#define ARCH_THREAD_STACK_OBJ_ALIGN(size)\tZ_RISCV_STACK_PMP_ALIGN\n#endif /* CONFIG_PMP_POWER_OF_TWO_ALIGNMENT */\n========\n#define ARCH_THREAD_STACK_RESERVED Z_RISCV_STACK_GUARD_SIZE\n#define ARCH_THREAD_STACK_SIZE_ADJUST(size)                                    \\\n\tZ_POW2_CEIL(MAX(size + ARCH_THREAD_STACK_RESERVED,                     \\\n\t\t\tZ_RISCV_STACK_PMP_ALIGN))\n#define ARCH_THREAD_STACK_OBJ_ALIGN(size) \\\n\t\tARCH_THREAD_STACK_SIZE_ADJUST(size)\n\n#else /* !CONFIG_PMP_POWER_OF_TWO_ALIGNMENT */\n\n/* The stack object will contain the PMP guard, the privilege stack, and then\n * the usermode stack buffer in that order:\n *\n * +------------+ <- thread.stack_obj\n * | Guard      | } Z_RISCV_STACK_GUARD_SIZE\n * +------------+\n * | Priv Stack | } CONFIG_PRIVILEGED_STACK_SIZE\n * +------------+ <- thread.stack_info.start\n * | Thread     |\n * | stack      |\n * |            |\n * +............|\n * | TLS        | } thread.stack_info.delta\n * +------------+ <- thread.stack_info.start + thread.stack_info.size\n */\n#define ARCH_THREAD_STACK_RESERVED \\\n\tROUND_UP(Z_RISCV_STACK_GUARD_SIZE + CONFIG_PRIVILEGED_STACK_SIZE, \\\n\t\t Z_RISCV_STACK_PMP_ALIGN)\n#define ARCH_THREAD_STACK_SIZE_ADJUST(size)                                    \\\n\tROUND_UP(size + ARCH_THREAD_STACK_RESERVED, Z_RISCV_STACK_PMP_ALIGN)\n#define ARCH_THREAD_STACK_OBJ_ALIGN(size)\tZ_RISCV_STACK_PMP_ALIGN\n#endif /* CONFIG_PMP_POWER_OF_TWO_ALIGNMENT */\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "include/zephyr/arch/riscv/arch.h"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nE:      ra: 80006cb0\nE:    mepc: 80006190\nE: mstatus: 00021800\nE:\nE:      s0: 00050019    s6: 8000b000\nE:      s1: 00050005    s7: 00000000\nE:      s2: 00020088    s8: 00000000\nE:      s3: 8001489c    s9: 00000000\nE:      s4: 8000a000   s10: 00000000\nE:      s5: 8000c000   s11: 00000000\nE:\nE: call trace:\nE:       0: sp: 8000f4f0 ra: 80006190\nE:       1: sp: 8000f510 ra: 80001002\nE:       2: sp: 8000f558 ra: 80000f4c\nE:       3: sp: 8000f560 ra: 800022cc\nE:\nE: >>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0\nE: Current thread: 0x8000d1e8 (unknown)\nE: Halting system",
+          "conflict_tag": null,
+          "analyzer_diagnosis": {
+            "iteration": 1,
+            "reasoning": "The error is a runtime CPU exception, indicating a critical failure in the system's execution. This often points to issues with fundamental hardware configuration, memory management, or stack overflows, which are typically configured via Kconfig or Devicetree. Graph retrieval is needed to inspect these core system configurations. Since no specific peripheral or driver is mentioned, general keywords related to the CPU, memory, and the RISC-V architecture are appropriate.",
+            "error_category": "other",
+            "search_keywords": [
+              "CPU",
+              "memory",
+              "stack",
+              "RISCV"
+            ]
+          },
+          "retrieved_files": [
+            "include/zephyr/arch/riscv/arch.h",
+            "dts/riscv/andes/andes_v5_ae350.dtsi",
+            "boards/sc/scobc_v1/scobc_v1_miv.dts",
+            "dts/riscv/niosv/niosv-m.dtsi",
+            "boards/cdns/swerv/cdns_swerv_s420_64_whisper.dts",
+            "boards/cdns/swerv/cdns_swerv_s420_whisper.dts",
+            "boards/cdns/swerv/cdns_swerv_s400_whisper.dts",
+            "dts/riscv/qemu/virt-riscv.dtsi"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 2,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 831,
+            "output_tokens": 2833
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 20101,
+            "output_tokens": 6824
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "The crash log indicates a \"CPU exception on CPU 0\" in Machine mode (`mstatus: 00021800`). The `mepc` and `ra` registers point to addresses within the kernel's text section. The `multi_heap` tests, especially when `CONFIG_MULTITHREADING` is enabled, rely on thread-safe memory allocation functions (`k_malloc`, `k_free`, etc.). These functions typically use atomic operations to ensure data consistency across threads.\n\nUpon reviewing the provided Device Tree Source (DTS) file `dts/riscv/aesc/nitrogen.dtsi`, the `cpu0` node defines the RISC-V ISA extensions:\n`riscv,isa-extensions = \"i\", \"m\", \"c\", \"zicsr\", \"zifencei\";`\n\nThe \"A\" (Atomic) extension, which provides instructions like `amoswap`, `amomax`, `amomin` used in `include/zephyr/arch/riscv/atomic.h`, is missing from this list. If the CPU attempts to execute these atomic instructions without the \"A\" extension being enabled in the hardware configuration (and declared in the DTS), it will result in an illegal instruction exception, leading to a CPU exception and a fatal error.\n\nThe fix is to add the \"a\" extension to the `riscv,isa-extensions` property in the `cpu0` node of the `dts/riscv/aesc/nitrogen.dtsi` file.\n\ndts/riscv/aesc/nitrogen.dtsi\n<<<<<<<< SEARCH\n\t\t\tcompatible = \"litex,vexriscv-standard\", \"riscv\";\n\t\t\tdevice_type = \"cpu\";\n\t\t\treg = <0>;\n\t\t\triscv,isa-base = \"rv32i\";\n\t\t\triscv,isa-extensions = \"i\", \"m\", \"c\", \"zicsr\", \"zifencei\";\n\t\t\tstatus = \"okay\";\n========\n\t\t\tcompatible = \"litex,vexriscv-standard\", \"riscv\";\n\t\t\tdevice_type = \"cpu\";\n\t\t\treg = <0>;\n\t\t\triscv,isa-base = \"rv32i\";\n\t\t\triscv,isa-extensions = \"i\", \"m\", \"c\", \"a\", \"zicsr\", \"zifencei\";\n\t\t\tstatus = \"okay\";\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "dts/riscv/aesc/nitrogen.dtsi"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nE:      ra: 80006cb0\nE:    mepc: 80006190\nE: mstatus: 00021800\nE:\nE:      s0: 00050019    s6: 8000b000\nE:      s1: 00050005    s7: 00000000\nE:      s2: 00020088    s8: 00000000\nE:      s3: 8001489c    s9: 00000000\nE:      s4: 8000a000   s10: 00000000\nE:      s5: 8000c000   s11: 00000000\nE:\nE: call trace:\nE:       0: sp: 8000f4f0 ra: 80006190\nE:       1: sp: 8000f510 ra: 80001002\nE:       2: sp: 8000f558 ra: 80000f4c\nE:       3: sp: 8000f560 ra: 800022cc\nE:\nE: >>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0\nE: Current thread: 0x8000d1e8 (unknown)\nE: Halting system",
+          "conflict_tag": null,
+          "analyzer_diagnosis": {
+            "iteration": 2,
+            "reasoning": "The error is a 'ZEPHYR FATAL ERROR 0: CPU exception on CPU 0', which is a runtime hardware-level error. According to the rules, errors involving hardware require graph retrieval. While no specific peripheral is named, the exception points to a fundamental issue with the CPU's operation, potentially due to incorrect memory configuration, stack size, or CPU feature enablement, which are controlled by Kconfig and DTS. Therefore, graph retrieval is needed to inspect these configurations.",
+            "error_category": "kconfig",
+            "search_keywords": [
+              "RISC-V",
+              "CPU",
+              "Memory"
+            ]
+          },
+          "retrieved_files": [
+            "include/zephyr/dt-bindings/memory-attr/memory-attr-riscv.h",
+            "arch/riscv/core/pm_s2ram.c",
+            "dts/riscv/openhwgroup/cva6.dtsi",
+            "boards/cdns/swerv/Kconfig.defconfig",
+            "soc/neorv32/Kconfig.soc",
+            "dts/riscv/aesc/nitrogen.dtsi",
+            "arch/riscv/Kconfig",
+            "include/zephyr/arch/riscv/atomic.h"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 3,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 831,
+            "output_tokens": 903
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 10050,
+            "output_tokens": 1779
+          },
+          {
+            "node": "supervisor_compression",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 489,
+            "output_tokens": 140
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "tests/lib/multi_heap/src/test_mheap_api.c\n<<<<<<<< SEARCH\n\t\tzassert_not_null(blocks[i], \"allocation failed\");\n\t\tzassert_true(blocks[i] >= &heap_mem[i][0] &&\n\t\t\t     blocks[i] < &heap_mem[i+1][0],\n\t\t\t     \"allocation not in correct heap\");\n\n\t\tvoid *ptr = sys_multi_heap_realloc(&multi_heap, (void *)(long)i,\n\t\t\tblocks[i], MHEAP_BYTES / 2);\n========\n\t\tzassert_not_null(blocks[i], \"allocation failed\");\n\t\tzassert_true(blocks[i] >= &heap_mem[i][0] &&\n\t\t\t     blocks[i] < (&heap_mem[i][0] + MHEAP_BYTES),\n\t\t\t     \"allocation not in correct heap\");\n\n\t\tvoid *ptr = sys_multi_heap_realloc(&multi_heap, (void *)(long)i,\n\t\t\tblocks[i], MHEAP_BYTES / 2);\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "tests/lib/multi_heap/src/test_mheap_api.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nE:      ra: 80006cae\nE:    mepc: 8000618e\nE: mstatus: 00021800\nE:\nE:      s0: 00050019    s6: 8000b000\nE:      s1: 00050005    s7: 00000000\nE:      s2: 00020088    s8: 00000000\nE:      s3: 8001489c    s9: 00000000\nE:      s4: 8000a000   s10: 00000000\nE:      s5: 8000c000   s11: 00000000\nE:\nE: call trace:\nE:       0: sp: 8000f4f0 ra: 8000618e\nE:       1: sp: 8000f510 ra: 80001000\nE:       2: sp: 8000f558 ra: 80000f4a\nE:       3: sp: 8000f560 ra: 800022ca\nE:\nE: >>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0\nE: Current thread: 0x8000d1e8 (unknown)\nE: Halting system",
+          "conflict_tag": null,
+          "analyzer_diagnosis": {
+            "iteration": 3,
+            "reasoning": "The error is a runtime CPU exception, indicating a low-level hardware or kernel issue. This often stems from incorrect hardware configuration, memory access problems, or a bug in a driver or kernel component. Graph retrieval is needed to inspect the system's hardware and memory configuration. While no specific peripheral is named, the CPU itself is the core component involved in a CPU exception, and memory access issues are a common cause.",
+            "error_category": "other",
+            "search_keywords": [
+              "CPU",
+              "memory"
+            ]
+          },
+          "retrieved_files": [
+            "dts/xtensa/intel/intel_adsp_ace30_ptl.dtsi",
+            "dts/xtensa/sample_controller32.dtsi",
+            "dts/xtensa/nxp/nxp_imxrt700_hifi1.dtsi",
+            "dts/xtensa/intel/intel_adsp_ace40_nvl.dtsi",
+            "dts/arm/infineon/cat1c/xmc7200/xmc7200_m7.dtsi",
+            "dts/xtensa/sample_controller.dtsi",
+            "dts/arm/alif/ensemble/common/ensemble_rtss_he.dtsi",
+            "boards/digilent/arty_a7/arty_a7_designstart_fpga_cortex_m3.dts"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 4,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 831,
+            "output_tokens": 1156
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 22450,
+            "output_tokens": 7793
+          },
+          {
+            "node": "supervisor_compression",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 482,
+            "output_tokens": 124
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "tests/lib/multi_heap/prj.conf\n<<<<<<<< SEARCH\nCONFIG_HEAP_MEM_POOL_SIZE=256\n========\nCONFIG_HEAP_MEM_POOL_SIZE=1024\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "tests/lib/multi_heap/prj.conf"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nE:      ra: 80006cae\nE:    mepc: 8000618e\nE: mstatus: 00021800\nE:\nE:      s0: 00050019    s6: 8000b000\nE:      s1: 00050005    s7: 00000000\nE:      s2: 00020088    s8: 00000000\nE:      s3: 8001489c    s9: 00000000\nE:      s4: 8000a000   s10: 00000000\nE:      s5: 8000c000   s11: 00000000\nE:\nE: call trace:\nE:       0: sp: 8000f4f0 ra: 8000618e\nE:       1: sp: 8000f510 ra: 80001000\nE:       2: sp: 8000f558 ra: 80000f4a\nE:       3: sp: 8000f560 ra: 800022ca\nE:\nE: >>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0\nE: Current thread: 0x8000d1e8 (unknown)\nE: Halting system",
+          "conflict_tag": null,
+          "analyzer_diagnosis": {
+            "iteration": 4,
+            "reasoning": "The log indicates a runtime CPU exception, which is a hardware-level error. While the exact cause isn't specified, such exceptions often stem from incorrect hardware configurations (e.g., memory, interrupts) defined in Kconfig or Devicetree. The presence of `mepc` and `mstatus` registers suggests a RISC-V architecture. Therefore, graph retrieval is needed to inspect relevant hardware configurations.",
+            "error_category": "other",
+            "search_keywords": [
+              "RISC-V"
+            ]
+          },
+          "retrieved_files": [
+            "drivers/interrupt_controller/Kconfig.riscv_aia",
+            "include/zephyr/arch/riscv/elf.h",
+            "arch/riscv/Kconfig",
+            "boards/cdns/swerv/Kconfig.defconfig",
+            "arch/riscv/core/pm_s2ram.c",
+            "include/zephyr/dt-bindings/memory-attr/memory-attr-riscv.h",
+            "soc/wch/ch32v/common/soc_idle.c",
+            "soc/neorv32/Kconfig.soc"
+          ],
+          "restored_files": [
+            "tests/lib/multi_heap/prj.conf"
+          ]
+        }
+      },
+      {
+        "iteration": 5,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 831,
+            "output_tokens": 438
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 22881,
+            "output_tokens": 5352
+          },
+          {
+            "node": "supervisor_compression",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 482,
+            "output_tokens": 124
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "tests/lib/multi_heap/prj.conf\n<<<<<<<< SEARCH\nCONFIG_ZTEST=y\nCONFIG_HEAP_MEM_POOL_SIZE=256\nCONFIG_MULTI_HEAP=y\n========\nCONFIG_ZTEST=y\nCONFIG_HEAP_MEM_POOL_SIZE=2048\nCONFIG_MULTI_HEAP=y\nCONFIG_TEST_EXTRA_STACK_SIZE=1024\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "tests/lib/multi_heap/prj.conf"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nE:      ra: 80006cae\nE:    mepc: 8000618e\nE: mstatus: 00021800\nE:\nE:      s0: 00050019    s6: 8000b000\nE:      s1: 00050005    s7: 00000000\nE:      s2: 00020088    s8: 00000000\nE:      s3: 8001489c    s9: 00000000\nE:      s4: 8000a000   s10: 00000000\nE:      s5: 8000c000   s11: 00000000\nE:\nE: call trace:\nE:       0: sp: 8000f4f0 ra: 8000618e\nE:       1: sp: 8000f510 ra: 80001000\nE:       2: sp: 8000f558 ra: 80000f4a\nE:       3: sp: 8000f560 ra: 800022ca\nE:\nE: >>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0\nE: Current thread: 0x8000d1e8 (unknown)\nE: Halting system",
+          "conflict_tag": null,
+          "analyzer_diagnosis": {
+            "iteration": 5,
+            "reasoning": "The error log indicates a 'ZEPHYR FATAL ERROR 0: CPU exception on CPU 0', which is a runtime crash. This type of error often points to low-level issues such as invalid memory access, stack overflow, or misconfigured hardware/interrupts. Graph retrieval is needed to inspect the system's configuration related to CPU, memory, and exception handling, as the exact cause is not specified in the log beyond a generic CPU exception.",
+            "error_category": "other",
+            "search_keywords": [
+              "CPU",
+              "memory",
+              "interrupts",
+              "exception handling"
+            ]
+          },
+          "retrieved_files": [
+            "include/zephyr/arch/common/exc_handle.h",
+            "include/zephyr/arch/arm/error.h",
+            "include/zephyr/arch/arm/exception.h",
+            "include/zephyr/arch/x86/intel64/arch.h",
+            "arch/xtensa/core/vector_handlers.c",
+            "include/zephyr/irq.h",
+            "include/zephyr/arch/arm64/error.h",
+            "include/zephyr/arch/arc/v2/exception.h"
+          ],
+          "restored_files": [
+            "tests/lib/multi_heap/prj.conf"
+          ]
+        }
+      }
+    ],
+    "first_retrieval_files": [
+      "include/zephyr/arch/riscv/arch.h",
+      "dts/riscv/andes/andes_v5_ae350.dtsi",
+      "boards/sc/scobc_v1/scobc_v1_miv.dts",
+      "dts/riscv/niosv/niosv-m.dtsi",
+      "boards/cdns/swerv/cdns_swerv_s420_64_whisper.dts",
+      "boards/cdns/swerv/cdns_swerv_s420_whisper.dts",
+      "boards/cdns/swerv/cdns_swerv_s400_whisper.dts",
+      "dts/riscv/qemu/virt-riscv.dtsi"
+    ],
+    "initial_error_log": "[Fallback Raw Tail]\nE:      ra: 80006cb0\nE:    mepc: 80006190\nE: mstatus: 00021800\nE:\nE:      s0: 00050019    s6: 8000b000\nE:      s1: 00050005    s7: 00000000\nE:      s2: 00020088    s8: 00000000\nE:      s3: 8001489c    s9: 00000000\nE:      s4: 8000a000   s10: 00000000\nE:      s5: 8000c000   s11: 00000000\nE:\nE: call trace:\nE:       0: sp: 8000f4f0 ra: 80006190\nE:       1: sp: 8000f510 ra: 80001002\nE:       2: sp: 8000f558 ra: 80000f4c\nE:       3: sp: 8000f560 ra: 800022cc\nE:\nE: >>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0\nE: Current thread: 0x8000d1e8 (unknown)\nE: Halting system",
+    "protected_file_count": 6,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/proposed/v3_runtime_multi_heap_malloc_free_double_free_daad7c5",
+    "api_events": [],
+    "started_at": "2026-10-16T05:39:11+00:00",
+    "run_meta": {
+      "code_commit": "e86a76e5a2e6e5088fb194e2e6e51d4f50ef5321",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
