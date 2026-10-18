@@ -12,7 +12,8 @@ from core.state import ZephyrAgentState
 from tools.patch_applier import PatchApplier
 from tools.log_filter import LogFilter
 from tools.qemu_oracle import QemuOracle
-from tools.devops_analyzer import classify_build_failure, annotate_log_with_classification
+from tools.devops_analyzer import (FAILED_UNIT_HINT, annotate_log_with_classification, classify_build_failure,
+                                   extract_failed_units, failed_units_note)
 
 # 需要呼叫 LLM 的代理人節點邏輯都搬到 agents/*.py 了 (跟 README 描述的架構
 # 對齊)；ApplyPatch/StaticCheck/DevOps/QA 這幾個節點雖然對應提案
@@ -242,7 +243,10 @@ def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
         return {"status": "success", "resolved": True, "compiled": compiled, "log": "Zephyr OS successfully booted."}
 
     return {"status": eval_result["status"], "resolved": False, "compiled": compiled,
-            "log": log_filter.compress_log(eval_result["log"])}
+            "log": log_filter.compress_log(eval_result["log"]),
+            # 只有 Proposed 的 DevOps Expert 會用 (見 tools/devops_analyzer.extract_failed_units)。
+            # Used only by Proposed's DevOps Expert (see tools/devops_analyzer.extract_failed_units).
+            "failed_units": extract_failed_units(eval_result["log"])}
 
 
 def with_last_build_log(message: str, last_build_log: str, note: str) -> str:
@@ -442,6 +446,8 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
     if not eval_result["compiled"]:
         conflict_tag = classify_build_failure(eval_result["log"])
         annotated_log = annotate_log_with_classification(eval_result["log"])
+        if FAILED_UNIT_HINT:
+            annotated_log = failed_units_note(eval_result.get("failed_units") or []) + annotated_log
         print(f"   💥 Build failed (status: {eval_result['status']})"
               + (f", the log pattern looks like the \"{conflict_tag}\" category" if conflict_tag else ""))
         return {

@@ -161,6 +161,42 @@ def test_proposed_devops_reminder_after_restore():
     assert "tests/app/CMakeLists.txt" in out["current_error_log"] and "Note" not in out["last_build_log"]
 
 
+def test_failed_units_extraction():
+    from tools.devops_analyzer import extract_failed_units, failed_units_note
+    raw = ("[1/9] Building C object x\n"
+           "FAILED: CMakeFiles/app.dir/src/main.c.obj\n"
+           "/usr/bin/gcc -DKERNEL -I/zephyrproject/zephyr/include -o CMakeFiles/app.dir/src/main.c.obj "
+           "-c /zephyrproject/zephyr/tests/lib/foo/src/main.c\n"
+           "/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:299:26: error: x\n"
+           "FAILED: zephyr/zephyr_pre0.elf zephyr/zephyr_pre0.map\n"
+           "FAILED: zephyr/kernel/CMakeFiles/kernel.dir/sem.c.obj\n"
+           "ccache gcc -c /zephyrproject/zephyr/kernel/sem.c -o x\n")
+    assert extract_failed_units(raw) == ["tests/lib/foo/src/main.c", "kernel/sem.c"]
+    note = failed_units_note(["tests/lib/foo/src/main.c"])
+    assert "/zephyrproject/zephyr/tests/lib/foo/src/main.c" in note
+    assert failed_units_note([]) == "" and extract_failed_units("") == []
+
+
+def test_proposed_devops_failed_unit_note():
+    import core.workflow as wf
+    ws = os.path.abspath(tempfile.mkdtemp())
+
+    def fake_eval(ws_, board, app, test):
+        return {"status": "eof_no_boot", "resolved": False, "compiled": False, "log": "error: boom",
+                "failed_units": ["tests/app/src/main.c"]}
+
+    orig = wf.evaluate_repair_attempt
+    wf.evaluate_repair_attempt = fake_eval
+    try:
+        out = wf.devops_node({"workspace_path": ws, "target_app": ".", "board": "native_sim", "iterations": 1,
+                              "max_iterations": 5, "applied_files": [], "pending_token_usage": [],
+                              "attempt_history": []})
+    finally:
+        wf.evaluate_repair_attempt = orig
+    assert "/zephyrproject/zephyr/tests/app/src/main.c" in out["current_error_log"]
+    assert out["current_error_log"].index("DevOps Expert: compilation failed") < out["current_error_log"].index("error: boom")
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):

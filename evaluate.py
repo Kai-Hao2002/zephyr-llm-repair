@@ -45,6 +45,7 @@ from dotenv import load_dotenv
 
 from core.state import create_initial_state, ZephyrAgentState
 from core.trajectory import clip_text
+from tools.devops_analyzer import FAILED_UNIT_HINT, extract_failed_units, failed_units_note
 from core.protected_files import register as register_protected_files, unregister as unregister_protected_files
 from core import llm_retry
 from core.llm_retry import LLMHangError, is_daily_quota, is_transient, pop_events, set_strict_fallbacks
@@ -509,6 +510,10 @@ def _run_case_in_workspace(case: Dict[str, Any], workspace_path: str, max_iters:
                 "The case may have been invalidated by environment drift; refusing to hand the agent a project that is not actually broken."
             )
         initial_log_override = LogFilter().compress_log(repro_result["log"])
+        # Proposed 的 DevOps Expert：初始 log 也附上出錯的編譯單元 (2026-10-18)；其他 pipeline 不變。
+        # Proposed's DevOps Expert also adds the failing compilation units to the initial log (2026-10-18).
+        if pipeline == "proposed" and FAILED_UNIT_HINT:
+            initial_log_override = failed_units_note(extract_failed_units(repro_result["log"])) + initial_log_override
 
     state = build_agent_initial_state(case, workspace_path, max_iters, initial_log_override)
 
@@ -638,6 +643,7 @@ def collect_run_meta() -> Dict[str, Any]:
         "docker_image_id": _command_output(["docker", "images", "zephyr-sandbox", "--no-trunc", "--format", "{{.ID}}"]),
         "strict_fallbacks": True,
         "free_tier_retry_policy": llm_retry.FREE_TIER,
+        "proposed_failed_unit_hint": FAILED_UNIT_HINT,
         # 用了哪把 Gemini 金鑰 (只記 SHA-256 前 8 碼，不記金鑰本身)；額度用完會換金鑰
         # (tools/run_with_key_rotation.sh)。Which Gemini key was used (first 8 hex of its
         # SHA-256 only, never the key); keys rotate when a daily quota runs out.

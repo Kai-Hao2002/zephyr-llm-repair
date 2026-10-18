@@ -29,8 +29,9 @@ the corresponding commit message). A missed or wrong classification
 (classify_build_failure returning None) doesn't change existing behavior
 at all — this is a pure value-add, not load-bearing logic.
 """
+import os
 import re
-from typing import Optional
+from typing import List, Optional
 
 # 每個 pattern 對應到一個簡短的分類標籤，依序嘗試 (愈前面的愈具體/罕見，
 # 排前面才不會被後面較通用的 pattern 搶先命中)。
@@ -63,3 +64,47 @@ def annotate_log_with_classification(log: str) -> str:
     if tag is None:
         return log
     return log + f"\n\n[DevOps Expert analysis: the log pattern looks like a build failure of the \"{tag}\" category.]"
+
+
+# 出錯的編譯單元 (2026-10-18，Proposed 優化)：ninja 的 "FAILED: ...c.obj" 下一行是編譯指令，其中
+# "-c <原始碼>" 就是正在編譯的檔案。LogFilter 只保留錯誤行，錯誤若在標頭檔 (例如測試檔少了 '}'，gcc 在之後
+# include 的 ztest_test.h 報錯)，模型就看不到真正被編譯的檔案。v3 r2：Proposed 有 6 筆 c_syntax 因此失敗。
+# Failing compilation units (2026-10-18, Proposed optimization): the line after ninja's "FAILED: ...c.obj"
+# is the compile command, whose "-c <source>" is the file being compiled. LogFilter keeps only error lines,
+# so when the error is reported in a header (e.g. a test file missing '}' makes gcc complain inside the
+# later-included ztest_test.h) the model never sees which file was being compiled. v3 r2: 6 Proposed
+# c_syntax failures.
+_FAILED_OBJ_RE = re.compile(r"^FAILED: \S+\.(?:c|cc|cpp|S)\.obj\b")
+_COMPILE_SRC_RE = re.compile(r"\s-c\s+(\S+\.(?:c|cc|cpp|S))(?:\s|$)")
+_MAX_FAILED_UNITS = 5
+# 開關 (ablation 用；預設開啟，run_meta 會記錄)。Switch for ablations (on by default; recorded in run_meta).
+FAILED_UNIT_HINT = os.environ.get("ZEPHYR_FAILED_UNIT_HINT", "1").strip().lower() not in ("0", "false", "no")
+
+
+def extract_failed_units(raw_log: str) -> List[str]:
+    """原始建置 log 裡 ninja 編譯失敗的原始碼檔 (相對 Zephyr 根目錄，去重、保留順序，最多 5 個)。
+    Source files whose compilation ninja reported as FAILED (Zephyr-root-relative, deduplicated, in order, max 5)."""
+    units: List[str] = []
+    lines = (raw_log or "").splitlines()
+    for i, line in enumerate(lines):
+        if not _FAILED_OBJ_RE.match(line.strip()):
+            continue
+        for nxt in lines[i + 1:i + 3]:
+            m = _COMPILE_SRC_RE.search(nxt)
+            if m:
+                path = m.group(1).replace("/zephyrproject/zephyr/", "", 1)
+                if path not in units:
+                    units.append(path)
+                break
+        if len(units) >= _MAX_FAILED_UNITS:
+            break
+    return units
+
+
+def failed_units_note(units: List[str]) -> str:
+    """給 Analyzer/Patch Expert 的一段說明；沒有時回傳空字串。A note for Analyzer/Patch Expert, or ''."""
+    if not units:
+        return ""
+    return ("[DevOps Expert: compilation failed while compiling these source files (from the ninja build "
+            "output); errors reported inside headers were raised while compiling them:\n"
+            + "\n".join(f"- /zephyrproject/zephyr/{u}" for u in units) + "]\n\n")
