@@ -57,7 +57,7 @@ from tools.fault_injector import MUTATE_SCRIPT_HOST_PATH, MUTATE_SCRIPT_CONTAINE
 from tools.qemu_oracle import QemuOracle
 from tools.log_filter import LogFilter
 
-PIPELINE_CHOICES = ("proposed", "b1", "b2", "b3")
+PIPELINE_CHOICES = ("proposed", "b1", "b2", "b3", "openhands")
 MODEL_PROVIDER_CHOICES = ("gemini", "anthropic", "openai")
 
 load_dotenv()
@@ -566,6 +566,13 @@ def _run_case_in_workspace(case: Dict[str, Any], workspace_path: str, max_iters:
         final_status, total_iterations = result["final_status"], result["iterations"]
         iteration_log = result.get("iteration_log", [])
         first_retrieval_files = result.get("first_retrieval_files")
+    elif pipeline == "openhands":
+        # OpenHands baseline (2026-10-18)：見 core/openhands_pipeline.py。OpenHands baseline; see that module.
+        from core.openhands_pipeline import run_openhands
+        result = run_openhands(state)
+        final_status, total_iterations = result["final_status"], result["iterations"]
+        iteration_log = result.get("iteration_log", [])
+        first_retrieval_files = None
     else:
         raise ValueError(f"unknown --pipeline '{pipeline}', expected one of {PIPELINE_CHOICES}")
 
@@ -590,6 +597,7 @@ def _run_case_in_workspace(case: Dict[str, Any], workspace_path: str, max_iters:
         "initial_error_log": clip_text(state["current_error_log"]),
         "protected_file_count": protected_count,
         "workspace_path": workspace_path,
+        **({"openhands": result["openhands"]} if pipeline == "openhands" else {}),
     }
 
 
@@ -644,6 +652,12 @@ def collect_run_meta() -> Dict[str, Any]:
         "strict_fallbacks": True,
         "free_tier_retry_policy": llm_retry.FREE_TIER,
         "proposed_failed_unit_hint": FAILED_UNIT_HINT,
+        # OpenHands baseline 的設定 (只在 --pipeline openhands 時有意義)。OpenHands settings (used only by that pipeline).
+        "openhands": {"image": os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z1"),
+                      "image_id": _command_output(["docker", "images", os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z1"),
+                                                   "--no-trunc", "--format", "{{.ID}}"]),
+                      "max_steps": int(os.environ.get("ZEPHYR_OH_MAX_STEPS", "50")),
+                      "timeout_min": float(os.environ.get("ZEPHYR_OH_TIMEOUT_MIN", "40"))},
         # 用了哪把 Gemini 金鑰 (只記 SHA-256 前 8 碼，不記金鑰本身)；額度用完會換金鑰
         # (tools/run_with_key_rotation.sh)。Which Gemini key was used (first 8 hex of its
         # SHA-256 only, never the key); keys rotate when a daily quota runs out.
