@@ -103,6 +103,64 @@ def test_angle_bracket_path_is_accepted():
     assert r["success"] and r["applied_files"] == ["src/a.c"] and open(os.path.join(ws, "src/a.c")).read() == "y;\n"
 
 
+def test_restore_reminder_and_peek():
+    from core import protected_files as pf
+    assert pf.restore_reminder([]) == ""
+    msg = pf.restore_reminder(["tests/app/prj.conf"])
+    assert "tests/app/prj.conf" in msg and "reverted" in msg
+    ws = os.path.abspath(tempfile.mkdtemp())
+    pf._restored_this_iteration[ws] = ["tests/app/prj.conf"]
+    assert pf.peek_restored(ws) == ["tests/app/prj.conf"] and pf.peek_restored(ws) == ["tests/app/prj.conf"]
+    assert pf.pop_restored(ws) == ["tests/app/prj.conf"] and pf.peek_restored(ws) == []
+
+
+def test_b3_reminder_after_restore():
+    from core import protected_files as pf
+    ws = tempfile.mkdtemp()
+    open(os.path.join(ws, "a.c"), "w").write("bad;\n")
+    seen = []
+
+    def fake_gen(error_log, files, history=""):
+        seen.append(error_log)
+        return "a.c\n<<<<<<<< SEARCH\nbad;\n========\nbad;\n>>>>>>>> REPLACE", {"node": "b3", "input_tokens": 1, "output_tokens": 1}
+
+    def fake_eval(ws_, board, app, test):
+        pf._restored_this_iteration[os.path.abspath(ws)] = ["tests/app/prj.conf"]
+        return {"status": "crash", "resolved": False, "compiled": True, "log": "Assertion failed"}
+
+    orig = (bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files)
+    bp.b3_generate_patch, bp.evaluate_repair_attempt = fake_gen, fake_eval
+    bp._read_context_files = lambda *a, **k: ""
+    try:
+        bp.run_b3({"workspace_path": ws, "target_app": ".", "board": "native_sim", "current_error_log": "init"}, 2)
+    finally:
+        bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files = orig
+    assert seen[0] == "init"
+    assert seen[1].startswith("[Note: your previous patch modified") and "tests/app/prj.conf" in seen[1]
+    assert seen[1].endswith("Assertion failed")
+
+
+def test_proposed_devops_reminder_after_restore():
+    import core.workflow as wf
+    from core import protected_files as pf
+    ws = os.path.abspath(tempfile.mkdtemp())
+
+    def fake_eval(ws_, board, app, test):
+        pf._restored_this_iteration[ws] = ["tests/app/CMakeLists.txt"]
+        return {"status": "eof_no_boot", "resolved": False, "compiled": False, "log": "error: boom"}
+
+    orig = wf.evaluate_repair_attempt
+    wf.evaluate_repair_attempt = fake_eval
+    try:
+        out = wf.devops_node({"workspace_path": ws, "target_app": ".", "board": "native_sim", "iterations": 1,
+                              "max_iterations": 5, "applied_files": [], "pending_token_usage": [],
+                              "attempt_history": []})
+    finally:
+        wf.evaluate_repair_attempt = orig
+    assert out["current_error_log"].startswith("[Note: your previous patch modified")
+    assert "tests/app/CMakeLists.txt" in out["current_error_log"] and "Note" not in out["last_build_log"]
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):

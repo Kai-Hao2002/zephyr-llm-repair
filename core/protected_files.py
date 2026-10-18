@@ -238,3 +238,28 @@ def pop_restored(workspace_path: str) -> List[str]:
     """取出並清空這一輪還原過的檔案 (寫進軌跡的 restored_files)。
     Returns and clears the files restored this iteration (the trajectory's restored_files)."""
     return _restored_this_iteration.pop(os.path.abspath(workspace_path), [])
+
+
+def peek_restored(workspace_path: str) -> List[str]:
+    """這一輪到目前為止還原過的檔案，不清空 (pop_restored 寫軌跡時才清空)。
+    Files restored so far this iteration, without clearing (pop_restored clears when the trajectory is written)."""
+    return list(_restored_this_iteration.get(os.path.abspath(workspace_path), []))
+
+
+def restore_reminder(restored: List[str]) -> str:
+    """
+    規格檔被還原時給 agent 的提醒 (2026-10-18，教授建議)。被還原的都是受保護檔案、不是注入檔，列出檔名
+    只告訴 agent「這些不是缺陷所在」；B3/Proposed 本來就看得到 target_app 底下的檔案內容，修改沒留下來
+    本來就看得出來，這段只是讓它更明顯。違反規格時不能用這個 (那時出問題的就是注入檔)。
+    Reminder for the agent when specification files were reverted (2026-10-18, advisor's suggestion).
+    Reverted files are protected, never injected, so naming them only tells the agent "the defect is not
+    here"; B3/Proposed already see target_app file contents, so a vanished edit was observable anyway —
+    this just makes it explicit. Not for spec violations (there the problem is the injected file itself).
+    """
+    if not restored:
+        return ""
+    return ("[Note: your previous patch modified or added files that are part of the test specification: "
+            + ", ".join(restored)
+            + ". These changes were reverted before building and had no effect; the result below is without them. "
+              "Fix the defect somewhere else.]\n\n")
+

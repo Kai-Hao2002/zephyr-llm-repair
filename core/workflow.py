@@ -39,7 +39,8 @@ from agents.supervisor import (
 )
 from tools.static_checker import StaticChecker
 from core.trajectory import build_trajectory
-from core.protected_files import check_test_integrity, pop_restored, restore as restore_protected_files
+from core.protected_files import (check_test_integrity, peek_restored, pop_restored, restore_reminder,
+                                  restore as restore_protected_files)
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -234,9 +235,10 @@ def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
             logging.getLogger(__name__).warning("Test integrity violation: %s", "; ".join(violations))
             return {"status": "test_integrity_violation", "resolved": False, "compiled": True,
                     "log": "[Verdict: FAILED. The suite passed, but test or specification code was changed "
-                           "(assertions removed, tests skipped/forced to pass, or test logic/expected values "
-                           "altered), so this does not count as a fix. Fix the actual defect without changing "
-                           "what the tests check or expect.]"}
+                           "(assertions removed, tests skipped/forced to pass, or test logic, expected values, "
+                           "thread priorities, timing or the test scenario altered), so this does not count as a "
+                           "fix. Do not change what the tests check or expect. If the defect itself is in a test "
+                           "file, change only the faulty statement and leave the rest of the test as it was.]"}
         return {"status": "success", "resolved": True, "compiled": compiled, "log": "Zephyr OS successfully booted."}
 
     return {"status": eval_result["status"], "resolved": False, "compiled": compiled,
@@ -343,7 +345,7 @@ def static_check_node(state: ZephyrAgentState) -> Dict[str, Any]:
 
     print("   ⚠️ Static analysis found problems; sending the patch straight back for regeneration and skipping the full build this time.")
     return {
-        "current_error_log": with_last_build_log(
+        "current_error_log": restore_reminder(peek_restored(workspace_path)) + with_last_build_log(
             result["log"], state.get("last_build_log", ""),
             "from before this patch; the patch is applied but was not built"),
         "error_type": "static_check_failed",
@@ -443,7 +445,7 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
         print(f"   💥 Build failed (status: {eval_result['status']})"
               + (f", the log pattern looks like the \"{conflict_tag}\" category" if conflict_tag else ""))
         return {
-            "current_error_log": annotated_log,
+            "current_error_log": restore_reminder(peek_restored(workspace_path)) + annotated_log,
             "last_build_log": annotated_log,
             "error_type": eval_result["status"],
             "iterations": current_iter,
@@ -490,7 +492,7 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
     if eval_result["status"] == "missing_required_test":
         print(f"   ⚠️ [QA] The suite reported success, but the target test '{required_pass_test}' did not really pass. The patch looks like it games the check (deleting/skipping the test), so this does not count as a fix.")
         return {
-            "current_error_log": eval_result["log"],
+            "current_error_log": restore_reminder(peek_restored(state.get("workspace_path"))) + eval_result["log"],
             "last_build_log": eval_result["log"],
             "error_type": "missing_required_test",
             "iterations": current_iter,
@@ -524,7 +526,7 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
 
     print(f"   💥 [QA] Runtime verification failed (status: {eval_result['status']}), filtering the log...")
     return {
-        "current_error_log": eval_result["log"],
+        "current_error_log": restore_reminder(peek_restored(state.get("workspace_path"))) + eval_result["log"],
         "last_build_log": eval_result["log"],
         "error_type": eval_result["status"],
         "iterations": current_iter,

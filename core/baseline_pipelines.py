@@ -38,7 +38,7 @@ from typing import Any, Dict, List
 from core.state import ZephyrAgentState
 from core.workflow import evaluate_repair_attempt, with_last_build_log
 from core.trajectory import build_trajectory
-from core.protected_files import pop_restored
+from core.protected_files import pop_restored, restore_reminder
 from tools.patch_applier import PatchApplier
 from agents.patch_expert import collect_relevant_context_paths, MAX_PATCH_CONTEXT_CHARS
 from agents.baselines import b1_generate_full_file_patch, b2_generate_patch, b3_generate_patch
@@ -252,10 +252,14 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
                     "iteration_log": iteration_log}
 
         print(f"   💥 Build/run failed (status: {eval_result['status']})")
-        error_log = last_build_log = eval_result["log"]
+        # 規格檔被還原時提醒 agent (2026-10-18，見 core/protected_files.restore_reminder)。
+        # Remind the agent when specification files were reverted (2026-10-18; see core/protected_files.restore_reminder).
+        reminder = restore_reminder(iteration_log[-1]["trajectory"].get("restored_files") or [])
+        last_build_log = eval_result["log"]
+        error_log = reminder + eval_result["log"]
         history.append({"iteration": current_iter, "patch": patch_text,
                         "outcome": f"applied to {apply_result['applied_files']}; build/run failed with status {eval_result['status']}",
-                        "log": eval_result["log"]})
+                        "log": error_log})
         if current_iter >= max_iters:
             return {"final_status": "failed_max_retries", "iterations": current_iter,
                     "error_type": eval_result["status"], "iteration_log": iteration_log}
