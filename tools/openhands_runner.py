@@ -19,6 +19,7 @@ from LLM_API_KEY and is never written anywhere.
 import argparse
 import json
 import os
+import sys
 import threading
 import time
 from typing import Any, Dict, List
@@ -30,6 +31,27 @@ from openhands.sdk.event import ActionEvent, ObservationEvent
 from openhands.tools.file_editor import FileEditorTool
 from openhands.tools.terminal import TerminalTool
 from openhands.workspace import DockerWorkspace
+import openhands.workspace.docker.workspace as _oh_docker_ws
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from egress_proxy import DEFAULT_ALLOWED, start_proxy  # noqa: E402
+
+# 網路隔離 (2026-10-18)：映像的 netlock-entrypoint 用 iptables 擋掉所有對外連線，再拿掉 NET_ADMIN 才啟動
+# agent-server。設定規則需要容器啟動時有 NET_ADMIN，SDK 的 DockerWorkspace 沒有 cap_add 選項，所以只在啟動
+# agent-server 容器的那一次 `docker run` 加上 --cap-add NET_ADMIN。
+# Network isolation (2026-10-18): the image's netlock-entrypoint blocks all outgoing traffic with iptables and
+# drops NET_ADMIN before starting the agent-server. Setting the rules needs NET_ADMIN at container start and the
+# SDK's DockerWorkspace has no cap_add option, so --cap-add NET_ADMIN is added to the agent-server's docker run only.
+_orig_execute_command = _oh_docker_ws.execute_command
+
+
+def _execute_with_net_admin(cmd, *a, **kw):
+    if isinstance(cmd, list) and cmd[:2] == ["docker", "run"] and any(str(x).startswith("agent-server-") for x in cmd):
+        cmd = cmd[:2] + ["--cap-add", "NET_ADMIN"] + cmd[2:]
+    return _orig_execute_command(cmd, *a, **kw)
+
+
+_oh_docker_ws.execute_command = _execute_with_net_admin
 
 _OBS_CLIP = 2000
 
@@ -61,6 +83,8 @@ def main() -> None:
     ap.add_argument("--timeout-min", type=float, default=40)
     ap.add_argument("--llm-timeout", type=int, default=300)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--allow-host", action="append", default=[],
+                    help="host:port the agent-server may reach through the allowlist proxy (the LLM API)")
     args = ap.parse_args()
 
     task = open(args.task_file, encoding="utf-8").read()
@@ -79,7 +103,18 @@ def main() -> None:
     # Mounted at /zephyrproject/zephyr: the image's ZEPHYR_BASE points there (see build_devops_docker_cmd).
     # The agent-server runs `git init` (empty repo, for its Changes view) in the working dir, so the working dir
     # is /workspace/project outside the workspace; the task tells the agent to cd into the app first.
+    # 網路隔離：容器只連得到主機上的白名單代理 (tools/egress_proxy.py)，代理只放行 LLM API。
+    # Network isolation: the container can only reach the host-side allowlist proxy, which only allows the LLM API.
+    proxy_port, stop_proxy = start_proxy(args.allow_host or DEFAULT_ALLOWED)
+    proxy_url = f"http://host.docker.internal:{proxy_port}"
+    for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        os.environ[k] = proxy_url
+    os.environ["NO_PROXY"] = os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
+    os.environ["OH_PROXY_HOST"], os.environ["OH_PROXY_PORT"] = "host.docker.internal", str(proxy_port)
+    out["egress_allowed"] = sorted(args.allow_host or DEFAULT_ALLOWED)
     with DockerWorkspace(server_image=args.image, host_port=None,
+                         forward_env=["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
+                                      "OH_PROXY_HOST", "OH_PROXY_PORT"],
                          volumes=[f"{os.path.abspath(args.workspace)}:/zephyrproject/zephyr"],
                          working_dir="/workspace/project",
                          health_check_timeout=300.0) as workspace:
@@ -129,6 +164,10 @@ def main() -> None:
             conversation.close()
         except Exception:  # noqa: BLE001
             pass
+    proxy_log = stop_proxy()
+    out["egress_log"] = {"allowed": sum(1 for k, _ in proxy_log if k == "allowed"),
+                         "denied": [t for k, t in proxy_log if k == "denied"][:50],
+                         "upstream_errors": [t for k, t in proxy_log if k == "upstream_error"][:20]}
     out["events"] = events
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=1)

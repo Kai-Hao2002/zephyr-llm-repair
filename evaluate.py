@@ -656,8 +656,8 @@ def collect_run_meta() -> Dict[str, Any]:
         # Proposed 的 Graph RAG (每筆案例現場建圖，graph_rag/case_graph.py)。Proposed's per-case Graph RAG.
         "proposed_graph_rag": GRAPH_RAG,
         # OpenHands baseline 的設定 (只在 --pipeline openhands 時有意義)。OpenHands settings (used only by that pipeline).
-        "openhands": {"image": os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z1"),
-                      "image_id": _command_output(["docker", "images", os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z1"),
+        "openhands": {"image": os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z2"),
+                      "image_id": _command_output(["docker", "images", os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z2"),
                                                    "--no-trunc", "--format", "{{.ID}}"]),
                       "max_steps": int(os.environ.get("ZEPHYR_OH_MAX_STEPS", "50")),
                       "timeout_min": float(os.environ.get("ZEPHYR_OH_TIMEOUT_MIN", "40"))},

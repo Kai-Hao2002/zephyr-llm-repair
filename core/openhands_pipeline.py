@@ -36,8 +36,9 @@ OH_PYTHON = os.environ.get("ZEPHYR_OH_PYTHON", os.path.join(_REPO, "venv_oh", "b
 # "PROJECT EXECUTION ..." 就停掉 QEMU)。建置方式見 tools/openhands_image/README.md。
 # zephyr-oh-agent:1.55.1 = the OpenHands agent-server (SDK v1.55.1) on top of zephyr-sandbox; -z1 adds a layer
 # that clears the agent-server's LD_LIBRARY_PATH (it crashes the SDK's dtc) and provides zephyr-run (build + run,
-# stopping QEMU at "PROJECT EXECUTION ..."). See tools/openhands_image/README.md for how they are built.
-OH_IMAGE = os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z1")
+# stopping QEMU at "PROJECT EXECUTION ..."). -z2 (default) adds the network lock: iptables drops all outgoing
+# traffic and CAP_NET_ADMIN is dropped before the agent-server starts (2026-10-18). See tools/openhands_image/README.md.
+OH_IMAGE = os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z2")
 # 每筆案例的預算 (2026-10-18 建議值)：50 步、40 分鐘。其他 pipeline 最多 5 次 build；OpenHands 可以
 # 自己 build 任意次，這兩個上限讓它的成本可控。
 # Per-case budget (proposed 2026-10-18): 50 steps, 40 minutes. Other pipelines get at most 5 builds;
@@ -46,6 +47,9 @@ OH_MAX_STEPS = int(os.environ.get("ZEPHYR_OH_MAX_STEPS", "50"))
 OH_TIMEOUT_MIN = float(os.environ.get("ZEPHYR_OH_TIMEOUT_MIN", "40"))
 
 _KEY_ENV = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
+# 網路隔離下 agent-server 唯一可以連的地方 (經主機的白名單代理)。The only egress allowed under the network lock.
+_LLM_API_HOST = {"gemini": "generativelanguage.googleapis.com:443", "anthropic": "api.anthropic.com:443",
+                 "openai": "api.openai.com:443"}
 _SKIP_DIRS = {".cache", "__pycache__", ".git"}
 _MAX_RECORDED_FILES = 50
 _MAX_RECORDED_BYTES = 300_000
@@ -119,7 +123,8 @@ def run_openhands(state: Dict[str, Any]) -> Dict[str, Any]:
         cmd = [OH_PYTHON, os.path.join(_REPO, "tools", "openhands_runner.py"),
                "--workspace", workspace, "--target-app", state["target_app"], "--task-file", task_file,
                "--model", litellm_model(), "--image", OH_IMAGE, "--max-steps", str(OH_MAX_STEPS),
-               "--timeout-min", str(OH_TIMEOUT_MIN), "--out", out_file]
+               "--timeout-min", str(OH_TIMEOUT_MIN), "--out", out_file,
+               "--allow-host", _LLM_API_HOST[get_provider()]]
         env = dict(os.environ, LLM_API_KEY=os.environ[key_env])
         proc = subprocess.run(cmd, env=env, capture_output=True, text=True,
                               timeout=OH_TIMEOUT_MIN * 60 + 900)
@@ -149,6 +154,6 @@ def run_openhands(state: Dict[str, Any]) -> Dict[str, Any]:
         "first_retrieval_files": None,
         "openhands": {k: oh.get(k) for k in ("status", "error", "steps", "llm_calls", "input_tokens",
                                               "output_tokens", "cost", "wall_seconds", "model", "image",
-                                              "max_steps", "timeout_min")}
+                                              "max_steps", "timeout_min", "egress_allowed", "egress_log")}
                      | {"changed_files": changed, "final_contents": contents, "events": oh.get("events", [])},
     }
