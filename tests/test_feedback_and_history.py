@@ -185,14 +185,17 @@ def test_proposed_devops_failed_unit_note():
         return {"status": "eof_no_boot", "resolved": False, "compiled": False, "log": "error: boom",
                 "failed_units": ["tests/app/src/main.c"]}
 
-    orig = wf.evaluate_repair_attempt
+    orig, orig_flag = wf.evaluate_repair_attempt, wf.FAILED_UNIT_HINT
     wf.evaluate_repair_attempt = fake_eval
     try:
-        out = wf.devops_node({"workspace_path": ws, "target_app": ".", "board": "native_sim", "iterations": 1,
-                              "max_iterations": 5, "applied_files": [], "pending_token_usage": [],
-                              "attempt_history": []})
+        state = {"workspace_path": ws, "target_app": ".", "board": "native_sim", "iterations": 1,
+                 "max_iterations": 5, "applied_files": [], "pending_token_usage": [], "attempt_history": []}
+        wf.FAILED_UNIT_HINT = False  # default: off
+        assert "DevOps Expert: compilation failed" not in wf.devops_node(dict(state))["current_error_log"]
+        wf.FAILED_UNIT_HINT = True
+        out = wf.devops_node(dict(state))
     finally:
-        wf.evaluate_repair_attempt = orig
+        wf.evaluate_repair_attempt, wf.FAILED_UNIT_HINT = orig, orig_flag
     assert "/zephyrproject/zephyr/tests/app/src/main.c" in out["current_error_log"]
     assert out["current_error_log"].index("DevOps Expert: compilation failed") < out["current_error_log"].index("error: boom")
 

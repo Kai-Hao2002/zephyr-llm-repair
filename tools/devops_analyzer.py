@@ -77,8 +77,11 @@ def annotate_log_with_classification(log: str) -> str:
 _FAILED_OBJ_RE = re.compile(r"^FAILED: \S+\.(?:c|cc|cpp|S)\.obj\b")
 _COMPILE_SRC_RE = re.compile(r"\s-c\s+(\S+\.(?:c|cc|cpp|S))(?:\s|$)")
 _MAX_FAILED_UNITS = 5
-# 開關 (ablation 用；預設開啟，run_meta 會記錄)。Switch for ablations (on by default; recorded in run_meta).
-FAILED_UNIT_HINT = os.environ.get("ZEPHYR_FAILED_UNIT_HINT", "1").strip().lower() not in ("0", "false", "no")
+# 開關，預設關閉 (2026-10-18 使用者決定)：這項是看了 r2 的失敗案例才設計的，不放進 Proposed 的正式版本，
+# 只保留作為事後分析；run_meta 會記錄。
+# Switch, off by default (user decision 2026-10-18): it was designed after looking at r2's failed cases, so it
+# is not part of the official Proposed; kept only for post-hoc analysis; recorded in run_meta.
+FAILED_UNIT_HINT = os.environ.get("ZEPHYR_FAILED_UNIT_HINT", "0").strip().lower() in ("1", "true", "yes")
 
 
 def extract_failed_units(raw_log: str) -> List[str]:
