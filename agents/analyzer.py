@@ -49,14 +49,22 @@ def analyzer_node(state: ZephyrAgentState) -> Dict[str, Any]:
     # return shape to {"raw", "parsed", "parsing_error"}.
     structured_llm = llm.with_structured_output(AnalyzerOutput, include_raw=True)
 
+    # 決策規則恢復成 2026-08-31 (d06d00f) 原始設計的兩條 (2026-10-18 使用者決定)：2026-09-03 (c789076/e9ac863)
+    # 依 v2 試跑案例加入的規則「undeclared/undefined reference 通常是 CONFIG 被關掉或 DTS 節點被移除」(附 fcb 範例)
+    # 和「或明顯的拼字錯誤」已拿掉。前者列舉的正是資料集的注入方式，範例也來自資料集案例，不符合「不根據資料集
+    # 案例調整 Proposed」的原則。
+    # Decision rules restored to the two of the original design of 2026-08-31 (d06d00f) (user decision 2026-10-18):
+    # the rule added on 2026-09-03 (c789076/e9ac863) from v2 pilot cases ("undeclared/undefined reference usually
+    # means a CONFIG was turned off or a DTS node removed", with an fcb example) and "or an obvious misspelling" were
+    # removed. The former enumerated the dataset's injection families and its example came from a dataset case,
+    # against the principle of not tuning Proposed on dataset cases.
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a senior Zephyr RTOS debugging expert.
 Your task is to analyze a compressed build or runtime error log.
 
 Decision rules:
 1. If the error involves hardware, peripherals, or undefined macros (such as DT_NODELABEL), graph retrieval is needed. Extract the exact component names as search_keywords.
-2. If the error is an "undeclared" or "undefined reference" symbol/function, do not assume it is a simple typo. It usually means the symbol was supposed to be enabled/declared conditionally by some Kconfig option or Devicetree setting, but that condition was broken (for example a CONFIG_ symbol was turned off, or a DTS node was removed), so the code that depends on it was excluded from compilation. This case also needs graph retrieval, but for search_keywords **do not give only the full literal name of the undeclared symbol**: it is usually a test-specific function name (for example `test_fcb_crc_disabled`) that almost never appears in Kconfig/DTS files, so searching for it would find "files that mention this function name" (usually the test file that calls it) instead of the configuration files that should actually be inspected. Additionally infer the "subsystem/module name" it belongs to and include it in search_keywords: it can usually be inferred from the file paths mentioned in the error message (for example `fcb` in `.../subsys/fs/fcb/src/xxx.c`), or by extracting the core word root from the symbol name itself (for example the core of `test_fcb_crc_disabled` is `fcb`). Kconfig symbols are usually named after a subsystem/feature (for example `config FCB`), not after an individual function or test name.
-3. Only if the error is a plain C syntax error (such as a missing semicolon or bracket, or an obvious misspelling) is graph retrieval unnecessary; in that case search_keywords must be the empty list []."""),
+2. If the error is a plain C syntax error (such as a missing semicolon or bracket), graph retrieval is not needed; search_keywords must be the empty list []."""),
         ("human", "Here is the current error log of my project:\n{error_log}")
     ])
 
