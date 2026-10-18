@@ -46,6 +46,7 @@ from dotenv import load_dotenv
 from core.state import create_initial_state, ZephyrAgentState
 from core.trajectory import clip_text
 from graph_rag.case_graph import GRAPH_RAG
+from agents.knowledge_expert import HYBRID_RAG
 from tools.devops_analyzer import FAILED_UNIT_HINT, extract_failed_units, failed_units_note
 from core.protected_files import register as register_protected_files, unregister as unregister_protected_files
 from core import llm_retry
@@ -655,6 +656,7 @@ def collect_run_meta() -> Dict[str, Any]:
         "proposed_failed_unit_hint": FAILED_UNIT_HINT,
         # Proposed 的 Graph RAG (每筆案例現場建圖，graph_rag/case_graph.py)。Proposed's per-case Graph RAG.
         "proposed_graph_rag": GRAPH_RAG,
+        "proposed_hybrid_rag": HYBRID_RAG,
         # OpenHands baseline 的設定 (只在 --pipeline openhands 時有意義)。OpenHands settings (used only by that pipeline).
         "openhands": {"image": os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z2"),
                       "image_id": _command_output(["docker", "images", os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z2"),

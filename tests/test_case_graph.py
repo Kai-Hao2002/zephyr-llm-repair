@@ -65,6 +65,36 @@ def test_graph_json_lives_outside_workspace():
     assert not (ws.rstrip(os.sep) + ".graph").startswith(ws + os.sep)
 
 
+def test_graph_only_ablation_skips_hybrid_rag():
+    import agents.knowledge_expert as ke
+    calls = []
+    orig = (ke.HYBRID_RAG, ke.get_case_graph, ke.get_hybrid_retriever)
+    ke.get_case_graph = lambda *a: (_graph(), {"rebuilt": False})
+    ke.get_hybrid_retriever = lambda ws: calls.append(ws) or (_ for _ in ()).throw(AssertionError("hybrid called"))
+    try:
+        ke.HYBRID_RAG = False
+        out = ke.knowledge_expert_node({"search_keywords": ["ZBUS"], "workspace_path": "/tmp/x",
+                                        "target_app": ".", "board": "native_sim"})
+    finally:
+        ke.HYBRID_RAG, ke.get_case_graph, ke.get_hybrid_retriever = orig
+    assert out["retrieved_files"] == [] and calls == []
+    assert "subsys/zbus/Kconfig:4" in out["retrieved_context"]
+
+
+def test_launcher_refuses_mixed_retrieval_settings():
+    import json
+    import subprocess
+    root = tempfile.mkdtemp()
+    os.makedirs(os.path.join(root, "pilot", "proposed"))
+    meta = {"models": {"pro": "gemini-x"}, "proposed_graph_rag": True, "proposed_hybrid_rag": True}
+    json.dump([{"run_meta": meta}], open(os.path.join(root, "pilot", "proposed", "c.json"), "w"))
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, MODEL="gemini-x", OUT_ROOT=root, STAGE="pilot", PIPELINES="proposed", ZEPHYR_HYBRID_RAG="0")
+    r = subprocess.run(["bash", os.path.join(repo, "tools", "run_v3_freetier.sh")], env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 65 and "proposed_hybrid_rag=True (this run: False)" in r.stdout
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):

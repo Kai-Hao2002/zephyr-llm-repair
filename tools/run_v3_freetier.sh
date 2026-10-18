@@ -60,19 +60,29 @@ sleep_until() {
     while [ "$(date +%s)" -lt "$t" ]; do sleep 60; done
 }
 
-# 既有結果的模型必須等於 MODEL。Existing results must come from MODEL.
+# 既有結果的模型必須等於 MODEL；Proposed 的檢索開關 (ZEPHYR_GRAPH_RAG / ZEPHYR_HYBRID_RAG，ablation 用) 也必須和
+# 這次相同，不同設定的結果不能放在同一個輸出目錄。
+# Existing results must come from MODEL, and Proposed's retrieval switches (ZEPHYR_GRAPH_RAG / ZEPHYR_HYBRID_RAG,
+# for ablations) must match this run: results of different settings never share an output dir.
 check_model() {
     "$python" - "$res_root" "$MODEL" $pipelines <<'EOF'
 import glob, json, os, sys
 root, model = sys.argv[1], sys.argv[2]
+on = lambda k, d: os.environ.get(k, d).strip().lower() not in ("0", "false", "no")
+want = {"proposed_graph_rag": on("ZEPHYR_GRAPH_RAG", "1"), "proposed_hybrid_rag": on("ZEPHYR_HYBRID_RAG", "1")}
 bad = []
 for p in sys.argv[3:]:
     for f in glob.glob(os.path.join(root, p, "*.json")):
-        got = json.load(open(f))[0].get("run_meta", {}).get("models", {}).get("pro")
+        meta = json.load(open(f))[0].get("run_meta", {})
+        got = meta.get("models", {}).get("pro")
         if got != model:
-            bad.append(f"{p}/{os.path.basename(f)}: {got}")
+            bad.append(f"{p}/{os.path.basename(f)}: model {got}")
+        if p == "proposed":
+            for k, v in want.items():
+                if k in meta and meta[k] != v:
+                    bad.append(f"{p}/{os.path.basename(f)}: {k}={meta[k]} (this run: {v})")
 if bad:
-    print("results from another model in this output dir:\n  " + "\n  ".join(bad))
+    print("results with other settings in this output dir:\n  " + "\n  ".join(bad[:20]))
     sys.exit(1)
 EOF
 }

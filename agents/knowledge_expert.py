@@ -1,5 +1,6 @@
 # agents/knowledge_expert.py
 import logging
+import os
 from typing import Dict, Any, List
 from graph_rag.case_graph import get_case_graph
 from graph_rag.retriever import GraphRetriever
@@ -7,6 +8,13 @@ from graph_rag.hybrid_retriever import HybridRetriever
 from core.llm_retry import RetrievalDegradedError, record_fallback, strict_fallbacks
 
 logger = logging.getLogger(__name__)
+
+# Hybrid RAG 的開關 (2026-10-18，ablation「只保留 Graph RAG」用)：預設開啟，關閉時 Knowledge Expert 只做圖譜
+# 檢索，retrieved_files 一律為空；run_meta 會記錄。Graph RAG 的開關見 graph_rag/case_graph.GRAPH_RAG。
+# Hybrid RAG switch (2026-10-18, for the "Graph RAG only" ablation): on by default; when off the Knowledge
+# Expert only does graph retrieval and retrieved_files is always empty; recorded in run_meta. The Graph RAG
+# switch is graph_rag/case_graph.GRAPH_RAG.
+HYBRID_RAG = os.environ.get("ZEPHYR_HYBRID_RAG", "1").strip().lower() not in ("0", "false", "no")
 
 # 圖譜 (2026-10-18 起)：每筆案例從注入後的 workspace 現場建 (graph_rag/case_graph.py)。舊的全域快取
 # zephyr_graph_cache.pkl 從來不存在；從原始樹建的 zephyr_graph_cache.full.pkl 含有注入前的正確內容，會洩漏
@@ -78,7 +86,7 @@ def knowledge_expert_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     retrieved_files: List[str] = []
     workspace_path = state.get("workspace_path", "")
-    if workspace_path:
+    if workspace_path and HYBRID_RAG:
         try:
             hybrid = get_hybrid_retriever(workspace_path)
             # top_k=8 而非更保守的 5——實測 (inject_runtime_fcb_nullcheck)
