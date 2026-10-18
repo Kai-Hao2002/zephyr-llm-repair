@@ -59,7 +59,7 @@ from tools.fault_injector import MUTATE_SCRIPT_HOST_PATH, MUTATE_SCRIPT_CONTAINE
 from tools.qemu_oracle import QemuOracle
 from tools.log_filter import LogFilter
 
-PIPELINE_CHOICES = ("proposed", "b1", "b2", "b3", "openhands")
+PIPELINE_CHOICES = ("proposed", "b1", "b2", "b3", "openhands", "agentless")
 MODEL_PROVIDER_CHOICES = ("gemini", "anthropic", "openai")
 
 load_dotenv()
@@ -568,6 +568,13 @@ def _run_case_in_workspace(case: Dict[str, Any], workspace_path: str, max_iters:
         final_status, total_iterations = result["final_status"], result["iterations"]
         iteration_log = result.get("iteration_log", [])
         first_retrieval_files = result.get("first_retrieval_files")
+    elif pipeline == "agentless":
+        # Agentless baseline (2026-10-18)：見 core/agentless_pipeline.py。Agentless baseline; see that module.
+        from core.agentless_pipeline import run_agentless
+        result = run_agentless(state)
+        final_status, total_iterations = result["final_status"], result["iterations"]
+        iteration_log = result.get("iteration_log", [])
+        first_retrieval_files = None
     elif pipeline == "openhands":
         # OpenHands baseline (2026-10-18)：見 core/openhands_pipeline.py。OpenHands baseline; see that module.
         from core.openhands_pipeline import run_openhands
@@ -600,6 +607,7 @@ def _run_case_in_workspace(case: Dict[str, Any], workspace_path: str, max_iters:
         "protected_file_count": protected_count,
         "workspace_path": workspace_path,
         **({"openhands": result["openhands"]} if pipeline == "openhands" else {}),
+        **({"agentless": result["agentless"]} if pipeline == "agentless" else {}),
     }
 
 
@@ -657,6 +665,8 @@ def collect_run_meta() -> Dict[str, Any]:
         # Proposed 的 Graph RAG (每筆案例現場建圖，graph_rag/case_graph.py)。Proposed's per-case Graph RAG.
         "proposed_graph_rag": GRAPH_RAG,
         "proposed_hybrid_rag": HYBRID_RAG,
+        # Agentless baseline 的候選 patch 數 (core/agentless_pipeline.py)。Agentless candidate count.
+        "agentless_n": int(os.environ.get("ZEPHYR_AGENTLESS_N", "4")),
         # OpenHands baseline 的設定 (只在 --pipeline openhands 時有意義)。OpenHands settings (used only by that pipeline).
         "openhands": {"image": os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z2"),
                       "image_id": _command_output(["docker", "images", os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z2"),
