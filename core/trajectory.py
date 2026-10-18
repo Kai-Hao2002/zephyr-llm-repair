@@ -30,7 +30,7 @@ def build_trajectory(stage: str, status: str, *, patch: Any = None, applied_file
                      apply_error: Optional[str] = None, static_check_passed: Optional[bool] = None,
                      static_check_log: Optional[str] = None, filtered_log: Optional[str] = None,
                      conflict_tag: Optional[str] = None, analyzer_diagnosis: Optional[Dict[str, Any]] = None,
-                     retrieved_files=None, restored_files=None) -> Dict[str, Any]:
+                     retrieved_files=None, restored_files=None, graph_context: Optional[str] = None) -> Dict[str, Any]:
     """
     stage：這一輪停在哪一步 ("apply" / "static_check" / "build" / "run")。
     patch：LLM 原始輸出的 SEARCH/REPLACE 文字；B1 則是 {"filepath", "content"}。
@@ -60,6 +60,8 @@ def build_trajectory(stage: str, status: str, *, patch: Any = None, applied_file
         "static_check_log": clip_text(static_check_log),
         "filtered_log": clip_text(filtered_log),
         "conflict_tag": conflict_tag,
+        # Proposed 的 Knowledge Expert 給 Patch Expert 的圖譜內容 (2026-10-18 起)。Graph context given to Patch Expert.
+        "graph_context": clip_text(graph_context),
         "analyzer_diagnosis": analyzer_diagnosis,
         "retrieved_files": retrieved_files,
         "restored_files": restored_files,

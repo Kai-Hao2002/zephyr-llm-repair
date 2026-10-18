@@ -1,17 +1,19 @@
 # agents/knowledge_expert.py
 import logging
 from typing import Dict, Any, List
-from graph_rag.build_graph import ZephyrGraphBuilder
+from graph_rag.case_graph import get_case_graph
 from graph_rag.retriever import GraphRetriever
 from graph_rag.hybrid_retriever import HybridRetriever
 from core.llm_retry import RetrievalDegradedError, record_fallback, strict_fallbacks
 
 logger = logging.getLogger(__name__)
 
-# 建議在全域或系統啟動時初始化並載入圖譜，避免在每次 LangGraph 迭代中重複建置
-# It is recommended to initialize and load the graph globally or at system startup to avoid rebuilding it during every LangGraph iteration.
-GRAPH_CACHE_PATH = "zephyr_graph_cache.pkl"
-_global_retriever = None
+# 圖譜 (2026-10-18 起)：每筆案例從注入後的 workspace 現場建 (graph_rag/case_graph.py)。舊的全域快取
+# zephyr_graph_cache.pkl 從來不存在；從原始樹建的 zephyr_graph_cache.full.pkl 含有注入前的正確內容，會洩漏
+# 答案，所以不再使用全域快取。
+# The graph (from 2026-10-18) is built per case from the injected workspace (graph_rag/case_graph.py). The old
+# global zephyr_graph_cache.pkl never existed, and zephyr_graph_cache.full.pkl was built from the clean tree
+# (pre-injection content, i.e. answers), so no global cache is used any more.
 
 # HybridRetriever 的 BM25 索引是針對單一 workspace_path 的原始碼樹建的，
 # 不能像圖譜檢索那樣用單一全域單例——不同案例的 workspace_path 不同，且
@@ -26,21 +28,6 @@ _global_retriever = None
 # repair loop reuse the same index (no re-scanning the whole tree every
 # iteration), without different cases polluting each other.
 _hybrid_retrievers: Dict[str, HybridRetriever] = {}
-
-
-def get_retriever() -> GraphRetriever:
-    global _global_retriever
-    if _global_retriever is None:
-        builder = ZephyrGraphBuilder()
-        try:
-            builder.load(GRAPH_CACHE_PATH)
-            logger.info("Successfully loaded graph cache.")
-        except FileNotFoundError:
-            logger.warning("Graph cache not found, please run build_graph.py to construct it first.")
-            # 這裡可以加入動態建置邏輯，或直接拋出例外
-            # dynamic build logic can be added here, or raise an exception
-        _global_retriever = GraphRetriever(builder.graph)
-    return _global_retriever
 
 
 def get_hybrid_retriever(workspace_path: str) -> HybridRetriever:
@@ -76,10 +63,15 @@ def knowledge_expert_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     logger.info(f"Retrieving graph context for keywords: {keywords}")
 
-    retriever = get_retriever()
-
-    # 執行子圖提取與 YAML 序列化 (Execute subgraph extraction and YAML serialization)
-    yaml_context = retriever.retrieve_context(keywords, radius=1)
+    graph, graph_meta = get_case_graph(state.get("workspace_path", ""), state.get("target_app", "."),
+                                       state.get("board", "native_sim"))
+    if graph is None:
+        yaml_context = "Knowledge graph retrieval is disabled."
+    elif graph.number_of_nodes() == 0:
+        yaml_context = f"Knowledge graph unavailable for this workspace ({graph_meta.get('error', 'empty graph')})."
+    else:
+        # 執行子圖提取與 YAML 序列化 (Execute subgraph extraction and YAML serialization)
+        yaml_context = GraphRetriever(graph).retrieve_context(keywords, radius=1)
 
     # 也可以透過 LLM 整理檢索結果，但為了節省 Token，直接傳遞 YAML 是最有效率的做法
     # We could also use an LLM to summarize the retrieved results, but to save tokens, passing YAML directly is the most efficient approach.

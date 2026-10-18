@@ -180,6 +180,7 @@ def _proposed_trajectory(state: ZephyrAgentState, stage: str, status: str, **fie
         analyzer_diagnosis=state.get("analyzer_diagnosis"),
         retrieved_files=state.get("retrieved_files"),
         restored_files=pop_restored(state.get("workspace_path")),
+        graph_context=state.get("retrieved_context") or None,
         **fields,
     )
 
