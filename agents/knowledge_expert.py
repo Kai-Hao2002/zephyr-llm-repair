@@ -61,25 +61,33 @@ def knowledge_expert_node(state: Dict[str, Any]) -> Dict[str, Any]:
     Kconfig-symbol/DTS-node *names*, with no way to answer "which C file
     implements this subsystem's logic" (see graph_rag/hybrid_retriever.py's
     module docstring).
+
+    Analyzer 的關鍵字只決定要不要做圖譜檢索 (原始設計的決策規則講的就是「要不要檢索圖譜」)；Hybrid RAG 每輪都跑，
+    沒有關鍵字時改用最近一次過濾後的 build/run log 當查詢，和 B2 相同 (2026-10-19 使用者決定)。之前 Hybrid RAG
+    跟著圖譜的開關，Analyzer 對 runtime 錯誤判斷「與硬體無關、不用查圖譜」時，連實作檔的檢索也一起被跳過。
+    The Analyzer's keywords only decide whether graph retrieval runs (the original design's decision rules are
+    about "is graph retrieval needed"); Hybrid RAG runs every iteration, querying with the most recent filtered
+    build/run log when there are no keywords, like B2 (user decision 2026-10-19). Hybrid RAG used to follow the
+    graph switch, so when the Analyzer judged a runtime error "not hardware-related, no graph needed" the search
+    for implementation files was skipped as well.
     """
     logger.info("--- Starting Knowledge Expert ---")
 
     keywords = state.get("search_keywords", [])
     if not keywords:
         logger.info("No keywords received, skipping graph retrieval.")
-        return {"retrieved_context": "No keywords provided for graph retrieval.", "retrieved_files": []}
-
-    logger.info(f"Retrieving graph context for keywords: {keywords}")
-
-    graph, graph_meta = get_case_graph(state.get("workspace_path", ""), state.get("target_app", "."),
-                                       state.get("board", "native_sim"))
-    if graph is None:
-        yaml_context = "Knowledge graph retrieval is disabled."
-    elif graph.number_of_nodes() == 0:
-        yaml_context = f"Knowledge graph unavailable for this workspace ({graph_meta.get('error', 'empty graph')})."
+        yaml_context = "No keywords provided for graph retrieval."
     else:
-        # 執行子圖提取與 YAML 序列化 (Execute subgraph extraction and YAML serialization)
-        yaml_context = GraphRetriever(graph).retrieve_context(keywords, radius=1)
+        logger.info(f"Retrieving graph context for keywords: {keywords}")
+        graph, graph_meta = get_case_graph(state.get("workspace_path", ""), state.get("target_app", "."),
+                                           state.get("board", "native_sim"))
+        if graph is None:
+            yaml_context = "Knowledge graph retrieval is disabled."
+        elif graph.number_of_nodes() == 0:
+            yaml_context = f"Knowledge graph unavailable for this workspace ({graph_meta.get('error', 'empty graph')})."
+        else:
+            # 執行子圖提取與 YAML 序列化 (Execute subgraph extraction and YAML serialization)
+            yaml_context = GraphRetriever(graph).retrieve_context(keywords, radius=1)
 
     # 也可以透過 LLM 整理檢索結果，但為了節省 Token，直接傳遞 YAML 是最有效率的做法
     # We could also use an LLM to summarize the retrieved results, but to save tokens, passing YAML directly is the most efficient approach.
@@ -97,7 +105,11 @@ def knowledge_expert_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # be found (fcb_getnext.c) ranks decently on BM25 but not
             # standout on semantic score; after RRF fusion it lands at
             # rank 8, which a top_k=5 would miss.
-            retrieved_files = hybrid.retrieve(" ".join(keywords), top_k=8)
+            # 沒有關鍵字時用最近一次過濾後的 build/run log (last_build_log，不含規格檔還原提醒和 patch 套用失敗訊息)。
+            # Without keywords, query with the most recent filtered build/run log (last_build_log, which excludes the
+            # restore reminder and patch-application failure text).
+            query = " ".join(keywords) if keywords else (state.get("last_build_log") or state.get("current_error_log", ""))
+            retrieved_files = hybrid.retrieve(query, top_k=8)
             if retrieved_files:
                 logger.info(f"Hybrid RAG (BM25 + semantic) additionally retrieved candidate files: {retrieved_files}")
         except Exception as e:

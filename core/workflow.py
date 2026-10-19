@@ -553,9 +553,6 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
 # ==========================================
 # 3. 定義邊界與建立狀態機
 # ==========================================
-def route_after_analyzer(state: ZephyrAgentState) -> str:
-    return "goto_knowledge" if len(state.get("search_keywords", [])) > 0 else "goto_patch"
-
 def build_zephyr_graph() -> StateGraph:
     workflow = StateGraph(ZephyrAgentState)
     workflow.add_node("Analyzer", analyzer_node)
@@ -567,7 +564,11 @@ def build_zephyr_graph() -> StateGraph:
     workflow.add_node("QA", qa_node)
 
     workflow.set_entry_point("Analyzer")
-    workflow.add_conditional_edges("Analyzer", route_after_analyzer, {"goto_knowledge": "Knowledge", "goto_patch": "Patch"})
+    # Knowledge 每輪都執行：Analyzer 的關鍵字只決定要不要做圖譜檢索，Hybrid RAG 每輪都跑 (2026-10-19，見
+    # agents/knowledge_expert.py)。之前沒有關鍵字就直接跳到 Patch。
+    # Knowledge runs every iteration: the Analyzer's keywords only decide graph retrieval, Hybrid RAG always runs
+    # (2026-10-19, see agents/knowledge_expert.py). Previously no keywords skipped straight to Patch.
+    workflow.add_edge("Analyzer", "Knowledge")
     workflow.add_edge("Knowledge", "Patch")
     workflow.add_edge("Patch", "ApplyPatch")
     workflow.add_conditional_edges("ApplyPatch", route_after_apply_patch, {
