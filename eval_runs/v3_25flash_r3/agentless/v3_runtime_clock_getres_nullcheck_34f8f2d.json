@@ -1,0 +1,241 @@
+[
+  {
+    "case_id": "v3_runtime_clock_getres_nullcheck_34f8f2d",
+    "category": "runtime_crash",
+    "pipeline": "agentless",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 4,
+    "ttr_seconds": 579.2383909225464,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "agentless_dirs",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 4416,
+            "output_tokens": 1917
+          },
+          {
+            "node": "agentless_files",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 12181,
+            "output_tokens": 6034
+          },
+          {
+            "node": "agentless_elements",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 7068,
+            "output_tokens": 6240
+          },
+          {
+            "node": "agentless_repair_1",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 2434,
+            "output_tokens": 8614
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "The `test_clock_getres` test case includes scenarios where `clock_getres` is called with a `NULL` pointer for the `res` argument. According to the POSIX specification for `clock_getres`, if `res` is `NULL`, the resolution of the specified clock is not returned, and the function should still succeed if the `clock_id` is valid.\n\nThe Zephyr RTOS syscall verification function `z_vrfy_clock_getres` (defined in `include/syscalls/clock_getres.h`) unconditionally calls `Z_OOPS(Z_SYSCALL_MEMORY_WRITE(res, sizeof(struct timespec)))`. When `res` is `NULL`, this leads to `K_SYSCALL_MEMORY_WRITE(NULL, sizeof(struct timespec))`, which in turn calls `user_copy` and `arch_buffer_validate` with a `NULL` address.\n\nThe runtime log indicates a page fault at address `0x8` during a supervisor write operation (`error code 0x2`), with the message \"Linear address not present in page tables\". This suggests that the kernel's `memcpy` operation (which would be called if `arch_buffer_validate` incorrectly returned success for a `NULL` address) attempted to write to an unmapped memory region starting from `NULL`.\n\nThe root cause is that the syscall verification layer is attempting to validate a `NULL` pointer for write access, even though the POSIX standard allows `res` to be `NULL`. The `Z_SYSCALL_MEMORY_WRITE` macro should only be invoked if `res` is not `NULL`.\n\nThe fix involves adding a `NULL` check for the `res` argument within `z_vrfy_clock_getres` to prevent unnecessary memory validation and subsequent `memcpy` calls to `NULL` addresses.\n\n### include/syscalls/clock_getres.h\n<<<<<<<< SEARCH\n__pinned_func\nstatic inline int z_vrfy_clock_getres(clockid_t clock_id, struct timespec *res)\n{\n\tZ_OOPS(Z_SYSCALL_MEMORY_WRITE(res, sizeof(struct timespec)));\n\treturn z_impl_clock_getres(clock_id, res);\n}\n========\n__pinned_func\nstatic inline int z_vrfy_clock_getres(clockid_t clock_id, struct timespec *res)\n{\n\tif (res != NULL) {\n\t\tZ_OOPS(Z_SYSCALL_MEMORY_WRITE(res, sizeof(struct timespec)));\n\t}\n\treturn z_impl_clock_getres(clock_id, res);\n}\n>>>>>>>> REPLACE",
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file '### include/syscalls/clock_getres.h' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": null
+        }
+      },
+      {
+        "iteration": 2,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "agentless_repair_2",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 2434,
+            "output_tokens": 14972
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "The error log indicates a page fault at address `0x8` with error code `0x2` (\"Linear address not present in page tables\", \"Access violation: supervisor thread not allowed to write\"). This occurs during the `test_clock_getres` test case, which is executed as a kernel thread. The fault specifically happens when a supervisor (kernel) thread attempts to write to the address `0x8`. This address is typically unmapped or read-only to catch NULL pointer dereferences.\n\nThe `test_clock_getres` function, being a POSIX timers test, likely includes test cases that pass invalid pointers (such as `(struct timespec *)0x8`) to the `clock_getres` function, expecting it to return an error like `EFAULT` rather than crashing.\n\nAnalyzing the provided code:\n1.  **`arch/x86/core/x86_mmu.c`**: This file contains `arch_buffer_validate`, a function designed to check if a memory buffer is accessible and writable/readable. It operates by walking the current thread's page tables.\n2.  **`kernel/userspace/userspace.c`**: This file contains `k_mem_safe_write`. This function is intended to safely write data to a buffer, especially when the buffer might be in user space. Its implementation has a conditional branch:\n    ```c\n    int k_mem_safe_write(void *dst, const void *src, size_t size)\n    {\n        if (!k_is_user_context()) {\n            (void)memcpy(dst, src, size); // <--- Problematic for invalid kernel pointers\n            return 0;\n        }\n\n        return k_usermode_to_copy(dst, src, size); // This path uses arch_buffer_validate for user memory\n    }\n    ```\n    If `test_clock_getres` (a kernel thread) calls `clock_getres`, and `clock_getres`'s internal implementation uses `k_mem_safe_write` to copy the result into the provided `res` buffer, then for a kernel context, the `if (!k_is_user_context())` branch is taken. This branch directly calls `memcpy(dst, src, size)` without any validation of the `dst` pointer.\n    If `dst` is `0x8` in this scenario, `memcpy(0x8, src, size)` will attempt to write to `0x8`, leading to the observed page fault because `0x8` is not a valid, writable memory location in the kernel's page tables.\n\nThe defect is that `k_mem_safe_write` is not truly \"safe\" for kernel contexts when the `dst` pointer itself is invalid, as it bypasses validation. While kernel code is generally expected to pass valid pointers, POSIX APIs should be robust enough to handle invalid arguments gracefully, especially when tests specifically probe such error conditions.\n\nThe fix is to incorporate a buffer validation step using `arch_buffer_validate` within `k_mem_safe_write` for kernel contexts when an MMU is configured. This ensures that invalid kernel pointers like `0x8` are caught early, returning `EFAULT`, instead of causing a system crash.\n\n```\nkernel/userspace/userspace.c\n<<<<<<<< SEARCH\n\tif (!k_is_user_context()) {\n\t\t(void)memcpy(dst, src, size);\n\t\treturn 0;\n\t}\n========\n\tif (!k_is_user_context()) {\n#ifdef CONFIG_MMU\n\t\t/* For kernel contexts on MMU-enabled systems, validate the buffer\n\t\t * using arch_buffer_validate. This catches invalid kernel pointers\n\t\t * such as NULL or very low addresses passed by mistake or by test\n\t\t * cases checking error paths, preventing a page fault.\n\t\t * arch_buffer_validate uses the current thread's page tables.\n\t\t */\n\t\tif (arch_buffer_validate(dst, size, true) != 0) {\n\t\t\treturn EFAULT;\n\t\t}\n#endif\n\t\t(void)memcpy(dst, src, size);\n\t\treturn 0;\n\t}\n>>>>>>>> REPLACE\n```",
+          "applied_files": [],
+          "apply_error": "SearchMatchFailed: No exactly matching SEARCH block was found in 'kernel/userspace/userspace.c'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": null
+        }
+      },
+      {
+        "iteration": 3,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "agentless_repair_3",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 2434,
+            "output_tokens": 14064
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "The runtime log indicates a page fault at address `0x8` with a write access by a supervisor thread (`error code 0x2`). The `PTE` (Page Table Entry) is reported as \"not present\", meaning the memory region is unmapped. The `EIP` (instruction pointer) `0x001065ba` points to kernel code.\n\nThe call stack and the `arch_buffer_validate` function in `arch/x86/core/x86_mmu.c` suggest that the fault occurs during memory validation for a user-mode buffer, likely within a system call. The `test_clock_getres` test is running as a user-mode thread and calls `clock_getres`, which is a system call.\n\nInside `arch_buffer_validate`, the first action is to retrieve the page tables for the current thread:\n`pentry_t *ptables = z_x86_thread_page_tables_get(_current);`\nThis `ptables` pointer is then passed directly to `page_validate` without a `NULL` check.\n\nThe `page_validate` function, internally, would access `ptables` as an array (e.g., `ptables[index]`) to traverse the page table hierarchy. On a 32-bit x86 system, `pentry_t` is typically a `uint32_t`, meaning each entry is 4 bytes. If `ptables` itself was `NULL`, then `ptables[2]` would translate to `*(NULL + 2 * sizeof(pentry_t))`, which is `*(NULL + 2 * 4)` or `*0x8`. An attempt to read from `*0x8` (if `page_validate` is reading page table entries) or write to `*0x8` (if the subsequent operation was a write) would result in a page fault at `0x8`.\n\nThe \"Access violation: supervisor thread not allowed to write\" indicates a write operation. While `page_validate` primarily reads page table entries, the system fault mechanism might categorize certain internal MMU operations or even a failed read from an unmapped address (if the hardware reports it this way) as a write if the overall context is a buffer *write* validation. More directly, if a `pentry_t` contains flags that indicate write permissions, and the system tries to *set* such a flag on a `NULL` base address, it could also lead to this.\n\nA more robust way to handle this is to ensure that `ptables` is not `NULL` before attempting to use it. If `z_x86_thread_page_tables_get` can return `NULL` (e.g., if page tables are not properly initialized for some reason, especially in low-memory or common page table configurations), then `arch_buffer_validate` must handle it gracefully by immediately returning an error.\n\nThe fix involves adding a `NULL` check for `ptables` right after it is obtained in `arch_buffer_validate`. If `ptables` is `NULL`, it indicates a fundamental issue with the thread's MMU setup, and any access to user memory should be considered a failure (`-1` or `EFAULT`).\n\n<arch/x86/core/x86_mmu.c>\n<<<<<<<< SEARCH\n\tpentry_t *ptables = z_x86_thread_page_tables_get(_current);\n\tuint8_t *virt;\n\tsize_t aligned_size;\n\tint ret = 0;\n\n\t/* addr/size arbitrary, fix this up into an aligned region */\n\t(void)k_mem_region_align((uintptr_t *)&virt, &aligned_size,\n\t\t\t\t (uintptr_t)addr, size, CONFIG_MMU_PAGE_SIZE);\n========\n\tpentry_t *ptables = z_x86_thread_page_tables_get(_current);\n\tuint8_t *virt;\n\tsize_t aligned_size;\n\tint ret = 0;\n\n\tif (ptables == NULL) {\n\t\treturn -1;\n\t}\n\n\t/* addr/size arbitrary, fix this up into an aligned region */\n\t(void)k_mem_region_align((uintptr_t *)&virt, &aligned_size,\n\t\t\t\t (uintptr_t)addr, size, CONFIG_MMU_PAGE_SIZE);\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "arch/x86/core/x86_mmu.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[Runtime Log Tail]\nSTART - test_clock_getres\nE: Page fault at address 0x8 (error code 0x2)\nE: Linear address not present in page tables\nE: Access violation: supervisor thread not allowed to write\nE: PTE: not present\nE: EAX: 0x00000000, EBX: 0x00000000, ECX: 0x00000000, EDX: 0x00000000\nE: ESI: 0x0013ff3c, EDI: 0x0013ff48, EBP: 0x0013ff28, ESP: 0x0013ff28\nE: EFLAGS: 0x00010246 CS: 0x0008 CR3: 0x0011c000\nE: EIP: 0x001065ba\nE: call trace:\nE:      0: 0x00100e60\nE:      1: 0x00107d8a\nE:      2: 0x00104726\nE: >>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0\nE: Current thread: 0x125840 (test_clock_getres)\nE: Halting system\nFAILED: zephyr/CMakeFiles/run_qemu /tmp/build/zephyr/CMakeFiles/run_qemu\ncd /tmp/build && /opt/toolchains/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-i386 -m 32 -cpu qemu32,+nx,+pae -machine q35 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot -machine acpi=off -pidfile qemu.pid -chardev stdio,id=con,mux=on -serial chardev:con -mon chardev=con,mode=readline -nographic -icount shift=5,align=off,sleep=off -rtc clock=vm -net none -kernel /tmp/build/zephyr/zephyr.elf\nninja: build stopped: subcommand failed.\nFATAL ERROR: command exited with status 1: /usr/bin/cmake --build /tmp/build --target run",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 4,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "agentless_repair_4",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 2434,
+            "output_tokens": 9689
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "The system is crashing with a page fault at address 0x8 during the `test_clock_getres` test. The error log indicates an \"Access violation: supervisor thread not allowed to write\" and \"Linear address not present in page tables\".\n\nThe `test_clock_getres` test case includes a scenario where `clock_getres` is called with a `NULL` `struct timespec *res` argument (for `CLOCK_INVALID`), expecting it to return `-1` and set `errno` to `EINVAL`.\n\nHowever, instead of returning `EINVAL`, the system crashes. This happens because the `clock_getres` implementation, likely through a syscall wrapper or a helper function like `k_usermode_to_copy`, calls `K_SYSCALL_MEMORY_WRITE` with `NULL` as the destination address. `K_SYSCALL_MEMORY_WRITE` resolves to `arch_buffer_validate` when `CONFIG_USERSPACE` is enabled.\n\nThe `arch_buffer_validate` function in `arch/x86/core/x86_mmu.c` is then called with `addr = NULL`. It proceeds to call `k_mem_region_align` and then `page_validate` with the address `0x0` (or a small offset like `0x8` due to `struct timespec` member access). Since address `0x0` is typically not mapped in the page tables (especially for user-accessible memory), attempting to validate or access it results in a page fault.\n\nThe defect is that `arch_buffer_validate` does not explicitly check for `NULL` input addresses before attempting to validate them against page tables, leading to a system crash. While the higher-level `clock_getres` API should ideally perform a `NULL` check and return `EINVAL`, the immediate cause of the system crash is the low-level memory validation function failing catastrophically for a `NULL` address.\n\nThe fix involves adding a `NULL` check at the beginning of `arch_buffer_validate` in `arch/x86/core/x86_mmu.c`. If `addr` is `NULL`, `arch_buffer_validate` should immediately return `-1` (indicating a validation failure) to prevent the page table lookup for an invalid address. This will allow the calling `k_usermode_to_copy` (or similar) to return `EFAULT`, preventing the crash. The test's expectation of `EINVAL` will still be a valid check for the POSIX API, but the system will no longer halt.\n\n```\narch/x86/core/x86_mmu.c\n<<<<<<<< SEARCH\n\tint ret = 0;\n\n\t/* addr/size arbitrary, fix this up into an aligned region */\n\t(void)k_mem_region_align((uintptr_t *)&virt, &aligned_size,\n\t\t\t\t (uintptr_t)addr, size, CONFIG_MMU_PAGE_SIZE);\n\n\tfor (size_t offset = 0; offset < aligned_size;\n\t     offset += CONFIG_MMU_PAGE_SIZE) {\n\t\tif (!page_validate(ptables, virt + offset, write)) {\n\t\t\tret = -1;\n\t\t\tbreak;\n\t\t}\n========\n\tint ret = 0;\n\n\t/* Prevent page fault when validating a NULL address.\n\t * NULL is never a valid user-accessible buffer address.\n\t */\n\tif (addr == NULL) {\n\t\treturn -1;\n\t}\n\n\t/* addr/size arbitrary, fix this up into an aligned region */\n\t(void)k_mem_region_align((uintptr_t *)&virt, &aligned_size,\n\t\t\t\t (uintptr_t)addr, size, CONFIG_MMU_PAGE_SIZE);\n\n\tfor (size_t offset = 0; offset < aligned_size;\n\t     offset += CONFIG_MMU_PAGE_SIZE) {\n\t\tif (!page_validate(ptables, virt + offset, write)) {\n\t\t\tret = -1;\n\t\t\tbreak;\n\t\t}\n>>>>>>>> REPLACE\n```",
+          "applied_files": [
+            "arch/x86/core/x86_mmu.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[Runtime Log Tail]\nSTART - test_clock_getres\nE: Page fault at address 0x8 (error code 0x2)\nE: Linear address not present in page tables\nE: Access violation: supervisor thread not allowed to write\nE: PTE: not present\nE: EAX: 0x00000000, EBX: 0x00000000, ECX: 0x00000000, EDX: 0x00000000\nE: ESI: 0x0013ff3c, EDI: 0x0013ff48, EBP: 0x0013ff28, ESP: 0x0013ff28\nE: EFLAGS: 0x00010246 CS: 0x0008 CR3: 0x0011c000\nE: EIP: 0x001065ba\nE: call trace:\nE:      0: 0x00100e60\nE:      1: 0x00107d8a\nE:      2: 0x00104726\nE: >>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0\nE: Current thread: 0x125840 (test_clock_getres)\nE: Halting system\nFAILED: zephyr/CMakeFiles/run_qemu /tmp/build/zephyr/CMakeFiles/run_qemu\ncd /tmp/build && /opt/toolchains/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-i386 -m 32 -cpu qemu32,+nx,+pae -machine q35 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot -machine acpi=off -pidfile qemu.pid -chardev stdio,id=con,mux=on -serial chardev:con -mon chardev=con,mode=readline -nographic -icount shift=5,align=off,sleep=off -rtc clock=vm -net none -kernel /tmp/build/zephyr/zephyr.elf\nninja: build stopped: subcommand failed.\nFATAL ERROR: command exited with status 1: /usr/bin/cmake --build /tmp/build --target run",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[Runtime Log Tail]\nSTART - test_clock_getres\nE: Page fault at address 0x8 (error code 0x2)\nE: Linear address not present in page tables\nE: Access violation: supervisor thread not allowed to write\nE: PTE: not present\nE: EAX: 0x00000000, EBX: 0x00000000, ECX: 0x00000000, EDX: 0x00000000\nE: ESI: 0x0013ff3c, EDI: 0x0013ff48, EBP: 0x0013ff28, ESP: 0x0013ff28\nE: EFLAGS: 0x00010246 CS: 0x0008 CR3: 0x0011c000\nE: EIP: 0x001065ba\nE: call trace:\nE:      0: 0x00100e60\nE:      1: 0x00107d8a\nE:      2: 0x00104726\nE: >>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0\nE: Current thread: 0x125840 (test_clock_getres)\nE: Halting system\nE: Page fault at address 0x13fe94 (errFAILED: zephyr/CMakeFiles/run_qemu /tmp/build/zephyr/CMakeFiles/run_qemu\ncd /tmp/build && /opt/toolchains/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-i386 -m 32 -cpu qemu32,+nx,+pae -machine q35 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot -machine acpi=off -pidfile qemu.pid -chardev stdio,id=con,mux=on -serial chardev:con -mon chardev=con,mode=readline -nographic -icount shift=5,align=off,sleep=off -rtc clock=vm -net none -kernel /tmp/build/zephyr/zephyr.elf\nninja: build stopped: subcommand failed.\nFATAL ERROR: command exited with status 1: /usr/bin/cmake --build /tmp/build --target run",
+    "protected_file_count": 9,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r3_main/agentless/v3_runtime_clock_getres_nullcheck_34f8f2d",
+    "agentless": {
+      "directories": [
+        "tests/kernel",
+        "lib/libc",
+        "kernel",
+        "arch/x86",
+        "kernel/paging"
+      ],
+      "candidate_file_count": 698,
+      "files": [
+        "tests/subsys/portability/posix/timers/src/clock.c",
+        "kernel/timer.c",
+        "arch/x86/core/ia32/fatal.c",
+        "arch/x86/core/x86_mmu.c",
+        "kernel/userspace/userspace.c"
+      ],
+      "locations": {
+        "tests/subsys/portability/posix/timers/src/clock.c": [
+          [
+            173,
+            173
+          ]
+        ],
+        "kernel/userspace/userspace.c": [
+          [
+            983,
+            1004
+          ]
+        ],
+        "arch/x86/core/x86_mmu.c": [
+          [
+            1389,
+            1437
+          ]
+        ]
+      },
+      "context_chars": 4442,
+      "n_candidates": 4,
+      "duplicates_skipped": 0
+    },
+    "api_events": [
+      {
+        "kind": "retry",
+        "what": "agentless_repair_1",
+        "attempt": 1,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 117
+      }
+    ],
+    "started_at": "2026-10-22T01:26:03+00:00",
+    "run_meta": {
+      "code_commit": "d25d466fe57768da835d7bf870b5f7674c2d8f28",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": true,
+      "proposed_hybrid_rag": true,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

@@ -1,0 +1,172 @@
+[
+  {
+    "case_id": "v3_runtime_flash_sim_offbyone_907f069",
+    "category": "runtime_crash",
+    "pipeline": "agentless",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "resolved",
+    "iterations": 1,
+    "ttr_seconds": 178.19999170303345,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": true,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "agentless_dirs",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 3943,
+            "output_tokens": 2411
+          },
+          {
+            "node": "agentless_files",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 40039,
+            "output_tokens": 2961
+          },
+          {
+            "node": "agentless_elements",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 3156,
+            "output_tokens": 2913
+          },
+          {
+            "node": "agentless_repair_1",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 6337,
+            "output_tokens": 14551
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "success",
+          "patch": "The `Segmentation fault` occurs during the `test_out_of_bounds` test case. This test specifically attempts to write to memory regions outside the defined flash boundaries. The `flash_sim_write` function, like `flash_sim_read`, relies on `flash_range_is_valid` to prevent out-of-bounds memory access.\n\nUpon inspection of `flash_range_is_valid` in `drivers/flash/flash_simulator.c`:\n```c\nstatic int flash_range_is_valid(const struct device *dev, off_t offset,\n\t\t\t\tsize_t len)\n{\n\tconst struct flash_simulator_config *cfg = dev->config;\n\n\tif ((offset < 0 || offset >= cfg->flash_size ||\n\t     (cfg->flash_size - offset) + 4 < len)) {\n\t\treturn 0;\n\t}\n\n\treturn 1;\n}\n```\nThe condition `(cfg->flash_size - offset) + 4 < len` is flawed.\nA correct range check ensures that `offset` is non-negative and that `offset + len` does not exceed `cfg->flash_size`.\n\nLet `S = cfg->flash_size`. The condition `offset + len <= S` must hold.\nThe original condition `(S - offset) + 4 < len` can incorrectly return `1` (valid) for out-of-bounds accesses.\nFor example, if `offset = S - 1` and `len = 2`, the range `[S-1, S]` is out of bounds.\n- `offset < 0` is false.\n- `offset >= S` is false.\n- `(S - (S - 1)) + 4 < 2` becomes `1 + 4 < 2`, which is `5 < 2` (false).\nSince all conditions are false, `flash_range_is_valid` returns `1`, indicating a valid range. This allows `memcpy` or `memset` operations in `flash_sim_write` to access `dev_data->mock_flash[S]`, leading to a `Segmentation fault`.\n\nAlthough the specific test cases in `test_out_of_bounds` (e.g., `offset = -4` or `offset = cfg->flash_size`) *should* be caught by `offset < 0` or `offset >= cfg->flash_size` respectively, a general flaw in the range validation logic is a critical bug. The `Segmentation fault` indicates that some combination of `offset` and `len` is bypassing the check and causing an illegal memory access.\n\nThe fix involves rewriting `flash_range_is_valid` to correctly check the boundaries:\n1. `offset` must be non-negative.\n2. The end of the operation (`offset + len`) must not exceed `cfg->flash_size`. This check must be robust against `size_t` overflow.\n\nThe corrected `flash_range_is_valid` function will ensure that all memory accesses are within the allocated `mock_flash` buffer, preventing `Segmentation fault` errors.\n\ndrivers/flash/flash_simulator.c\n<<<<<<<< SEARCH\nstatic int flash_range_is_valid(const struct device *dev, off_t offset,\n\t\t\t\tsize_t len)\n{\n\tconst struct flash_simulator_config *cfg = dev->config;\n\n\tif ((offset < 0 || offset >= cfg->flash_size ||\n\t     (cfg->flash_size - offset) + 4 < len)) {\n\t\treturn 0;\n\t}\n\n\treturn 1;\n}\n========\nstatic int flash_range_is_valid(const struct device *dev, off_t offset,\n\t\t\t\tsize_t len)\n{\n\tconst struct flash_simulator_config *cfg = dev->config;\n\tsize_t flash_size = cfg->flash_size;\n\n\tif (offset < 0) {\n\t\treturn 0; /* Negative offset is always invalid */\n\t}\n\n\t/* At this point, offset is non-negative. Cast to size_t for further checks. */\n\tsize_t u_offset = (size_t)offset;\n\n\t/* Check if the range [u_offset, u_offset + len - 1] is within [0, flash_size - 1].\n\t * This is equivalent to checking if u_offset + len <= flash_size.\n\t * The check `u_offset > flash_size || len > flash_size - u_offset` correctly\n\t * identifies if `u_offset + len` would exceed `flash_size`, while also\n\t * guarding against `flash_size - u_offset` underflow if `u_offset` itself\n\t * is already greater than `flash_size`.\n\t */\n\tif (u_offset > flash_size || len > flash_size - u_offset) {\n\t\treturn 0;\n\t}\n\n\treturn 1;\n}\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "drivers/flash/flash_simulator.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "Zephyr OS successfully booted.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_align\nPASS - test_align in 0.000 seconds\n===================================================================\nSTART - test_erase_capability\nPASS - test_erase_capability in 0.000 seconds\n===================================================================\nSTART - test_flash_fill\nPASS - test_flash_fill in 0.000 seconds\n===================================================================\nSTART - test_flash_flatten\nPASS - test_flash_flatten in 0.000 seconds\n===================================================================\nSTART - test_get_erase_value\nPASS - test_get_erase_value in 0.000 seconds\n===================================================================\nSTART - test_get_mock\nSKIP - test_get_mock in 0.000 seconds\n===================================================================\nSTART - test_out_of_bounds\nSegmentation fault",
+    "protected_file_count": 11,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r3_main/agentless/v3_runtime_flash_sim_offbyone_907f069",
+    "agentless": {
+      "directories": [
+        "tests/drivers",
+        "drivers/flash",
+        "dts",
+        "boards",
+        "arch"
+      ],
+      "candidate_file_count": 1795,
+      "files": [
+        "tests/drivers/flash_simulator/flash_sim_impl/src/main.c",
+        "drivers/flash/flash_simulator_native.c",
+        "drivers/flash/flash_simulator.c",
+        "tests/drivers/flash_simulator/flash_sim_impl/src/callbacks.c",
+        "tests/drivers/flash_simulator/flash_sim_impl/boards/native_sim.overlay"
+      ],
+      "locations": {
+        "tests/drivers/flash_simulator/flash_sim_impl/src/main.c": [
+          [
+            221,
+            221
+          ],
+          [
+            22,
+            25
+          ],
+          [
+            641,
+            641
+          ]
+        ],
+        "drivers/flash/flash_simulator.c": [
+          [
+            155,
+            166
+          ],
+          [
+            168,
+            198
+          ],
+          [
+            200,
+            305
+          ],
+          [
+            331,
+            377
+          ],
+          [
+            555,
+            558
+          ],
+          [
+            434,
+            457
+          ]
+        ],
+        "drivers/flash/flash_simulator_native.c": [
+          [
+            38,
+            97
+          ]
+        ]
+      },
+      "context_chars": 16102,
+      "n_candidates": 4,
+      "duplicates_skipped": 0
+    },
+    "api_events": [],
+    "started_at": "2026-10-22T02:29:58+00:00",
+    "run_meta": {
+      "code_commit": "d25d466fe57768da835d7bf870b5f7674c2d8f28",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": true,
+      "proposed_hybrid_rag": true,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
