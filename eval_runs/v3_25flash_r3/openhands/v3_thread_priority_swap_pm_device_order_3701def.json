@@ -1,0 +1,317 @@
+[
+  {
+    "case_id": "v3_thread_priority_swap_pm_device_order_3701def",
+    "category": "runtime_crash",
+    "pipeline": "openhands",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "resolved",
+    "iterations": 12,
+    "ttr_seconds": 290.8007550239563,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": true,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "openhands",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 204356,
+            "output_tokens": 5466,
+            "llm_calls": 14
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "success",
+          "patch": null,
+          "applied_files": [
+            "tests/subsys/pm/power_mgmt/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "Zephyr OS successfully booted.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[113/122] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[114/122] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[115/122] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[116/122] Building C object zephyr/kernel/CMakeFiles/kernel.dir/events.c.obj\n[117/122] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[118/122] Linking C static library zephyr/kernel/libkernel.a\n[119/122] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[120/122] Building native simulator runner, and linking final executable\n[121/122] Running utility command for native_runner_executable\n[121/122] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE power_management_1cpu\n===================================================================\nSTART - test_busy\nPASS - test_busy in 0.000 seconds\n===================================================================\nSTART - test_device_order\nExiting due to fatal error\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/pm/power_mgmt/src/main.c:112: device_b_pm_action: (state_c not equal to PM_DEVICE_STATE_SUSPENDED)",
+    "protected_file_count": 9,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r3_main/openhands/v3_thread_priority_swap_pm_device_order_3701def",
+    "openhands": {
+      "status": "finished",
+      "error": null,
+      "steps": 12,
+      "llm_calls": 14,
+      "input_tokens": 204356,
+      "output_tokens": 5466,
+      "cost": 0.02768643,
+      "wall_seconds": 208.66890335083008,
+      "model": "gemini/gemini-2.5-flash",
+      "image": "zephyr-oh-agent:1.55.1-z2",
+      "max_steps": 50,
+      "timeout_min": 40.0,
+      "egress_allowed": [
+        "generativelanguage.googleapis.com:443"
+      ],
+      "egress_log": {
+        "allowed": 2,
+        "denied": [
+          "CONNECT raw.githubusercontent.com:443 HTTP/1.1"
+        ],
+        "upstream_errors": []
+      },
+      "changed_files": [
+        "tests/subsys/pm/power_mgmt/src/main.c"
+      ],
+      "final_contents": {
+        "tests/subsys/pm/power_mgmt/src/main.c": "/*\n * Copyright (c) 2020 Intel Corporation.\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/sys/printk.h>\n#include <zephyr/types.h>\n#include <zephyr/pm/device.h>\n#include <zephyr/pm/device_runtime.h>\n#include <zephyr/ztest.h>\n#include <ksched.h>\n#include <zephyr/kernel.h>\n#include <zephyr/pm/pm.h>\n#include \"dummy_driver.h\"\n\n#define SLEEP_MSEC 100\n#define SLEEP_TIMEOUT K_MSEC(SLEEP_MSEC)\n\n/* for checking power suspend and resume order between system and devices */\nstatic bool enter_low_power;\nstatic bool notify_app_entry;\nstatic bool notify_app_exit;\nstatic bool set_pm;\nstatic bool leave_idle;\nstatic bool idle_entered;\nstatic bool testing_device_runtime;\nstatic bool testing_device_order;\nstatic bool testing_force_state;\nstatic bool exit_post_ops_called;\n\nenum pm_state forced_state;\nstatic const struct device *device_dummy;\nstatic struct dummy_driver_api *api;\n\nstatic const struct device *const device_a =\n\tDEVICE_DT_GET(DT_INST(0, test_device_pm));\nstatic const struct device *const device_c =\n\tDEVICE_DT_GET(DT_INST(2, test_device_pm));\n\n/*\n * This device does not support PM. It is used to check\n * the behavior of the PM subsystem when a device does not\n * support PM.\n */\nstatic const struct device *const device_e =\n\tDEVICE_DT_GET(DT_INST(4, test_device_pm));\n\nDEVICE_DT_DEFINE(DT_INST(4, test_device_pm), NULL,\n\t\tNULL, NULL, NULL,\n\t\tPRE_KERNEL_1, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\n\t\tNULL);\n\n/*\n * According with the initialization level, devices A, B and C are\n * initialized in the following order A -> B -> C.\n *\n * The power management subsystem uses this order to suspend and resume\n * devices. Devices are suspended in the reverse order:\n *\n * C -> B -> A\n *\n * While resuming uses the initialization order:\n *\n * A -> B -> C\n *\n * This test checks if these order is correct checking devices A and C states\n * when suspending / resuming device B.\n */\n\nstatic int device_a_pm_action(const struct device *dev,\n\t\tenum pm_device_action pm_action)\n{\n\tARG_UNUSED(dev);\n\tARG_UNUSED(pm_action);\n\n\treturn 0;\n}\n\nPM_DEVICE_DT_DEFINE(DT_INST(0, test_device_pm), device_a_pm_action);\n\nDEVICE_DT_DEFINE(DT_INST(0, test_device_pm), NULL,\n\t\tPM_DEVICE_DT_GET(DT_INST(0, test_device_pm)), NULL, NULL,\n\t\tPRE_KERNEL_1, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\n\t\tNULL);\n\n\nstatic int device_b_pm_action(const struct device *dev,\n\t\tenum pm_device_action pm_action)\n{\n\tenum pm_device_state state_a;\n\tenum pm_device_state state_c;\n\n\tif (!testing_device_order) {\n\t\treturn 0;\n\t}\n\n\t(void)pm_device_state_get(device_a, &state_a);\n\t(void)pm_device_state_get(device_c, &state_c);\n\n\tswitch (pm_action) {\n\tcase PM_DEVICE_ACTION_RESUME:\n\t\t/* Check if device C is still suspended */\n\t\tzassert_equal(state_c, PM_DEVICE_STATE_SUSPENDED,\n\t\t\t\t\"Inconsistent states\");\n\t\t/* Check if device A is already active */\n\t\tzassert_equal(state_a, PM_DEVICE_STATE_ACTIVE,\n\t\t\t\t\"Inconsistent states\");\n\t\tbreak;\n\tcase PM_DEVICE_ACTION_SUSPEND:\n\t\t/* Check if device C is already suspended */\n\t\tzassert_equal(state_c, PM_DEVICE_STATE_SUSPENDED,\n\t\t\t\t\"Inconsistent states\");\n\t\t/* Check if device A is still active */\n\t\tzassert_equal(state_a, PM_DEVICE_STATE_ACTIVE,\n\t\t\t\t\"Inconsistent states\");\n\t\tbreak;\n\tdefault:\n\t\tbreak;\n\t}\n\n\treturn 0;\n}\n\nPM_DEVICE_DT_DEFINE(DT_INST(1, test_device_pm), device_b_pm_action);\n\nDEVICE_DT_DEFINE(DT_INST(1, test_device_pm), NULL,\n\t\tPM_DEVICE_DT_GET(DT_INST(1, test_device_pm)), NULL, NULL,\n\t\tPRE_KERNEL_2, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\n\t\tNULL);\n\nstatic int device_c_pm_action(const struct device *dev,\n\t\tenum pm_device_action pm_action)\n{\n\tARG_UNUSED(dev);\n\tARG_UNUSED(pm_action);\n\n\treturn 0;\n}\n\nPM_DEVICE_DT_DEFINE(DT_INST(2, test_device_pm), device_c_pm_action);\n\nDEVICE_DT_DEFINE(DT_INST(2, test_device_pm), NULL,\n\t\tPM_DEVICE_DT_GET(DT_INST(2, test_device_pm)), NULL, NULL,\n\t\tPOST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\n\t\tNULL);\n\nstatic int device_init_failed(const struct device *dev)\n{\n\tARG_UNUSED(dev);\n\n\t/* Return error to mark device as not ready. */\n\treturn -EIO;\n}\n\nstatic int device_d_pm_action(const struct device *dev,\n\t\tenum pm_device_action pm_action)\n{\n\tARG_UNUSED(dev);\n\tARG_UNUSED(pm_action);\n\n\tzassert_unreachable(\"Entered PM handler for unready device\");\n\n\treturn 0;\n}\n\nPM_DEVICE_DT_DEFINE(DT_INST(3, test_device_pm), device_d_pm_action);\n\nDEVICE_DT_DEFINE(DT_INST(3, test_device_pm), device_init_failed,\n\t\tPM_DEVICE_DT_GET(DT_INST(3, test_device_pm)), NULL, NULL,\n\t\tPOST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\n\t\tNULL);\n\nvoid pm_state_set(enum pm_state state, uint8_t substate_id)\n{\n\tARG_UNUSED(substate_id);\n\tARG_UNUSED(state);\n\n\tif (IS_ENABLED(CONFIG_PM_STATE_SET_IRQ_LOCKED)) {\n\t\tzassert_equal(_kernel.idle, 0,\n\t\t\t      \"PM state set ran before idle wake sentinel was cleared\");\n\t}\n\n\tenum pm_device_state device_power_state;\n\n#ifndef CONFIG_PM_DEVICE_SYSTEM_MANAGED\n\t/* Devices shouldn't have changed state because system managed\n\t * device power management is not enabled.\n\t **/\n\tpm_device_state_get(device_a, &device_power_state);\n\tzassert_true(device_power_state == PM_DEVICE_STATE_ACTIVE);\n\n\tpm_device_state_get(device_c, &device_power_state);\n\tzassert_true(device_power_state == PM_DEVICE_STATE_ACTIVE);\n#else\n\t/* If testing device order this function does not need to anything */\n\tif (testing_device_order) {\n\t\treturn;\n\t}\n\n\tif (testing_force_state) {\n\t\t/* if forced to given power state was called */\n\t\tset_pm = true;\n\t\tzassert_equal(state, forced_state);\n\t\ttesting_force_state = false;\n\n\t\t/* We have forced a state that does not trigger device power management.\n\t\t * The device should still be active.\n\t\t */\n\t\tpm_device_state_get(device_c, &device_power_state);\n\t\tzassert_true(device_power_state == PM_DEVICE_STATE_ACTIVE);\n\t}\n\n\t/* at this point, notify_pm_state_entry() implemented in\n\t * this file has been called and set_pm should have been set\n\t */\n\tzassert_true(set_pm == true,\n\t\t     \"Notification to enter suspend was not sent to the App\");\n\n\t/* this function is called after devices enter low power state */\n\tpm_device_state_get(device_dummy, &device_power_state);\n\n\tif (testing_device_runtime) {\n\t\t/* If device runtime is enable, the device should still be\n\t\t * active\n\t\t */\n\t\tzassert_true(device_power_state == PM_DEVICE_STATE_ACTIVE);\n\t} else {\n\t\t/* at this point, devices have been deactivated */\n\t\tzassert_false(device_power_state == PM_DEVICE_STATE_ACTIVE);\n\t}\n\n\t/* this function is called when system entering low power state, so\n\t * parameter state should not be PM_STATE_ACTIVE\n\t */\n\tzassert_false(state == PM_STATE_ACTIVE,\n\t\t      \"Entering low power state with a wrong parameter\");\n#endif\n}\n\nvoid pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id)\n{\n\tARG_UNUSED(state);\n\tARG_UNUSED(substate_id);\n\n\texit_post_ops_called = true;\n\tzassert_false(arch_cpu_irqs_are_enabled(),\n\t\t      \"PM exit post ops ran with interrupts enabled\");\n}\n\n/* Our PM policy handler */\nconst struct pm_state_info *pm_policy_next_state(uint8_t cpu, int32_t ticks)\n{\n\tconst struct pm_state_info *cpu_states;\n\n\tzassert_true(pm_state_cpu_get_all(cpu, &cpu_states) == 2,\n\t\t     \"There is no power state defined\");\n\n\t/* make sure this is idle thread */\n\tzassert_true(z_is_idle_thread_object(_current));\n\tzassert_true(ticks == _kernel.idle);\n\tzassert_false(k_can_yield());\n\tidle_entered = true;\n\n\tif (enter_low_power) {\n\t\tenter_low_power = false;\n\t\tnotify_app_entry = true;\n\t\treturn &cpu_states[0];\n\t}\n\n\treturn NULL;\n}\n\n/* implement in application, called by idle thread */\nstatic void notify_pm_state_entry(enum pm_state state)\n{\n\tenum pm_device_state device_power_state;\n\n\t/* enter suspend */\n\tzassert_true(notify_app_entry == true,\n\t\t     \"Notification to enter suspend was not sent to the App\");\n\tzassert_true(z_is_idle_thread_object(_current));\n\tzassert_equal(state, PM_STATE_SUSPEND_TO_IDLE);\n\n\tpm_device_state_get(device_dummy, &device_power_state);\n\tif (testing_device_runtime || !IS_ENABLED(CONFIG_PM_DEVICE_SYSTEM_MANAGED)) {\n\t\t/* If device runtime is enable, the device should still be\n\t\t * active\n\t\t */\n\t\tzassert_true(device_power_state == PM_DEVICE_STATE_ACTIVE);\n\t} else {\n\t\t/* at this point, devices should not be active */\n\t\tzassert_false(device_power_state == PM_DEVICE_STATE_ACTIVE);\n\t}\n\tset_pm = true;\n\tnotify_app_exit = true;\n}\n\n/* implement in application, called by idle thread */\nstatic void notify_pm_state_exit(enum pm_state state)\n{\n\tenum pm_device_state device_power_state;\n\n\t/* leave suspend */\n\tzassert_true(notify_app_exit == true,\n\t\t     \"Notification to leave suspend was not sent to the App\");\n\tzassert_true(z_is_idle_thread_object(_current));\n\tzassert_equal(state, PM_STATE_SUSPEND_TO_IDLE);\n\n\t/* at this point, devices are active again*/\n\tpm_device_state_get(device_dummy, &device_power_state);\n\tzassert_equal(device_power_state, PM_DEVICE_STATE_ACTIVE);\n\tleave_idle = true;\n\n}\n\n/*\n * @brief test power idle\n *\n * @details\n *  - The global idle routine executes when no other work is available\n *  - The idle routine provide a timeout parameter to the suspend routine\n *    indicating the amount of time guaranteed to expire before the next\n *    timeout, pm_policy_next_state() handle this parameter.\n *  - In this case, pm_policy_next_sate() return PM_STATE_ACTIVE,\n *    so there is no low power operation happen.\n *\n * @see pm_policy_next_state()\n *\n * @ingroup power_tests\n */\nZTEST(power_management_1cpu, test_power_idle)\n{\n\tTC_PRINT(\"give way to idle thread\\n\");\n\tk_sleep(SLEEP_TIMEOUT);\n\tzassert_true(idle_entered, \"Never entered idle thread\");\n}\n\nstatic struct pm_notifier notifier = {\n\t.state_entry = notify_pm_state_entry,\n\t.state_exit = notify_pm_state_exit,\n};\n\n/*\n * @brief test power state transition\n *\n * @details\n *  - The system support control of power state ordering between\n *    subsystems and devices\n *  - The application can control system power state transitions in idle thread\n *    through pm_notify_pm_state_entry and pm_notify_pm_state_exit\n *\n * @see pm_notify_pm_state_entry(), pm_notify_pm_state_exit()\n *\n * @ingroup power_tests\n */\nZTEST(power_management_1cpu, test_power_state_trans)\n{\n\tint ret;\n\n\tpm_notifier_register(&notifier);\n\tenter_low_power = true;\n\texit_post_ops_called = false;\n\n\tret = pm_device_runtime_disable(device_dummy);\n\tzassert_true(ret == 0, \"Failed to disable device runtime PM\");\n\n\t/* give way to idle thread */\n\tk_sleep(SLEEP_TIMEOUT);\n\tzassert_true(leave_idle);\n\tzassert_true(exit_post_ops_called);\n\n\tret = pm_device_runtime_enable(device_dummy);\n\tzassert_true(ret == 0, \"Failed to enable device runtime PM\");\n\n\tpm_notifier_unregister(&notifier);\n}\n\n/*\n * @brief notification between system and device\n *\n * @details\n *  - device driver notify its power state change by pm_device_runtime_get and\n *    pm_device_runtime_put_async\n *  - system inform device system power state change through device interface\n *    pm_action_cb\n *\n * @see pm_device_runtime_get(), pm_device_runtime_put_async(),\n *      pm_device_action_run(), pm_device_state_get()\n *\n * @ingroup power_tests\n */\nZTEST(power_management_1cpu, test_power_state_notification)\n{\n\tint ret;\n\tenum pm_device_state device_power_state;\n\n\tpm_notifier_register(&notifier);\n\tenter_low_power = true;\n\n\tret = api->open(device_dummy);\n\tzassert_true(ret == 0, \"Fail to open device\");\n\n\tpm_device_state_get(device_dummy, &device_power_state);\n\tzassert_equal(device_power_state, PM_DEVICE_STATE_ACTIVE);\n\n\n\t/* The device should be kept active even when the system goes idle */\n\ttesting_device_runtime = true;\n\n\tk_sleep(SLEEP_TIMEOUT);\n\tzassert_true(leave_idle);\n\n\tapi->close(device_dummy);\n\tpm_device_state_get(device_dummy, &device_power_state);\n\tzassert_equal(device_power_state, PM_DEVICE_STATE_SUSPENDED);\n\tpm_notifier_unregister(&notifier);\n\ttesting_device_runtime = false;\n}\n\nZTEST(power_management_1cpu, test_device_order)\n{\n\tzassert_true(device_is_ready(device_a), \"device a not ready\");\n\tzassert_true(device_is_ready(device_c), \"device c not ready\");\n\n\ttesting_device_order = true;\n\tenter_low_power = true;\n\n\tk_sleep(SLEEP_TIMEOUT);\n\n\ttesting_device_order = false;\n}\n\n/**\n * @brief Test the device busy APIs.\n */\nZTEST(power_management_1cpu, test_busy)\n{\n\tbool busy;\n\n\tbusy = pm_device_is_any_busy();\n\tzassert_false(busy);\n\n\tpm_device_busy_set(device_dummy);\n\n\tbusy = pm_device_is_any_busy();\n\tzassert_true(busy);\n\n\tbusy = pm_device_is_busy(device_dummy);\n\tzassert_true(busy);\n\n\tpm_device_busy_clear(device_dummy);\n\n\tbusy = pm_device_is_any_busy();\n\tzassert_false(busy);\n\n\tbusy = pm_device_is_busy(device_dummy);\n\tzassert_false(busy);\n}\n\nZTEST(power_management_1cpu, test_empty_states)\n{\n\tconst struct pm_state_info *cpu_states;\n\tuint8_t state = pm_state_cpu_get_all(1u, &cpu_states);\n\n\tzassert_equal(state, 0);\n}\n\nZTEST(power_management_1cpu, test_force_state)\n{\n\tconst struct pm_state_info *cpu_states;\n\n\tpm_state_cpu_get_all(0, &cpu_states);\n\tforced_state = cpu_states[1].state;\n\tbool ret = pm_state_force(0, &cpu_states[1]);\n\n\tzassert_equal(ret, true, \"Error in force state\");\n\n\ttesting_force_state = true;\n\tk_sleep(K_SECONDS(1U));\n}\n\nZTEST(power_management_1cpu, test_device_without_pm)\n{\n\tpm_device_busy_set(device_e);\n\n\t/* Since this device does not support PM, it should not be set busy */\n\tzassert_false(pm_device_is_busy(device_e));\n\n\t/* No device should be busy */\n\tzassert_false(pm_device_is_any_busy());\n\n\t/* Lets ensure that nothing happens */\n\tpm_device_busy_clear(device_e);\n\n\t/* Check the status. Since PM is enabled but this device does not support it.\n\t * It should return -ENOSYS\n\t */\n\tzassert_equal(pm_device_state_get(device_e, NULL), -ENOSYS);\n\n\t/* Try to forcefully change the state should also return an error */\n\tzassert_equal(pm_device_action_run(device_e, PM_DEVICE_ACTION_SUSPEND), -ENOSYS);\n\n\t/* Confirming the device is powered */\n\tzassert_true(pm_device_is_powered(device_e));\n\n\t/* Test wakeup functionality */\n\tzassert_false(pm_device_wakeup_enable(device_e, true));\n\tzassert_false(pm_device_wakeup_is_enabled(device_e));\n}\n\nvoid power_management_1cpu_teardown(void *data)\n{\n\tpm_notifier_unregister(&notifier);\n}\n\nstatic void *power_management_1cpu_setup(void)\n{\n\tdevice_dummy = device_get_binding(DUMMY_DRIVER_NAME);\n\tapi = (struct dummy_driver_api *)device_dummy->api;\n\treturn NULL;\n}\n\nZTEST_SUITE(power_management_1cpu, NULL, power_management_1cpu_setup,\n\t\t\tztest_simple_1cpu_before, ztest_simple_1cpu_after,\n\t\t\tpower_management_1cpu_teardown);\n"
+      },
+      "events": [
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "SystemPromptEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "MessageEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [100, 120], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c:\\n   100\\t\\n   101\\t\\tswitch (pm_action) {\\n   102\\t\\tcase PM_DEVICE_ACTION_RESUME:\\n   103\\t\\t\\t/* Check if device C is still suspended */\\n   104\\t\\t\\tzassert_equal(state_c, PM_DEVICE_STATE_SUSPENDED,\\n   105\\t\\t\\t\\t\\t\\\"Inconsistent states\\\");\\n   106\\t\\t\\t/* Check if device A is already active */\\n   107\\t\\t\\tzassert_equal(state_a, PM_DEVICE_STATE_ACTIVE,\\n   108\\t\\t\\t\\t\\t\\\"Inconsistent states\\\");\\n   109\\t\\t\\tbreak;\\n   110\\t\\tcase PM_DEVICE_ACTION_SUSPEND:\\n   111\\t\\t\\t/* Check if device C is already suspended */\\n   112\\t\\t\\tzassert_equal(state_c, PM_DEVICE_STATE_SUSPENDED,\\n   113\\t\\t\\t\\t\\t\\\"Inconsistent states\\\");\\n   114\\t\\t\\t/* Check if device A is still active */\\n   115\\t\\t\\tzassert_equal(state_a, PM_DEVICE_STATE_ACTIVE,\\n   116\\t\\t\\t\\t\\t\\\"Inconsistent states\\\");\\n   117\\t\\t\\tbreak;\\n   118\\t\\tdefault:\\n   119\\t\\t\\tbreak;\\n   120\\t\\t}\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c:\\n     1\\t/*\\n     2\\t * Copyright (c) 2020 Intel Corporation.\\n     3\\t *\\n     4\\t * SPDX-License-Identifier: Apache-2.0\\n     5\\t */\\n     6\\t\\n     7\\t#include <zephyr/sys/printk.h>\\n     8\\t#include <zephyr/types.h>\\n     9\\t#include <zephyr/pm/device.h>\\n    10\\t#include <zephyr/pm/device_runtime.h>\\n    11\\t#include <zephyr/ztest.h>\\n    12\\t#include <ksched.h>\\n    13\\t#include <zephyr/kernel.h>\\n    14\\t#include <zephyr/pm/pm.h>\\n    15\\t#include \\\"dummy_driver.h\\\"\\n    16\\t\\n    17\\t#define SLEEP_MSEC 100\\n    18\\t#define SLEEP_TIMEOUT K_MSEC(SLEEP_MSEC)\\n    19\\t\\n    20\\t/* for checking power suspend and resume order between system and devices */\\n    21\\tstatic bool enter_low_power;\\n    22\\tstatic bool notify_app_entry;\\n    23\\tstatic bool notify_app_exit;\\n    24\\tstatic bool set_pm;\\n    25\\tstatic bool leave\n…[17765 chars omitted]…\nered(device_e));\\n   506\\t\\n   507\\t\\t/* Test wakeup functionality */\\n   508\\t\\tzassert_false(pm_device_wakeup_enable(device_e, true));\\n   509\\t\\tzassert_false(pm_device_wakeup_is_enabled(device_e));\\n   510\\t}\\n   511\\t\\n   512\\tvoid power_management_1cpu_teardown(void *data)\\n   513\\t{\\n   514\\t\\tpm_notifier_unregister(&notifier);\\n   515\\t}\\n   516\\t\\n   517\\tstatic void *power_management_1cpu_setup(void)\\n   518\\t{\\n   519\\t\\tdevice_dummy = device_get_binding(DUMMY_DRIVER_NAME);\\n   520\\t\\tapi = (struct dummy_driver_api *)device_dummy->api;\\n   521\\t\\treturn NULL;\\n   522\\t}\\n   523\\t\\n   524\\tZTEST_SUITE(power_management_1cpu, NULL, power_management_1cpu_setup,\\n   525\\t\\t\\t\\tztest_simple_1cpu_before, ztest_simple_1cpu_after,\\n   526\\t\\t\\t\\tpower_management_1cpu_teardown);\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"find /zephyrproject/zephyr -name init_levels.h\", \"is_input\": false, \"timeout\": null, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"\"}], \"is_error\": false, \"command\": \"find /zephyrproject/zephyr -name init_levels.h\", \"exit_code\": 0, \"timeout\": false, \"metadata\": {\"exit_code\": 0, \"pid\": -1, \"username\": \"root\", \"hostname\": \"79752d5f800b\", \"working_dir\": \"/workspace/project\", \"py_interpreter_path\": \"/opt/python/venv/bin/python\", \"prefix\": \"\", \"suffix\": \"\\n[The command completed with exit code 0.]\"}, \"full_output_save_dir\": null, \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"grep -rE 'PRE_KERNEL_1|PRE_KERNEL_2|POST_KERNEL' /zephyrproject/zephyr/include/zephyr/init\", \"is_input\": false, \"timeout\": null, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"grep: /zephyrproject/zephyr/include/zephyr/init: No such file or directory\"}], \"is_error\": false, \"command\": \"grep -rE 'PRE_KERNEL_1|PRE_KERNEL_2|POST_KERNEL' /zephyrproject/zephyr/include/zephyr/init\", \"exit_code\": 2, \"timeout\": false, \"metadata\": {\"exit_code\": 2, \"pid\": -1, \"username\": \"root\", \"hostname\": \"79752d5f800b\", \"working_dir\": \"/workspace/project\", \"py_interpreter_path\": \"/opt/python/venv/bin/python\", \"prefix\": \"\", \"suffix\": \"\\n[The command completed with exit code 2.]\"}, \"full_output_save_dir\": \"workspace/conversations/3c7d6e5035c543a4bb6bc7d50154dcdd/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"grep -rE 'PRE_KERNEL_1|PRE_KERNEL_2|POST_KERNEL' /zephyrproject/zephyr/include/zephyr/init.h\", \"is_input\": false, \"timeout\": null, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"* - `PRE_KERNEL_1`: Executed in Kernel's initialization context, which uses\\n * - `PRE_KERNEL_2`: Same as `PRE_KERNEL_1`.\\n * - `POST_KERNEL`: Executed after Kernel is alive. From this point on, Kernel\\n#define Z_INIT_PRE_KERNEL_1_PRE_KERNEL_1 1\\n#define Z_INIT_PRE_KERNEL_2_PRE_KERNEL_2 1\\n#define Z_INIT_POST_KERNEL_POST_KERNEL   1\\n#define Z_INIT_ORD_PRE_KERNEL_1 1\\n#define Z_INIT_ORD_PRE_KERNEL_2 2\\n#define Z_INIT_ORD_POST_KERNEL  3\\n * @param level Init level (EARLY, PRE_KERNEL_1, PRE_KERNEL_2, POST_KERNEL,\\n                    Z_INIT_PRE_KERNEL_1_##level, (Z_INIT_ORD_PRE_KERNEL_1),    \\\\\\n                    Z_INIT_PRE_KERNEL_2_##level, (Z_INIT_ORD_PRE_KERNEL_2),    \\\\\\n                    Z_INIT_POST_KERNEL_##level, (Z_INIT_ORD_POST_KERNEL),      \\\\\\n * @param level Initialization level. Allowed tokens: `EARLY`, `PRE_KERNEL_1`,\\n * `PRE_KERNEL_2`, `POST_KERNEL`, `APPLICATION` and `SMP` if\"}], \"is_error\": false, \"command\": \"grep -rE 'PRE_KERNEL_1|PRE_KERNEL_2|POST_KERNEL' /zephyrproject/zephyr/include/zephyr/init.h\", \"exit_code\": 0, \"timeout\": false, \"metadata\": {\"exit_code\": 0, \"pid\": -1, \"username\": \"root\", \"hostname\": \"79752d5f800b\", \"working_dir\": \"/workspace/project\", \"py_interpreter_path\": \"/opt/python/venv/bin/python\", \"prefix\": \"\", \"suffix\": \"\\n[The command completed with exit code 0.]\"}, \"full_output_save_dir\": \"workspace/conversations/3c7d6e5035c543a4bb6bc7d50154dcdd/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"str_replace\", \"path\": \"/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c\", \"file_text\": null, \"old_str\": \"\\t\\t\\tPOST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\\n\", \"new_str\": \"\\t\\t\\tPRE_KERNEL_2, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\\n\", \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"No replacement was performed. Multiple occurrences of old_str `POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,` in lines [129, 171]. Please ensure it is unique.\"}], \"is_error\": true, \"command\": \"str_replace\", \"path\": null, \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"str_replace\", \"path\": \"/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c\", \"file_text\": null, \"old_str\": \"\\tDEVICE_DT_DEFINE(DT_INST(1, test_device_pm), NULL,\\n\\t\\t\\tPM_DEVICE_DT_GET(DT_INST(1, test_device_pm)), NULL, NULL,\\n\\t\\t\\tPOST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\\n\\t\\t\\tNULL);\", \"new_str\": \"\\tDEVICE_DT_DEFINE(DT_INST(1, test_device_pm), NULL,\\n\\t\\t\\tPM_DEVICE_DT_GET(DT_INST(1, test_device_pm)), NULL, NULL,\\n\\t\\t\\tPRE_KERNEL_2, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\\n\\t\\t\\tNULL);\", \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"No replacement was performed, old_str `DEVICE_DT_DEFINE(DT_INST(1, test_device_pm), NULL,\\n\\t\\t\\tPM_DEVICE_DT_GET(DT_INST(1, test_device_pm)), NULL, NULL,\\n\\t\\t\\tPOST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\\n\\t\\t\\tNULL);` did not appear verbatim in /zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c.\"}], \"is_error\": true, \"command\": \"str_replace\", \"path\": null, \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [127, 130], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c:\\n   127\\tDEVICE_DT_DEFINE(DT_INST(1, test_device_pm), NULL,\\n   128\\t\\t\\tPM_DEVICE_DT_GET(DT_INST(1, test_device_pm)), NULL, NULL,\\n   129\\t\\t\\tPOST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\\n   130\\t\\t\\tNULL);\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [143, 146], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c:\\n   143\\tDEVICE_DT_DEFINE(DT_INST(2, test_device_pm), NULL,\\n   144\\t\\t\\tPM_DEVICE_DT_GET(DT_INST(2, test_device_pm)), NULL, NULL,\\n   145\\t\\t\\tPRE_KERNEL_2, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\\n   146\\t\\t\\tNULL);\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"str_replace\", \"path\": \"/zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c\", \"file_text\": null, \"old_str\": \"DEVICE_DT_DEFINE(DT_INST(1, test_device_pm), NULL,\\n\\t\\t\\tPM_DEVICE_DT_GET(DT_INST(1, test_device_pm)), NULL, NULL,\\n\\t\\t\\tPOST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\\n\\t\\t\\tNULL);\", \"new_str\": \"DEVICE_DT_DEFINE(DT_INST(1, test_device_pm), NULL,\\n\\t\\t\\tPM_DEVICE_DT_GET(DT_INST(1, test_device_pm)), NULL, NULL,\\n\\t\\t\\tPRE_KERNEL_2, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\\n\\t\\t\\tNULL);\", \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"No replacement was performed, old_str `DEVICE_DT_DEFINE(DT_INST(1, test_device_pm), NULL,\\n\\t\\t\\tPM_DEVICE_DT_GET(DT_INST(1, test_device_pm)), NULL, NULL,\\n\\t\\t\\tPOST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\\n\\t\\t\\tNULL);` did not appear verbatim in /zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c.\"}], \"is_error\": true, \"command\": \"str_replace\", \"path\": null, \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"sed -i '129s/POST_KERNEL/PRE_KERNEL_2/' /zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c && sed -i '145s/PRE_KERNEL_2/POST_KERNEL/' /zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c\", \"is_input\": false, \"timeout\": null, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"\"}], \"is_error\": false, \"command\": \"sed -i '129s/POST_KERNEL/PRE_KERNEL_2/' /zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c && sed -i '145s/PRE_KERNEL_2/POST_KERNEL/' /zephyrproject/zephyr/tests/subsys/pm/power_mgmt/src/main.c\", \"exit_code\": 0, \"timeout\": false, \"metadata\": {\"exit_code\": 0, \"pid\": -1, \"username\": \"root\", \"hostname\": \"79752d5f800b\", \"working_dir\": \"/workspace/project\", \"py_interpreter_path\": \"/opt/python/venv/bin/python\", \"prefix\": \"\", \"suffix\": \"\\n[The command completed with exit code 0.]\"}, \"full_output_save_dir\": null, \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"cd /zephyrproject/zephyr/tests/subsys/pm/power_mgmt && timeout 600 west build -b native_sim -d /tmp/build -p always -t run .\", \"is_input\": false, \"timeout\": null, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"-- west build: generating a build system\\nLoading Zephyr default modules (Zephyr base).\\n-- Application: /zephyrproject/zephyr/tests/subsys/pm/power_mgmt\\n-- CMake version: 3.28.3\\n-- Found Python3: /opt/python/venv/bin/python3 (found suitable version \\\"3.12.3\\\", minimum required is \\\"3.12\\\") found components: Interpreter\\n-- Cache files will be written to: /root/.cache/zephyr\\n-- Zephyr version: 4.4.99 (/zephyrproject/zephyr)\\n-- Found west (found suitable version \\\"1.5.0\\\", minimum required is \\\"0.14.0\\\")\\n-- Board: native_sim, qualifiers: native\\n-- Found host-tools: zephyr 1.0.1 (/opt/toolchains/zephyr-sdk-1.0.1)\\n-- Found toolchain: host (gcc/ld)\\n-- Found Dtc: /opt/toolchains/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/bin/dtc (found suitable version \\\"1.7.0\\\", minimum required is \\\"1.4.6\\\")\\n-- Found BOARD.dts: /zephyrproject/zephyr/boards/native/native_sim/native_sim.dts\\n-- Found devicetree overlay:\n…[3772 chars omitted]…\neconds\\n - PASS - [power_management_1cpu.test_power_idle] duration = 0.110 seconds\\n - PASS - [power_management_1cpu.test_power_state_notification] duration = 0.110 seconds\\n - PASS - [power_management_1cpu.test_power_state_trans] duration = 0.110 seconds\\n\\n------ TESTSUITE SUMMARY END ------\\n\\n===================================================================\\nPROJECT EXECUTION SUCCESSFUL\"}], \"is_error\": false, \"command\": \"cd /zephyrproject/zephyr/tests/subsys/pm/power_mgmt && timeout 600 west build -b native_sim -d /tmp/build -p always -t run .\", \"exit_code\": 0, \"timeout\": false, \"metadata\": {\"exit_code\": 0, \"pid\": -1, \"username\": \"root\", \"hostname\": \"79752d5f800b\", \"working_dir\": \"/zephyrproject/zephyr/tests/subsys/pm/power_mgmt\", \"py_interpreter_path\": \"/opt/python/venv/bin/python\", \"prefix\": \"\", \"suffix\": \"\\n[The command completed with exit code 0.]\"}, \"full_output_save_dir\": \"workspace/conversations/3c7d6e5035c543a4bb6bc7d50154dcdd/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "MessageEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        }
+      ]
+    },
+    "api_events": [],
+    "started_at": "2026-10-23T06:38:04+00:00",
+    "run_meta": {
+      "code_commit": "39bccdc0b12a62028ebe41421e8e240b25fa8f21",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": true,
+      "proposed_hybrid_rag": true,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
