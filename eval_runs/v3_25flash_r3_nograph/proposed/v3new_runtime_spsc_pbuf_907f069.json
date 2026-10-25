@@ -1,0 +1,220 @@
+[
+  {
+    "case_id": "v3new_runtime_spsc_pbuf_907f069",
+    "category": "runtime_crash",
+    "pipeline": "proposed",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "resolved",
+    "iterations": 3,
+    "ttr_seconds": 707.634171962738,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 373,
+            "output_tokens": 2269
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 16156,
+            "output_tokens": 31046
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "The error log indicates an assertion failure in `test_spsc_pbuf_flags` at `main.c:76`. The assertion `zassert_equal(wlen, -ENOMEM);` fails, meaning `wlen` was not `-ENOMEM` as expected.\n\nLet's analyze the relevant code:\n1.  **`LEN_SZ` macro**: In `lib/os/spsc_pbuf.c`, `LEN_SZ` is defined as `sizeof(uint32_t)`. However, the `spsc_pbuf_commit` function uses `sys_put_be16(len, &data_loc[wr_idx]);` to store the packet length, which writes a `uint16_t` (2 bytes). This is a mismatch. `LEN_SZ` should be `sizeof(uint16_t)`. This macro is also used in `spsc_pbuf_alloc` for calculating `space` and `free_space`.\n\n2.  **`spsc_pbuf_capacity` function**: In `include/zephyr/sys/spsc_pbuf.h`, `spsc_pbuf_capacity` returns `pb->common.len - sizeof(uint32_t);`. The `sizeof(uint32_t)` here is intended to subtract the length header size. It should use the correct `LEN_SZ`.\n\n3.  **Test's `capacity` calculation**: In `tests/lib/spsc_pbuf/src/main.c`, the `capacity` variable in `test_spsc_pbuf_flags` is calculated using `... - sizeof(uint32_t);`. This also incorrectly assumes the header size is `sizeof(uint32_t)`. It should use the correct `LEN_SZ`.\n\nLet's trace the impact of these fixes:\n\n**Before fixes:**\n*   `LEN_SZ = 4`\n*   `pb->common.len` (size of `data[]` array) = `216 - 12 - 4 = 200`.\n*   `spsc_pbuf_capacity(ib)` returns `200 - 4 = 196`.\n*   Test's `capacity` variable = `196`.\n*   `spsc_pbuf_alloc` for `len=198`:\n    *   `space = len + LEN_SZ = 198 + 4 = 202`.\n    *   `free_space` (available for data + header) = `pblen - FREE_SPACE_DISTANCE = 200 - 4 = 196`.\n    *   Allocatable data length = `min(requested_len, max(free_space - LEN_SZ, 0)) = min(198, max(196 - 4, 0)) = min(198, 192) = 192`.\n    *   `spsc_pbuf_alloc` returns `192`.\n    *   `spsc_pbuf_write` returns `-ENOMEM` (since `192 != 198`).\n    *   The test expects `-ENOMEM`, so it *should* pass. The failure indicates `wlen` is *not* `-ENOMEM`. This is a contradiction.\n\n**After fixes (assuming `FREE_SPACE_DISTANCE = 4` remains):**\n1.  Move `LEN_SZ` to `spsc_pbuf.h` and define it as `sizeof(uint16_t)`.\n2.  Modify `spsc_pbuf_capacity` to use `LEN_SZ`.\n3.  Modify the test's `capacity` calculation to use `LEN_SZ`.\n\n*   `LEN_SZ = 2`\n*   `pb->common.len` = `200`.\n*   `spsc_pbuf_capacity(ib)` returns `200 - LEN_SZ = 200 - 2 = 198`.\n*   Test's `capacity` variable = `216 - 16 - 2 = 198`.\n*   The assertion `zassert_equal(spsc_pbuf_capacity(ib), capacity);` will now pass (`198 == 198`).\n*   `spsc_pbuf_alloc` for `len=198`:\n    *   `space = len + LEN_SZ = 198 + 2 = 200`.\n    *   `free_space` (available for data + header) = `pblen - FREE_SPACE_DISTANCE = 200 - 4 = 196`.\n    *   Allocatable data length = `min(requested_len, max(free_space - LEN_SZ, 0)) = min(198, max(196 - 2, 0)) = min(198, 194) = 194`.\n    *   `spsc_pbuf_alloc` returns `194`.\n    *   `spsc_pbuf_write` returns `-ENOMEM` (since `194 != 198`).\n    *   The test still expects `-ENOMEM`, so it *should* pass.\n\nThe persistent contradiction suggests that the runtime behavior is different from the static analysis, specifically that `spsc_pbuf_alloc` is returning `198` (or some other positive value) instead of `194` or `192`. This would imply that `FREE_SPACE_DISTANCE` is effectively not being subtracted in the `spsc_pbuf_alloc` function for the initial empty state, which would be a bug in the `free_space` calculation logic. However, the current code explicitly subtracts it when `rd_idx == 0`.\n\nGiven the strict format requirements, I will apply the identified bugs related to `LEN_SZ` and `capacity` calculations. These are clear logical inconsistencies in the code and test. If the test still fails, a deeper investigation into the `FREE_SPACE_DISTANCE` application would be necessary.\n\n**Fixes:**\n1.  Move `LEN_SZ` definition from `lib/os/spsc_pbuf.c` to `include/zephyr/sys/spsc_pbuf.h`.\n2.  Change `LEN_SZ` to `sizeof(uint16_t)`.\n3.  Update `spsc_pbuf_capacity` in `include/zephyr/sys/spsc_pbuf.h` to use `LEN_SZ`.\n4.  Update the `capacity` calculation in `tests/lib/spsc_pbuf/src/main.c` to use `LEN_SZ`.\n\ninclude/zephyr/sys/spsc_pbuf.h\n<<<<<<<< SEARCH\n#define SPSC_PBUF_UTILIZATION_OFFSET 8\n\n/**@} */\n\n#ifdef CONFIG_DCACHE_LINE_SIZE\n#define Z_SPSC_PBUF_LOCAL_DCACHE_LINE CONFIG_DCACHE_LINE_SIZE\n#else\n#define Z_SPSC_PBUF_LOCAL_DCACHE_LINE 0\n#endif\n\n#ifndef CONFIG_SPSC_PBUF_REMOTE_DCACHE_LINE\n#define CONFIG_SPSC_PBUF_REMOTE_DCACHE_LINE 0\n#endif\n\n#define Z_SPSC_PBUF_DCACHE_LINE \\\n\tMAX(CONFIG_SPSC_PBUF_REMOTE_DCACHE_LINE, Z_SPSC_PBUF_LOCAL_DCACHE_LINE)\n\n/** @brief Maximum packet length. */\n#define SPSC_PBUF_MAX_LEN 0xFF00\n\n/** @brief First part of packet buffer control block.\n *\n * This part contains only data set during the initialization and data touched\n * by the reader. If packet is shared between to cores then data changed by\n * the reader should be on different cache line than the data changed by the\n * writer.\n */\nstruct spsc_pbuf_common {\n\tuint32_t len;\t\t/* Length of data[] in bytes. */\n\tuint32_t flags;\t\t/* Flags. See @ref SPSC_PBUF_FLAGS */\n\tuint32_t rd_idx;\t/* Index of the first valid byte in data[] */\n};\n\n/* Padding to fill cache line. */\n#define Z_SPSC_PBUF_PADDING \\\n\tMAX(0, Z_SPSC_PBUF_DCACHE_LINE - (int)sizeof(struct spsc_pbuf_common))\n========\n#define SPSC_PBUF_UTILIZATION_OFFSET 8\n\n/**@} */\n\n#ifdef CONFIG_DCACHE_LINE_SIZE\n#define Z_SPSC_PBUF_LOCAL_DCACHE_LINE CONFIG_DCACHE_LINE_SIZE\n#else\n#define Z_SPSC_PBUF_LOCAL_DCACHE_LINE 0\n#endif\n\n#ifndef CONFIG_SPSC_PBUF_REMOTE_DCACHE_LINE\n#define CONFIG_SPSC_PBUF_REMOTE_DCACHE_LINE 0\n#endif\n\n#define Z_SPSC_PBUF_DCACHE_LINE \\\n\tMAX(CONFIG_SPSC_PBUF_REMOTE_DCACHE_LINE, Z_SPSC_PBUF_LOCAL_DCACHE_LINE)\n\n/** @brief Maximum packet length. */\n#define SPSC_PBUF_MAX_LEN 0xFF00\n\n/** @brief Size of the field which stores packet length. */\n#define LEN_SZ sizeof(uint16_t)\n\n/** @brief First part of packet buffer control block.\n *\n * This part contains only data set during the initialization and data touched\n * by the reader. If packet is shared between to cores then data changed by\n * the reader should be on different cache line than the data changed by the\n * writer.\n */\nstruct spsc_pbuf_common {\n\tuint32_t len;\t\t/* Length of data[] in bytes. */\n\tuint32_t flags;\t\t/* Flags. See @ref SPSC_PBUF_FLAGS */\n\tuint32_t rd_idx;\t/* Index of the first valid byte in data[] */\n};\n\n/* Padding to fill cache line. */\n#define Z_SPSC_PBUF_PADDING \\\n\tMAX(0, Z_SPSC_PBUF_DCACHE_LINE - (int)sizeof(struct spsc_pbuf_common))\n>>>>>>>> REPLACE\n\ninclude/zephyr/sys/spsc_pbuf.h\n<<<<<<<< SEARCH\n */\nstatic inline uint32_t spsc_pbuf_capacity(struct spsc_pbuf *pb)\n{\n\treturn pb->common.len - sizeof(uint32_t);\n}\n========\n */\nstatic inline uint32_t spsc_pbuf_capacity(struct spsc_pbuf *pb)\n{\n\treturn pb->common.len - LEN_SZ;\n}\n>>>>>>>> REPLACE\n\nlib/os/spsc_pbuf.c\n<<<<<<<< SEARCH\n#include <zephyr/sys/barrier.h>\n#include <zephyr/sys/byteorder.h>\n\n#define LEN_SZ sizeof(uint32_t)\n/* Amount of data that is left unused to distinguish between empty and full. */\n#define FREE_SPACE_DISTANCE sizeof(uint32_t)\n\n#define PADDING_MARK 0xFF\n========\n#include <zephyr/sys/barrier.h>\n#include <zephyr/sys/byteorder.h>\n\n/* Amount of data that is left unused to distinguish between empty and full. */\n#define FREE_SPACE_DISTANCE sizeof(uint32_t)\n\n#define PADDING_MARK 0xFF\n>>>>>>>> REPLACE\n\ntests/lib/spsc_pbuf/src/main.c\n<<<<<<<< SEARCH\n\tsize_t capacity = (use_cache(flags) ?\n\t\t(sizeof(memory_area) - offsetof(struct spsc_pbuf, ext.cache.data)) :\n\t\t(sizeof(memory_area) - offsetof(struct spsc_pbuf, ext.nocache.data))) -\n\t\tsizeof(uint32_t);\n\n\tmemset(memory_area, 0, sizeof(memory_area));\n\tib = spsc_pbuf_init(memory_area, sizeof(memory_area), flags);\n\tzassert_equal_ptr(ib, memory_area);\n\tzassert_equal(spsc_pbuf_capacity(ib), capacity);\n========\n\tsize_t capacity = (use_cache(flags) ?\n\t\t(sizeof(memory_area) - offsetof(struct spsc_pbuf, ext.cache.data)) :\n\t\t(sizeof(memory_area) - offsetof(struct spsc_pbuf, ext.nocache.data))) -\n\t\tLEN_SZ;\n\n\tmemset(memory_area, 0, sizeof(memory_area));\n\tib = spsc_pbuf_init(memory_area, sizeof(memory_area), flags);\n\tzassert_equal_ptr(ib, memory_area);\n\tzassert_equal(spsc_pbuf_capacity(ib), capacity);\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "include/zephyr/sys/spsc_pbuf.h",
+            "include/zephyr/sys/spsc_pbuf.h",
+            "lib/os/spsc_pbuf.c",
+            "tests/lib/spsc_pbuf/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\n[105/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/spinlock_validate.c.obj\n[106/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeslicing.c.obj\n[107/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/scheduler.c.obj\n[108/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/thread_monitor.c.obj\n[109/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[110/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[111/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/usage.c.obj\n[112/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[113/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[114/118] Linking C static library zephyr/kernel/libkernel.a\n[115/118] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[116/118] Building native simulator runner, and linking final executable\n[117/118] Running utility command for native_runner_executable\n[117/118] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE test_spsc_pbuf\n===================================================================\nSTART - test_0cpy\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/spsc_pbuf/src/main.c:142: packet_write: ((uintptr_t)buf % sizeof(uint32_t) not equal to 0)",
+          "conflict_tag": null,
+          "graph_context": "Knowledge graph retrieval is disabled.",
+          "analyzer_diagnosis": {
+            "iteration": 1,
+            "reasoning": "The error is an assertion failure within the `spsc_pbuf` library test, specifically `test_spsc_pbuf_flags`. The assertion `wlen not equal to -ENOMEM` indicates that the test expected a different return value than `-ENOMEM` (No memory available) during a write operation. This suggests a potential misconfiguration of memory resources (e.g., heap size, `spsc_pbuf` buffer size) via Kconfig, or an unexpected memory allocation behavior within the `spsc_pbuf` implementation. Graph retrieval for `spsc_pbuf` and related memory Kconfig symbols is needed to investigate these possibilities.",
+            "error_category": "kconfig",
+            "search_keywords": [
+              "spsc_pbuf"
+            ]
+          },
+          "retrieved_files": [
+            "lib/os/spsc_pbuf.c",
+            "include/zephyr/sys/spsc_pbuf.h",
+            "tests/lib/spsc_pbuf/src/main.c",
+            "lib/os/Kconfig"
+          ],
+          "restored_files": [
+            "tests/lib/spsc_pbuf/src/main.c"
+          ]
+        }
+      },
+      {
+        "iteration": 2,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 683,
+            "output_tokens": 802
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 16611,
+            "output_tokens": 9116
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "The crash is caused by an assertion failure in `tests/lib/spsc_pbuf/src/main.c` at line 142: `zassert_equal((uintptr_t)buf % sizeof(uint32_t), 0, \"%d: Expected aligned buffer\", line);`. This indicates that the buffer returned by `spsc_pbuf_alloc` is not 32-bit word aligned.\n\nThe `spsc_pbuf_alloc` function returns a pointer to `&data_loc[wr_idx + LEN_SZ]`.\n`data_loc` points to the start of the data buffer, which is guaranteed to be 32-bit word aligned (or cache-line aligned, which is also 32-bit word aligned or greater).\n`wr_idx` is also maintained to be 32-bit word aligned due to `ROUND_UP` operations in `spsc_pbuf_commit` and `spsc_pbuf_free`.\nHowever, `LEN_SZ` is defined as `sizeof(uint16_t)`, which is 2 bytes.\nAdding 2 bytes (`LEN_SZ`) to a 32-bit word aligned address (`data_loc[wr_idx]`) results in an address that is only 2-byte aligned, not 4-byte aligned. This violates the requirement that allocated buffers are 32-bit word aligned.\n\nTo fix this, `LEN_SZ` must be changed to `sizeof(uint32_t)` (4 bytes). This ensures that `data_loc[wr_idx + LEN_SZ]` remains 32-bit word aligned. The actual `uint16_t` packet length can still be stored in the first two bytes of this 4-byte header, with the remaining two bytes acting as padding.\n\nThis change also has a beneficial side effect on the `spsc_pbuf_capacity` function and the test's expectations.\nThe `spsc_pbuf_capacity` function currently returns `pb->common.len - LEN_SZ`.\nThe `FREE_SPACE_DISTANCE` is defined as `sizeof(uint32_t)` (4 bytes) and is used internally to distinguish between empty and full states, effectively reducing the usable buffer space.\nThe test's `capacity` variable is calculated as `pb->common.len - FREE_SPACE_DISTANCE`.\nWith `LEN_SZ` changed to `sizeof(uint32_t)`, `LEN_SZ` becomes equal to `FREE_SPACE_DISTANCE`.\nTherefore, `spsc_pbuf_capacity` will return `pb->common.len - FREE_SPACE_DISTANCE`, which matches the test's `capacity` variable, resolving a potential mismatch in the test's assertion.\n\nThe `PADDING_MARK` logic, which checks `data_loc[rd_idx] == PADDING_MARK`, remains valid because `sys_put_be16` writes to the first two bytes of the header, and `SPSC_PBUF_MAX_LEN` ensures the first byte of a valid length is never `0xFF`.\n\ninclude/zephyr/sys/spsc_pbuf.h\n<<<<<<<< SEARCH\n/** @brief Size of the field which stores packet length. */\n#define LEN_SZ sizeof(uint16_t)\n========\n/** @brief Size of the field which stores packet length. */\n#define LEN_SZ sizeof(uint32_t)\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "include/zephyr/sys/spsc_pbuf.h"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nSTART - test_0cpy\nPASS - test_0cpy in 0.000 seconds\n===================================================================\nSTART - test_0cpy_corner1\nPASS - test_0cpy_corner1 in 0.000 seconds\n===================================================================\nSTART - test_0cpy_corner2\nPASS - test_0cpy_corner2 in 0.000 seconds\n===================================================================\nSTART - test_0cpy_discard\nPASS - test_0cpy_discard in 0.000 seconds\n===================================================================\nSTART - test_0cpy_smaller\nPASS - test_0cpy_smaller in 0.000 seconds\n===================================================================\nSTART - test_largest_alloc\nPASS - test_largest_alloc in 0.000 seconds\n===================================================================\nSTART - test_spsc_pbuf_ut\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/spsc_pbuf/src/main.c:76: test_spsc_pbuf_flags: wlen not equal to -ENOMEM",
+          "conflict_tag": null,
+          "graph_context": "Knowledge graph retrieval is disabled.",
+          "analyzer_diagnosis": {
+            "iteration": 2,
+            "reasoning": "The error is a runtime assertion failure indicating that a memory buffer passed to `packet_write` within the `spsc_pbuf` test suite is not aligned to a 4-byte boundary. This is not a plain C syntax error. While it's a runtime issue, the root cause could be related to the configuration of the `spsc_pbuf` library or how memory is allocated for it, which might involve Kconfig symbols or specific memory region definitions. Therefore, graph retrieval for `spsc_pbuf` is needed to investigate its configuration and potential alignment requirements.",
+            "error_category": "other",
+            "search_keywords": [
+              "spsc_pbuf"
+            ]
+          },
+          "retrieved_files": [
+            "lib/os/spsc_pbuf.c",
+            "include/zephyr/sys/spsc_pbuf.h",
+            "tests/lib/spsc_pbuf/src/main.c",
+            "lib/os/Kconfig"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 3,
+        "compiled": true,
+        "resolved": true,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 373,
+            "output_tokens": 981
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 16408,
+            "output_tokens": 4631
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "success",
+          "patch": "lib/os/spsc_pbuf.c\n<<<<<<<< SEARCH\n\toutlen = spsc_pbuf_alloc(pb, len, &pbuf);\n\tif (outlen != len) {\n\t\treturn outlen <= 0 ? outlen : -ENOMEM;\n\t}\n========\n\toutlen = spsc_pbuf_alloc(pb, len, &pbuf);\n\tif (outlen < 0) {\n\t\treturn outlen;\n\t}\n\tif (outlen != len) {\n\t\treturn -ENOMEM;\n\t}\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "lib/os/spsc_pbuf.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "Zephyr OS successfully booted.",
+          "conflict_tag": null,
+          "graph_context": "Knowledge graph retrieval is disabled.",
+          "analyzer_diagnosis": {
+            "iteration": 3,
+            "reasoning": "The error log indicates an assertion failure within the `spsc_pbuf` library test, specifically `wlen not equal to -ENOMEM`. This means that a write operation failed with an out-of-memory error (`-ENOMEM`), suggesting that the allocated buffer for `spsc_pbuf` is insufficient. Graph retrieval is needed to investigate Kconfig symbols related to `spsc_pbuf` buffer sizes or general memory configuration that might be causing this resource exhaustion.",
+            "error_category": "kconfig",
+            "search_keywords": [
+              "spsc_pbuf"
+            ]
+          },
+          "retrieved_files": [
+            "lib/os/spsc_pbuf.c",
+            "include/zephyr/sys/spsc_pbuf.h",
+            "tests/lib/spsc_pbuf/src/main.c",
+            "lib/os/Kconfig"
+          ],
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": [
+      "lib/os/spsc_pbuf.c",
+      "include/zephyr/sys/spsc_pbuf.h",
+      "tests/lib/spsc_pbuf/src/main.c",
+      "lib/os/Kconfig"
+    ],
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_0cpy\nPASS - test_0cpy in 0.000 seconds\n===================================================================\nSTART - test_0cpy_corner1\nPASS - test_0cpy_corner1 in 0.000 seconds\n===================================================================\nSTART - test_0cpy_corner2\nPASS - test_0cpy_corner2 in 0.000 seconds\n===================================================================\nSTART - test_0cpy_discard\nPASS - test_0cpy_discard in 0.000 seconds\n===================================================================\nSTART - test_0cpy_smaller\nPASS - test_0cpy_smaller in 0.000 seconds\n===================================================================\nSTART - test_largest_alloc\nPASS - test_largest_alloc in 0.000 seconds\n===================================================================\nSTART - test_spsc_pbuf_ut\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/spsc_pbuf/src/main.c:76: test_spsc_pbuf_flags: wlen not equal to -ENOMEM",
+    "protected_file_count": 4,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r3_nograph_main/proposed/v3new_runtime_spsc_pbuf_907f069",
+    "api_events": [
+      {
+        "kind": "retry",
+        "what": "analyzer",
+        "attempt": 1,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 133
+      }
+    ],
+    "started_at": "2026-10-25T13:57:25+00:00",
+    "run_meta": {
+      "code_commit": "e95ee404e8c62ca9b3569ec3150dbb667e4b6d75",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

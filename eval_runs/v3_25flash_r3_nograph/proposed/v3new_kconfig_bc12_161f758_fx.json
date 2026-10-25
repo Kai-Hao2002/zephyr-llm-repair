@@ -1,0 +1,344 @@
+[
+  {
+    "case_id": "v3new_kconfig_bc12_161f758_fx",
+    "category": "kconfig",
+    "pipeline": "proposed",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 5,
+    "ttr_seconds": 635.4524600505829,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 242,
+            "output_tokens": 998
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 18719,
+            "output_tokens": 17399
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "The linker error `undefined reference to '__device_dts_ord_39'` indicates that a device was referenced using `DEVICE_DT_GET` (or similar macro) but its corresponding `DEVICE_DEFINE` was not found.\n\nIn `drivers/i2c/i2c_emul.c`, the `I2C_EMUL_INIT` macro attempts to build an array `emuls_##n` by iterating over the children of the `zephyr,i2c-emul-controller` node using `DT_FOREACH_CHILD_STATUS_OKAY` and `EMUL_LINK_AND_COMMA`. The `EMUL_LINK_AND_COMMA` macro uses `DEVICE_DT_GET(node_id)`.\n\nThe children of `zephyr,i2c-emul-controller` in the device tree (e.g., `pi3usb9201@5f` from `native_sim.overlay`) represent *emulated I2C devices*. These nodes do not have a `DEVICE_DEFINE` associated with them directly. Instead, *emulator drivers* (like `diodes,pi3usb9201`'s emulator) are defined using `EMUL_DT_INST_DEFINE` and register themselves with the I2C emulator controller via `i2c_emul_register`.\n\nThe `emul_init_for_bus` mechanism, which relies on `emul_list_for_bus` and `DEVICE_DT_GET` for children, is intended for bus drivers that manage *other Zephyr device drivers* as children, not for emulated devices.\n\nTherefore, the `i2c_emul_controller` should not attempt to initialize its emulated children using `emul_init_for_bus`. It should rely on the I2C emulator drivers to register themselves.\n\nThe fix involves:\n1.  Removing the `emul_list_for_bus` member from `struct i2c_emul_config`.\n2.  Removing the call to `emul_init_for_bus(dev)` from `i2c_emul_init`.\n3.  Removing the `emuls_##n` array definition and its corresponding initialization in `i2c_emul_cfg_##n` within the `I2C_EMUL_INIT` macro.\n4.  Removing the unused `EMUL_LINK_AND_COMMA` macro.\n\nThis change ensures that the I2C emulator controller correctly relies on individual I2C emulators to register themselves, resolving the linker error caused by attempting to get a `const struct device *` for non-driver device tree nodes.\n\ndrivers/i2c/i2c_emul.c\n<<<<<<<< SEARCH\nstruct i2c_emul_config {\n\t/* List of struct i2c_emul associated with the device */\n\tsys_slist_t emuls;\n\t/* I2C host configuration */\n\tuint32_t config;\n\tuint32_t bitrate;\n#ifdef CONFIG_I2C_TARGET\n\tstruct i2c_target_config *target_cfg;\n#endif\n};\n\nstruct i2c_emul_config {\n\tstruct emul_list_for_bus emul_list;\n\tbool target_buffered_mode;\n\tconst struct i2c_dt_spec *forward_list;\n\tuint16_t forward_list_size;\n};\n\n/**\n * Find an emulator by its I2C address\n *\n * @param dev I2C emulation controller device\n * @param addr I2C address of that device\n * @return emulator ro use\n * @return NULL if not found\n */\nstatic struct i2c_emul *i2c_emul_find(const struct device *dev, int addr)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\tsys_snode_t *node;\n\n\tSYS_SLIST_FOR_EACH_NODE(&data->emuls, node) {\n\t\tstruct i2c_emul *emul = NULL;\n\n\t\temul = CONTAINER_OF(node, struct i2c_emul, node);\n\t\tif (emul->addr == addr) {\n\t\t\treturn emul;\n\t\t}\n\t}\n\n\treturn NULL;\n}\n\nstatic int i2c_emul_configure(const struct device *dev, uint32_t dev_config)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\n\tdata->config = dev_config;\n\n\treturn 0;\n}\n\nstatic int i2c_emul_get_config(const struct device *dev, uint32_t *dev_config)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\n\t*dev_config = data->config;\n\n\treturn 0;\n}\n\n#ifdef CONFIG_I2C_TARGET\nstatic int i2c_emul_send_to_target(const struct device *dev, struct i2c_msg *msgs, uint8_t num_msgs)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\tconst struct i2c_target_callbacks *callbacks = data->target_cfg->callbacks;\n\n#ifdef CONFIG_I2C_TARGET_BUFFER_MODE\n\tconst struct i2c_emul_config *config = dev->config;\n\n\tif (config->target_buffered_mode) {\n\t\tfor (uint8_t i = 0; i < num_msgs; ++i) {\n\t\t\tif (i2c_is_read_op(&msgs[i])) {\n\t\t\t\tuint8_t *ptr = NULL;\n\t\t\t\tuint32_t len;\n\t\t\t\tint rc =\n\t\t\t\t\tcallbacks->buf_read_requested(data->target_cfg, &ptr, &len);\n\n\t\t\t\tif (rc != 0) {\n\t\t\t\t\treturn rc;\n\t\t\t\t}\n\t\t\t\tif (len > msgs[i].len) {\n\t\t\t\t\tLOG_ERR(\"buf_read_requested returned too many bytes\");\n\t\t\t\t\treturn -ENOMEM;\n\t\t\t\t}\n\t\t\t\tmemcpy(msgs[i].buf, ptr, len);\n\t\t\t} else {\n\t\t\t\tcallbacks->buf_write_received(data->target_cfg, msgs[i].buf,\n\t\t\t\t\t\t\t      msgs[i].len);\n\t\t\t}\n\t\t\tif (i2c_is_stop_op(&msgs[i])) {\n\t\t\t\tint rc = callbacks->stop(data->target_cfg);\n\n\t\t\t\tif (rc != 0) {\n\t\t\t\t\treturn rc;\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t\treturn 0;\n\t}\n#endif /* CONFIG_I2C_TARGET_BUFFER_MODE */\n\n\tfor (uint8_t i = 0; i < num_msgs; ++i) {\n\t\tLOG_DBG(\"    msgs[%u].flags? 0x%02x\", i, msgs[i].flags);\n\t\tif (i2c_is_read_op(&msgs[i])) {\n\t\t\tfor (uint32_t j = 0; j < msgs[i].len; ++j) {\n\t\t\t\tint rc = 0;\n\n\t\t\t\tif (j == 0) {\n\t\t\t\t\tLOG_DBG(\"    Calling read_requested with data %p\",\n\t\t\t\t\t\t(void *)&msgs[i].buf[j]);\n\t\t\t\t\trc = callbacks->read_requested(data->target_cfg,\n\t\t\t\t\t\t\t\t       &msgs[i].buf[j]);\n\t\t\t\t} else {\n\t\t\t\t\tLOG_DBG(\"    Calling read_processed with data %p\",\n\t\t\t\t\t\t(void *)&msgs[i].buf[j]);\n\t\t\t\t\trc = callbacks->read_processed(data->target_cfg,\n\t\t\t\t\t\t\t\t       &msgs[i].buf[j]);\n\t\t\t\t}\n\t\t\t\tif (rc != 0) {\n\t\t\t\t\treturn rc;\n\t\t\t\t}\n\t\t\t}\n\t\t} else {\n\t\t\tfor (uint32_t j = 0; j < msgs[i].len; ++j) {\n\t\t\t\tint rc = 0;\n\n\t\t\t\tif (j == 0) {\n\t\t\t\t\tLOG_DBG(\"    Calling write_requested\");\n\t\t\t\t\trc = callbacks->write_requested(data->target_cfg);\n\t\t\t\t}\n\t\t\t\tif (rc != 0) {\n\t\t\t\t\treturn rc;\n\t\t\t\t}\n\t\t\t\tLOG_DBG(\"    Calling write_received with data 0x%02x\",\n\t\t\t\t\tmsgs[i].buf[j]);\n\t\t\t\trc = callbacks->write_received(data->target_cfg, msgs[i].buf[j]);\n\t\t\t\tif (rc != 0) {\n\t\t\t\t\treturn rc;\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t\tif (i2c_is_stop_op(&msgs[i])) {\n\t\t\tint rc = callbacks->stop(data->target_cfg);\n\n\t\t\tif (rc != 0) {\n\t\t\t\treturn rc;\n\t\t\t}\n\t\t}\n\t}\n\treturn 0;\n}\n#endif /* CONFIG_I2C_TARGET*/\n\nstatic int i2c_emul_transfer(const struct device *dev, struct i2c_msg *msgs, uint8_t num_msgs,\n\t\t\t     uint16_t addr)\n{\n\tconst struct i2c_emul_config *conf = dev->config;\n\tstruct i2c_emul *emul;\n\tconst struct i2c_emul_api *api;\n\tint ret;\n\n\tLOG_DBG(\"%s(dev=%p, addr=0x%02x)\", __func__, (void *)dev, addr);\n#ifdef CONFIG_I2C_TARGET\n\tstruct i2c_emul_data *data = dev->data;\n\n\t/*\n\t * First check if the bus is configured as a target, targets either listen to the address or\n\t * ignore the messages. So if the address doesn't match, we're just going to bail.\n\t */\n\tLOG_DBG(\"    has_target_cfg? %d\", data->target_cfg != NULL);\n\tif (data->target_cfg != NULL) {\n\t\tLOG_DBG(\"    target_cfg->address? 0x%02x\", data->target_cfg->address);\n\t\tif (data->target_cfg->address != addr) {\n\t\t\treturn -EINVAL;\n\t\t}\n\t\tLOG_DBG(\"    forwarding to target\");\n\t\treturn i2c_emul_send_to_target(dev, msgs, num_msgs);\n\t}\n#endif /* CONFIG_I2C_TARGET */\n\n\t/*\n\t * We're not a target, but lets check if we need to forward this request before we start\n\t * looking for a peripheral.\n\t */\n\tfor (uint16_t i = 0; i < conf->forward_list_size; ++i) {\n\t\tLOG_DBG(\"    Checking forward list [%u].addr? 0x%02x\", i,\n\t\t\tconf->forward_list[i].addr);\n\t\tif (conf->forward_list[i].addr == addr) {\n\t\t\t/* We need to forward this request */\n\t\t\treturn i2c_transfer(conf->forward_list[i].bus, msgs, num_msgs, addr);\n\t\t}\n\t}\n\n\temul = i2c_emul_find(dev, addr);\n\tif (!emul) {\n\t\treturn -EIO;\n\t}\n\n\tapi = emul->api;\n\t__ASSERT_NO_MSG(emul->api);\n\t__ASSERT_NO_MSG(emul->api->transfer);\n\n\tif (emul->mock_api != NULL && emul->mock_api->transfer != NULL) {\n\t\tret = emul->mock_api->transfer(emul->target, msgs, num_msgs, addr);\n\t\tif (ret != -ENOSYS) {\n\t\t\treturn ret;\n\t\t}\n\t}\n\n\treturn api->transfer(emul->target, msgs, num_msgs, addr);\n}\n\n/**\n * Set up a new emulator and add it to the list\n *\n * @param dev I2C emulation controller device\n */\nstatic int i2c_emul_init(const struct device *dev)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\tint rc;\n\n\tsys_slist_init(&data->emuls);\n\n\trc = emul_init_for_bus(dev);\n\n\t/* Set config to an uninitialized state */\n\tdata->config = (I2C_MODE_CONTROLLER | i2c_map_dt_bitrate(data->bitrate));\n\n\treturn rc;\n}\n\nint i2c_emul_register(const struct device *dev, struct i2c_emul *emul)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\tconst char *name = emul->target->dev->name;\n\n\tsys_slist_append(&data->emuls, &emul->node);\n\n\tLOG_INF(\"Register emulator '%s' at I2C addr %02x\", name, emul->addr);\n\n\treturn 0;\n}\n\n#ifdef CONFIG_I2C_TARGET\nstatic int i2c_emul_target_register(const struct device *dev, struct i2c_target_config *cfg)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\n\tdata->target_cfg = cfg;\n\treturn 0;\n}\n\nstatic int i2c_emul_target_unregister(const struct device *dev, struct i2c_target_config *cfg)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\n\tif (data->target_cfg != cfg) {\n\t\treturn -EINVAL;\n\t}\n\n\tdata->target_cfg = NULL;\n\treturn 0;\n}\n#endif /* CONFIG_I2C_TARGET */\n\n/* Device instantiation */\n\nstatic DEVICE_API(i2c, i2c_emul_api) = {\n\t.configure = i2c_emul_configure,\n\t.get_config = i2c_emul_get_config,\n\t.transfer = i2c_emul_transfer,\n#ifdef CONFIG_I2C_TARGET\n\t.target_register = i2c_emul_target_register,\n\t.target_unregister = i2c_emul_target_unregister,\n#endif\n#ifdef CONFIG_I2C_RTIO\n\t.iodev_submit = i2c_iodev_submit_fallback,\n#endif\n};\n\n#define EMUL_LINK_AND_COMMA(node_id)                                                               \\\n\t{                                                                                          \\\n\t\t.dev = DEVICE_DT_GET(node_id),                                                     \\\n\t},\n\n#define EMUL_FORWARD_ITEM(node_id, prop, idx)                                                      \\\n\t{                                                                                          \\\n\t\t.bus = DEVICE_DT_GET_BY_IDX(node_id, prop, idx),                                   \\\n\t\t.addr = DT_PHA_BY_IDX(node_id, prop, idx, addr),                                   \\\n\t},\n\n#define I2C_EMUL_INIT(n)                                                                           \\\n\tstatic const struct emul_link_for_bus emuls_##n[] = {                                      \\\n\t\tDT_FOREACH_CHILD_STATUS_OKAY(DT_DRV_INST(n), EMUL_LINK_AND_COMMA)};                \\\n\tstatic const struct i2c_dt_spec emul_forward_list_##n[] = {                                \\\n\t\tCOND_CODE_1(DT_INST_NODE_HAS_PROP(n, forwards),                                    \\\n\t\t\t    (DT_INST_FOREACH_PROP_ELEM(n, forwards, EMUL_FORWARD_ITEM)), ())};     \\\n\tstatic struct i2c_emul_config i2c_emul_cfg_##n = {                                         \\\n\t\t.emul_list =                                                                       \\\n\t\t\t{                                                                          \\\n\t\t\t\t.children = emuls_##n,                                             \\\n\t\t\t\t.num_children = ARRAY_SIZE(emuls_##n),                             \\\n\t\t\t},                                                                         \\\n\t\t.target_buffered_mode = DT_INST_PROP(n, target_buffered_mode),                     \\\n\t\t.forward_list = emul_forward_list_##n,                                             \\\n\t\t.forward_list_size = ARRAY_SIZE(emul_forward_list_##n),                            \\\n\t};                                                                                         \\\n\tstatic struct i2c_emul_data i2c_emul_data_##n = {                                          \\\n\t\t.bitrate = DT_INST_PROP(n, clock_frequency),                                       \\\n\t};                                                                                         \\\n\tI2C_DEVICE_DT_INST_DEFINE(n, i2c_emul_init, NULL, &i2c_emul_data_##n, &i2c_emul_cfg_##n,   \\\n\t\t\t\t  POST_KERNEL, CONFIG_I2C_INIT_PRIORITY, &i2c_emul_api);\n\nDT_INST_FOREACH_STATUS_OKAY(I2C_EMUL_INIT)\n========\nstruct i2c_emul_config {\n\tbool target_buffered_mode;\n\tconst struct i2c_dt_spec *forward_list;\n\tuint16_t forward_list_size;\n};\n\n/**\n * Find an emulator by its I2C address\n *\n * @param dev I2C emulation controller device\n * @param addr I2C address of that device\n * @return emulator ro use\n * @return NULL if not found\n */\nstatic struct i2c_emul *i2c_emul_find(const struct device *dev, int addr)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\tsys_snode_t *node;\n\n\tSYS_SLIST_FOR_EACH_NODE(&data->emuls, node) {\n\t\tstruct i2c_emul *emul = NULL;\n\n\t\temul = CONTAINER_OF(node, struct i2c_emul, node);\n\t\tif (emul->addr == addr) {\n\t\t\treturn emul;\n\t\t}\n\t}\n\n\treturn NULL;\n}\n\nstatic int i2c_emul_configure(const struct device *dev, uint32_t dev_config)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\n\tdata->config = dev_config;\n\n\treturn 0;\n}\n\nstatic int i2c_emul_get_config(const struct device *dev, uint32_t *dev_config)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\n\t*dev_config = data->config;\n\n\treturn 0;\n}\n\n#ifdef CONFIG_I2C_TARGET\nstatic int i2c_emul_send_to_target(const struct device *dev, struct i2c_msg *msgs, uint8_t num_msgs)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\tconst struct i2c_target_callbacks *callbacks = data->target_cfg->callbacks;\n\n#ifdef CONFIG_I2C_TARGET_BUFFER_MODE\n\tconst struct i2c_emul_config *config = dev->config;\n\n\tif (config->target_buffered_mode) {\n\t\tfor (uint8_t i = 0; i < num_msgs; ++i) {\n\t\t\tif (i2c_is_read_op(&msgs[i])) {\n\t\t\t\tuint8_t *ptr = NULL;\n\t\t\t\tuint32_t len;\n\t\t\t\tint rc =\n\t\t\t\t\tcallbacks->buf_read_requested(data->target_cfg, &ptr, &len);\n\n\t\t\t\tif (rc != 0) {\n\t\t\t\t\treturn rc;\n\t\t\t\t}\n\t\t\t\tif (len > msgs[i].len) {\n\t\t\t\t\tLOG_ERR(\"buf_read_requested returned too many bytes\");\n\t\t\t\t\treturn -ENOMEM;\n\t\t\t\t}\n\t\t\t\tmemcpy(msgs[i].buf, ptr, len);\n\t\t\t} else {\n\t\t\t\tcallbacks->buf_write_received(data->target_cfg, msgs[i].buf,\n\t\t\t\t\t\t\t      msgs[i].len);\n\t\t\t}\n\t\t\tif (i2c_is_stop_op(&msgs[i])) {\n\t\t\t\tint rc = callbacks->stop(data->target_cfg);\n\n\t\t\t\tif (rc != 0) {\n\t\t\t\t\treturn rc;\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t\treturn 0;\n\t}\n#endif /* CONFIG_I2C_TARGET_BUFFER_MODE */\n\n\tfor (uint8_t i = 0; i < num_msgs; ++i) {\n\t\tLOG_DBG(\"    msgs[%u].flags? 0x%02x\", i, msgs[i].flags);\n\t\tif (i2c_is_read_op(&msgs[i])) {\n\t\t\tfor (uint32_t j = 0; j < msgs[i].len; ++j) {\n\t\t\t\tint rc = 0;\n\n\t\t\t\tif (j == 0) {\n\t\t\t\t\tLOG_DBG(\"    Calling read_requested with data %p\",\n\t\t\t\t\t\t(void *)&msgs[i].buf[j]);\n\t\t\t\t\trc = callbacks->read_requested(data->target_cfg,\n\t\t\t\t\t\t\t\t       &msgs[i].buf[j]);\n\t\t\t\t} else {\n\t\t\t\t\tLOG_DBG(\"    Calling read_processed with data %p\",\n\t\t\t\t\t\t(void *)&msgs[i].buf[j]);\n\t\t\t\t\trc = callbacks->read_processed(data->target_cfg,\n\t\t\t\t\t\t\t\t       &msgs[i].buf[j]);\n\t\t\t\t}\n\t\t\t\tif (rc != 0) {\n\t\t\t\t\treturn rc;\n\t\t\t\t}\n\t\t\t}\n\t\t} else {\n\t\t\tfor (uint32_t j = 0; j < msgs[i].len; ++j) {\n\t\t\t\tint rc = 0;\n\n\t\t\t\tif (j == 0) {\n\t\t\t\t\tLOG_DBG(\"    Calling write_requested\");\n\t\t\t\t\trc = callbacks->write_requested(data->target_cfg);\n\t\t\t\t}\n\t\t\t\tif (rc != 0) {\n\t\t\t\t\treturn rc;\n\t\t\t\t}\n\t\t\t\tLOG_DBG(\"    Calling write_received with data 0x%02x\",\n\t\t\t\t\tmsgs[i].buf[j]);\n\t\t\t\trc = callbacks->write_received(data->target_cfg, msgs[i].buf[j]);\n\t\t\t\tif (rc != 0) {\n\t\t\t\t\treturn rc;\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t\tif (i2c_is_stop_op(&msgs[i])) {\n\t\t\tint rc = callbacks->stop(data->target_cfg);\n\n\t\t\tif (rc != 0) {\n\t\t\t\treturn rc;\n\t\t\t}\n\t\t}\n\t}\n\treturn 0;\n}\n#endif /* CONFIG_I2C_TARGET*/\n\nstatic int i2c_emul_transfer(const struct device *dev, struct i2c_msg *msgs, uint8_t num_msgs,\n\t\t\t     uint16_t addr)\n{\n\tconst struct i2c_emul_config *conf = dev->config;\n\tstruct i2c_emul *emul;\n\tconst struct i2c_emul_api *api;\n\tint ret;\n\n\tLOG_DBG(\"%s(dev=%p, addr=0x%02x)\", __func__, (void *)dev, addr);\n#ifdef CONFIG_I2C_TARGET\n\tstruct i2c_emul_data *data = dev->data;\n\n\t/*\n\t * First check if the bus is configured as a target, targets either listen to the address or\n\t * ignore the messages. So if the address doesn't match, we're just going to bail.\n\t */\n\tLOG_DBG(\"    has_target_cfg? %d\", data->target_cfg != NULL);\n\tif (data->target_cfg != NULL) {\n\t\tLOG_DBG(\"    target_cfg->address? 0x%02x\", data->target_cfg->address);\n\t\tif (data->target_cfg->address != addr) {\n\t\t\treturn -EINVAL;\n\t\t}\n\t\tLOG_DBG(\"    forwarding to target\");\n\t\treturn i2c_emul_send_to_target(dev, msgs, num_msgs);\n\t}\n#endif /* CONFIG_I2C_TARGET */\n\n\t/*\n\t * We're not a target, but lets check if we need to forward this request before we start\n\t * looking for a peripheral.\n\t */\n\tfor (uint16_t i = 0; i < conf->forward_list_size; ++i) {\n\t\tLOG_DBG(\"    Checking forward list [%u].addr? 0x%02x\", i,\n\t\t\tconf->forward_list[i].addr);\n\t\tif (conf->forward_list[i].addr == addr) {\n\t\t\t/* We need to forward this request */\n\t\t\treturn i2c_transfer(conf->forward_list[i].bus, msgs, num_msgs, addr);\n\t\t}\n\t}\n\n\temul = i2c_emul_find(dev, addr);\n\tif (!emul) {\n\t\treturn -EIO;\n\t}\n\n\tapi = emul->api;\n\t__ASSERT_NO_MSG(emul->api);\n\t__ASSERT_NO_MSG(emul->api->transfer);\n\n\tif (emul->mock_api != NULL && emul->mock_api->transfer != NULL) {\n\t\tret = emul->mock_api->transfer(emul->target, msgs, num_msgs, addr);\n\t\tif (ret != -ENOSYS) {\n\t\t\treturn ret;\n\t\t}\n\t}\n\n\treturn api->transfer(emul->target, msgs, num_msgs, addr);\n}\n\n/**\n * Set up a new emulator and add it to the list\n *\n * @param dev I2C emulation controller device\n */\nstatic int i2c_emul_init(const struct device *dev)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\tint rc = 0; /* Initialize rc to 0 as emul_init_for_bus is removed. */\n\n\tsys_slist_init(&data->emuls);\n\n\t/* Set config to an uninitialized state */\n\tdata->config = (I2C_MODE_CONTROLLER | i2c_map_dt_bitrate(data->bitrate));\n\n\treturn rc;\n}\n\nint i2c_emul_register(const struct device *dev, struct i2c_emul *emul)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\tconst char *name = emul->target->dev->name;\n\n\tsys_slist_append(&data->emuls, &emul->node);\n\n\tLOG_INF(\"Register emulator '%s' at I2C addr %02x\", name, emul->addr);\n\n\treturn 0;\n}\n\n#ifdef CONFIG_I2C_TARGET\nstatic int i2c_emul_target_register(const struct device *dev, struct i2c_target_config *cfg)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\n\tdata->target_cfg = cfg;\n\treturn 0;\n}\n\nstatic int i2c_emul_target_unregister(const struct device *dev, struct i2c_target_config *cfg)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\n\tif (data->target_cfg != cfg) {\n\t\treturn -EINVAL;\n\t}\n\n\tdata->target_cfg = NULL;\n\treturn 0;\n}\n#endif /* CONFIG_I2C_TARGET */\n\n/* Device instantiation */\n\nstatic DEVICE_API(i2c, i2c_emul_api) = {\n\t.configure = i2c_emul_configure,\n\t.get_config = i2c_emul_get_config,\n\t.transfer = i2c_emul_transfer,\n#ifdef CONFIG_I2C_TARGET\n\t.target_register = i2c_emul_target_register,\n\t.target_unregister = i2c_emul_target_unregister,\n#endif\n#ifdef CONFIG_I2C_RTIO\n\t.iodev_submit = i2c_iodev_submit_fallback,\n#endif\n};\n\n#define EMUL_FORWARD_ITEM(node_id, prop, idx)                                                      \\\n\t{                                                                                          \\\n\t\t.bus = DEVICE_DT_GET_BY_IDX(node_id, prop, idx),                                   \\\n\t\t.addr = DT_PHA_BY_IDX(node_id, prop, idx, addr),                                   \\\n\t},\n\n#define I2C_EMUL_INIT(n)                                                                           \\\n\tstatic const struct i2c_dt_spec emul_forward_list_##n[] = {                                \\\n\t\tCOND_CODE_1(DT_INST_NODE_HAS_PROP(n, forwards),                                    \\\n\t\t\t    (DT_INST_FOREACH_PROP_ELEM(n, forwards, EMUL_FORWARD_ITEM)), ())};     \\\n\tstatic struct i2c_emul_config i2c_emul_cfg_##n = {                                         \\\n\t\t.target_buffered_mode = DT_INST_PROP(n, target_buffered_mode),                     \\\n\t\t.forward_list = emul_forward_list_##n,                                             \\\n\t\t.forward_list_size = ARRAY_SIZE(emul_forward_list_##n),                            \\\n\t};                                                                                         \\\n\tstatic struct i2c_emul_data i2c_emul_data_##n = {                                          \\\n\t\t.bitrate = DT_INST_PROP(n, clock_frequency),                                       \\\n\t};                                                                                         \\\n\tI2C_DEVICE_DT_INST_DEFINE(n, i2c_emul_init, NULL, &i2c_emul_data_##n, &i2c_emul_cfg_##n,   \\\n\t\t\t\t  POST_KERNEL, CONFIG_I2C_INIT_PRIORITY, &i2c_emul_api);\n\nDT_INST_FOREACH_STATUS_OKAY(I2C_EMUL_INIT)\n>>>>>>>> REPLACE",
+          "applied_files": [],
+          "apply_error": "SearchMatchFailed: No exactly matching SEARCH block was found in 'drivers/i2c/i2c_emul.c'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "graph_context": "Knowledge graph retrieval is disabled.",
+          "analyzer_diagnosis": {
+            "iteration": 1,
+            "reasoning": "The linker error 'undefined reference to `__device_dts_ord_39`' indicates that a device defined in the Device Tree (DTS) is being referenced in the code (specifically `i2c_emul.c`), but its corresponding driver or instance was not compiled and linked into the final executable. This typically happens when a DTS node is defined but the necessary Kconfig option to enable its driver is missing, or the DTS node itself is not correctly configured or enabled. Graph retrieval is needed to inspect the DTS configuration related to I2C emulation and any devices that might be using it.",
+            "error_category": "dts",
+            "search_keywords": [
+              "i2c_emul"
+            ]
+          },
+          "retrieved_files": [
+            "drivers/i2c/i2c_emul.c",
+            "drivers/i2c/Kconfig.i2c_emul",
+            "include/zephyr/drivers/i2c_emul.h",
+            "drivers/eeprom/eeprom_at2x_emul.c",
+            "drivers/fuel_gauge/lc709203f/emul_lc709203f.c",
+            "drivers/fuel_gauge/sy24561/emul_sy24561.c",
+            "tests/subsys/emul/src/emul_tester.c",
+            "drivers/sensor/amd_sb_tsi/sb_tsi_emul.c"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 2,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 323,
+            "output_tokens": 690
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 19242,
+            "output_tokens": 4265
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": "drivers/i2c/i2c_emul.c\n<<<<<<<< SEARCH\n#define EMUL_LINK_AND_COMMA(node_id)                                                               \\\n\t{                                                                                          \\\n\t\t.dev = DEVICE_DT_GET(node_id),                                                     \\\n\t},\n========\n#define EMUL_LINK_AND_COMMA(node_id)                                                               \\\n\t{                                                                                          \\\n\t\t.emul = EMUL_DT_GET(node_id),                                                      \\\n\t},\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "drivers/i2c/i2c_emul.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_emul.c:310:18: error: ‘const struct emul_link_for_bus’ has no member named ‘emul’\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": "Knowledge graph retrieval is disabled.",
+          "analyzer_diagnosis": {
+            "iteration": 2,
+            "reasoning": "The linker error \"undefined reference to `__device_dts_ord_39'\" indicates that a device tree node or its associated driver is not correctly defined or linked. The reference to `i2c_emul.c` suggests an issue with an I2C emulator device's DTS configuration or its Kconfig enablement. Graph retrieval is needed to inspect the DTS and Kconfig related to I2C emulation.",
+            "error_category": "dts",
+            "search_keywords": [
+              "I2C",
+              "i2c_emul"
+            ]
+          },
+          "retrieved_files": [
+            "drivers/i2c/i2c_emul.c",
+            "drivers/i2c/Kconfig.i2c_emul",
+            "include/zephyr/drivers/i2c_emul.h",
+            "drivers/eeprom/eeprom_at2x_emul.c",
+            "drivers/fuel_gauge/lc709203f/emul_lc709203f.c",
+            "drivers/fuel_gauge/sy24561/emul_sy24561.c",
+            "tests/drivers/sensor/ina237/src/ina237_emul.c",
+            "tests/subsys/emul/src/emul_tester.c"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 3,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 193,
+            "output_tokens": 424
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 22526,
+            "output_tokens": 2378
+          },
+          {
+            "node": "supervisor_compression",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 248,
+            "output_tokens": 185
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": "drivers/i2c/i2c_emul.c\n<<<<<<<< SEARCH\n#define EMUL_LINK_AND_COMMA(node_id)                                                               \\\n\t{                                                                                          \\\n\t\t.emul = EMUL_DT_GET(node_id),                                                      \\\n\t},\n========\n#define EMUL_LINK_AND_COMMA(node_id)                                                               \\\n\t{                                                                                          \\\n\t\t.dev = DEVICE_DT_GET(node_id),                                                     \\\n\t},\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "drivers/i2c/i2c_emul.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[Linker Error Detected]\n/usr/bin/ld: /tmp/build/zephyr/NSI/tmp/build/zephyr/zephyr.elf.loc_cpusw.o:/zephyrproject/zephyr/drivers/i2c/i2c_emul.c:341:(.rodata.emuls_0+0x0): undefined reference to `__device_dts_ord_39'\ncollect2: error: ld returned 1 exit status\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": "undefined_reference",
+          "graph_context": "No keywords provided for graph retrieval.",
+          "analyzer_diagnosis": {
+            "iteration": 3,
+            "reasoning": "The error indicates that the 'emul_link_for_bus' struct is being accessed for a member named 'emul' which does not exist in its definition. This is a C syntax error related to struct member access, not a hardware, peripheral, or configuration issue.",
+            "error_category": "c_syntax",
+            "search_keywords": []
+          },
+          "retrieved_files": [
+            "include/zephyr/drivers/i2c_emul.h",
+            "subsys/emul/emul.c",
+            "drivers/i2c/i2c_emul.c",
+            "include/zephyr/drivers/emul.h",
+            "drivers/eeprom/eeprom_at2x_emul.c",
+            "drivers/fuel_gauge/lc709203f/emul_lc709203f.c",
+            "drivers/sensor/adi/adt7420/adt7420_emul.c",
+            "drivers/sensor/amd_sb_tsi/sb_tsi_emul.c"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 4,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 266,
+            "output_tokens": 675
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 15603,
+            "output_tokens": 8283
+          },
+          {
+            "node": "supervisor_compression",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 148,
+            "output_tokens": 352
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": "drivers/i2c/i2c_emul.c\n<<<<<<<< SEARCH\n#define EMUL_LINK_AND_COMMA(node_id)                                                               \\\n\t{                                                                                          \\\n\t\t.dev = DEVICE_DT_GET(node_id),                                                     \\\n\t},\n========\n#define EMUL_LINK_AND_COMMA(node_id)                                                               \\\n\t{                                                                                          \\\n\t\t.dev = EMUL_DT_GET(node_id)->dev,                                                  \\\n\t},\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "drivers/i2c/i2c_emul.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/drivers/emul.h:186:30: error: initializer element is not constant\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": "Knowledge graph retrieval is disabled.",
+          "analyzer_diagnosis": {
+            "iteration": 4,
+            "reasoning": "The linker error \"undefined reference to `__device_dts_ord_39`\" originating from `i2c_emul.c` strongly suggests that a Device Tree node for an I2C emulator device is referenced in the code but is either missing, incorrectly defined, or not enabled in the Device Tree (DTS) or its corresponding Kconfig symbol is not set. Graph retrieval is needed to investigate the DTS and Kconfig configurations related to I2C and emulators.",
+            "error_category": "dts",
+            "search_keywords": [
+              "I2C",
+              "emulator",
+              "emul"
+            ]
+          },
+          "retrieved_files": [
+            "include/zephyr/drivers/i2c_emul.h",
+            "drivers/i2c/Kconfig.i2c_emul",
+            "drivers/eeprom/eeprom_at2x_emul.c",
+            "drivers/i2c/i2c_emul.c",
+            "subsys/emul/emul.c",
+            "drivers/fuel_gauge/max17048/emul_max17048.c",
+            "subsys/emul/Kconfig",
+            "drivers/charger/emul_sbs_charger.c"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 5,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 175,
+            "output_tokens": 215
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 34368,
+            "output_tokens": 10184
+          },
+          {
+            "node": "supervisor_compression",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 145,
+            "output_tokens": 376
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": "The error \"initializer element is not constant\" on `DT_REG_ADDR(node_id)` suggests that the compiler is not treating the value returned by `DT_REG_ADDR` as a compile-time constant in the context of a `static` initializer. While `DT_REG_ADDR` typically expands to a literal integer (e.g., `0x5f` for the `pi3usb9201@5f` node), there might be a subtle interaction with the macro expansion or the target type (`uint16_t` for the `addr` field in `i2c_emul`).\n\nTo ensure the compiler treats the value as a constant of the correct type, an explicit cast to `uint16_t` can be added. This often helps the compiler resolve potential ambiguities in static initializers.\n\n```c\ninclude/zephyr/drivers/emul.h\n<<<<<<<< SEARCH\n\t\t\t   (.Z_EMUL_BUS(node_id, addr, chipsel, chipsel, dev_idx, dummy, addr) =   \\\n\t\t\t\t    DT_REG_ADDR(node_id),))};\n========\n\t\t\t   (.Z_EMUL_BUS(node_id, addr, chipsel, chipsel, dev_idx, dummy, addr) =   \\\n\t\t\t\t    (uint16_t)DT_REG_ADDR(node_id),))};\n>>>>>>>> REPLACE\n```",
+          "applied_files": [
+            "include/zephyr/drivers/emul.h"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/drivers/emul.h:186:30: error: initializer element is not constant\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": "No keywords provided for graph retrieval.",
+          "analyzer_diagnosis": {
+            "iteration": 5,
+            "reasoning": "The error \"initializer element is not constant\" is a plain C syntax error, indicating an attempt to initialize a global or static variable with a non-constant value. This is not related to hardware, peripherals, Kconfig, or DTS, so graph retrieval is not needed.",
+            "error_category": "c_syntax",
+            "search_keywords": []
+          },
+          "retrieved_files": [
+            "samples/drivers/crc/src/main.c",
+            "samples/drivers/can/babbling/src/main.c",
+            "drivers/timer/Kconfig.stm32_lptim",
+            "tests/drivers/psi5/psi5_api/src/main.c",
+            "include/zephyr/llext/symbol.h",
+            "tests/drivers/sensor/hc-sr04/src/main.c",
+            "samples/basic/blinky/src/main.c",
+            "tests/lib/c_lib/common/src/main.c"
+          ],
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": [
+      "drivers/i2c/i2c_emul.c",
+      "drivers/i2c/Kconfig.i2c_emul",
+      "include/zephyr/drivers/i2c_emul.h",
+      "drivers/eeprom/eeprom_at2x_emul.c",
+      "drivers/fuel_gauge/lc709203f/emul_lc709203f.c",
+      "drivers/fuel_gauge/sy24561/emul_sy24561.c",
+      "tests/subsys/emul/src/emul_tester.c",
+      "drivers/sensor/amd_sb_tsi/sb_tsi_emul.c"
+    ],
+    "initial_error_log": "[Linker Error Detected]\n/usr/bin/ld: /tmp/build/zephyr/NSI/tmp/build/zephyr/zephyr.elf.loc_cpusw.o:/zephyrproject/zephyr/drivers/i2c/i2c_emul.c:341:(.rodata.emuls_0+0x0): undefined reference to `__device_dts_ord_39'\ncollect2: error: ld returned 1 exit status\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+    "protected_file_count": 7,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r3_nograph_main/proposed/v3new_kconfig_bc12_161f758_fx",
+    "api_events": [],
+    "started_at": "2026-10-25T10:14:45+00:00",
+    "run_meta": {
+      "code_commit": "e95ee404e8c62ca9b3569ec3150dbb667e4b6d75",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
