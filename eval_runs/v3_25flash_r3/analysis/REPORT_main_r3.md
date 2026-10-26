@@ -191,3 +191,38 @@ B1、B2 沿用 r2 的結果（`eval_runs/v3_25flash_r2/`，commit dbb8c72，程�
 | compound | 0 | 0 | 2 | 4 | 7 |
 
 真實 bug 的重建在 `replay_real.json`：修好的 pipeline×案例共 15 個（B3 1、Agentless 3、OpenHands 6、Proposed 5），重建後全部和上游修正內容不同（真實 bug 很少會逐字寫出和上游相同的修正）。這部分還沒有人工判讀。
+
+## 9. 真實 bug：結果與人工判讀（2026-10-26 補）
+
+- 判讀檔：`manual_labels_real.json`。
+- 比較對象是上游的修正 commit F。15 個修好的 pipeline×案例全部重建後和 F 不同，所以全部逐筆判讀。
+- 分類：
+  - equivalent：和上游修正等價；
+  - alternative：用不同方式讓回歸測試通過，但語意和上游不同或可能不完整；
+  - incomplete：修好了回歸測試涵蓋的部分，但上游同一個 commit 的其他修正沒有做（例如別的驅動、文件）。
+- 只有一位判讀者，還沒複核。
+
+| | 修好（評測判定） | 等價 | 不完整 | 替代 | **等價才算** | 等價或不完整 |
+|---|---|---|---|---|---|---|
+| B3 | 1 | 1 | 0 | 0 | 1 | 1 |
+| Agentless | 3 | 2 | 0 | 1 | 2 | 2 |
+| OpenHands | 6 | 4 | 1 | 1 | **4** | 5 |
+| Proposed | 5 | 3 | 1 | 1 | **3** | 4 |
+
+（r2：Proposed 4、B2 1、B3 0、B1 0，都是評測判定、沒有人工判讀。B1、B2 沒有在 r3 重跑。）
+
+**逐筆說明**
+- **video_buffer_null**：4 條 pipeline 都修好，而且都和上游等價。這是最簡單的一筆，只要補一個 NULL 檢查。
+- **stack_alloc_overflow**：Agentless、OpenHands、Proposed 都用了和上游相同的 `size_mul_overflow`，等價。
+- **stream_flash_size_overflow**：OpenHands、Proposed 都等價。
+- **fuel_gauge_cycle_count**：OpenHands、Proposed 只修了回歸測試涵蓋的 bq27z746。上游同時修正的 adp5360 驅動和 API 說明都沒改，判為不完整。
+- **http_chunked_frag_len**：
+  - OpenHands 和上游等價。
+  - Agentless 改成把長度累加。同一個 recv_buf 裡有多個 chunk 時，長度會把 chunk 標頭也算進去，判為替代修法。
+- **dynamic_stack_overflow**：OpenHands 只擋 `size == SIZE_MAX`，剛好是測試用的值，沒有加上游的溢位檢查，判為替代修法。
+- **zms_find_ate_offset**：只有 Proposed 修好，但它是在其中一個呼叫端改起點，沒有處理跨 sector 的情況，其他呼叫端也沒修，判為替代修法。
+
+**結論**
+- 真實 bug 的數量太少，只能看趨勢：OpenHands（4 筆等價）略多於 Proposed（3 筆），和主資料集「兩者沒有顯著差異」一致。
+- 7 筆修好但不等價的修法裡，有 2 筆只針對回歸測試的輸入，3 筆只修了測試涵蓋的部分。這說明通過回歸測試和真正修好之間的落差，在真實 bug 上比在合成注入上更明顯。
+- 主資料集的替代修法只占修好的 2～8%；真實 bug 上，OpenHands 有 2/6、Proposed 有 2/5 不是等價修法。
