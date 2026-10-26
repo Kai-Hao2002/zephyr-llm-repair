@@ -190,4 +190,4 @@ B1、B2 沿用 r2 的結果（`eval_runs/v3_25flash_r2/`，commit dbb8c72，程�
 | dts | 11 | 11 | 13 | 14 | 15 |
 | compound | 0 | 0 | 2 | 4 | 7 |
 
-真實 bug 的重建在 `replay_real.json`：13 筆修好的案例中，有 15 筆 pipeline×案例和上游修正不同。這部分還沒有人工判讀。
+真實 bug 的重建在 `replay_real.json`：修好的 pipeline×案例共 15 個（B3 1、Agentless 3、OpenHands 6、Proposed 5），重建後全部和上游修正內容不同（真實 bug 很少會逐字寫出和上游相同的修正）。這部分還沒有人工判讀。
