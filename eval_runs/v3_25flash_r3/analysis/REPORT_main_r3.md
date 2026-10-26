@@ -132,3 +132,62 @@ B1、B2 沿用 r2 的結果（`eval_runs/v3_25flash_r2/`，commit dbb8c72，程�
 - 用 `tools/replay_patches.py` 重建 patch，人工判讀「內容不同」的修好案例，算出「只算還原或等價修法」的修復率。上面那 2 筆沒改到注入檔的優先。
 - 跑 `failure_by_category.py`，做 Agentless、OpenHands 的失敗分類；`analyze_v3.py` 的 PIPELINES 要加入這兩條。
 - 等第 3、4 步跑完後，再分析 Graph RAG 和 Hybrid RAG 各自的貢獻，以及重複實驗的變異。
+
+## 8. 人工判讀後的修復率（2026-10-26 補）
+
+判讀檔是 `manual_labels_main.json`，對象是 `replay_main.json` 裡 overall=differs/partial 的修好案例。
+
+- r3 共 60 筆：B3 11、Agentless 13、OpenHands 13、Proposed 23。
+  - 其中 15 筆的 diff 和 r1/r2 判讀過的案例完全相同，直接沿用當時的判讀；其餘 45 筆逐筆判讀。
+- B2 沿用 r2 的結果和判讀。
+- 離線重建後，沒有任何修好的案例違反規格，所以沒有 test_changed。
+- 判讀者只有一人，還沒複核。
+
+| | 修好 | 完全還原 | 等價修法 | 替代修法 | **只算還原或等價** | 95% CI |
+|---|---|---|---|---|---|---|
+| B2（r2） | 44 | 30 | 12 | 2 | 42（30.2%） | 23.2–38.3 |
+| B3 | 50 | 39 | 7 | 4 | 46（33.1%） | 25.8–41.3 |
+| Agentless | 59 | 46 | 12 | 1 | 58（41.7%） | 33.9–50.0 |
+| OpenHands | 75 | 62 | 10 | 3 | 72（51.8%） | 43.6–59.9 |
+| Proposed | 80 | 57 | 19 | 4 | **76（54.7%）** | 46.4–62.7 |
+
+**替代修法（14 筆）**
+- 過度放寬或拿掉 Kconfig 相依：
+  - zbus：B3、Agentless，沿用 r1 的判讀；
+  - dma_emul compound：OpenHands；
+  - flash_map：Proposed，改成 select 一個拼錯的符號；
+  - adt7420：OpenHands，拿掉 7410/7422 和 select I2C；
+  - nvs：B3、OpenHands，改成別的符號或板子專用的條件；
+  - lc709203f：B3，重複定義 config。
+- fwcfg 的 `reg` 大小改錯：B3。
+- 繞過問題：
+  - comparator_shell compound：Proposed。兩個注入檔都沒改，改 `.c` 用 DT_NODELABEL 定義裝置；
+  - can_loopback：Proposed，沿用 r1 的判讀，改的是 `can.h`。
+- 語意錯誤但測試通過：msgq，Proposed。改寫 `k_msgq_put` 後，佇列有空間時不再把訊息交給等待中的讀取者。
+
+**只算還原或等價時的成對比較**（Holm 校正 9 組）
+
+| 比較 | 差異 | 95% CI | Holm p |
+|---|---|---|---|
+| Proposed vs B3 | +21.6 | +12.9～+30.2 | 6.5e-5 |
+| Proposed vs Agentless | +12.9 | +4.3～+21.6 | 0.040 |
+| Proposed vs OpenHands | +2.9 | −6.5～+12.2 | 0.96 |
+| Proposed vs B2 | +24.5 | +16.5～+32.4 | 1.6e-7 |
+| OpenHands vs Agentless | +10.1 | +1.4～+18.7 | 0.15 |
+| OpenHands vs B3 | +18.7 | +9.4～+28.1 | 0.0013 |
+| Agentless vs B3 | +8.6 | +0.0～+17.3 | 0.22 |
+| B3 vs B2 | +2.9 | −2.9～+8.6 | 0.96 |
+
+結論和第 2 節相同：Proposed 顯著勝過 B3、Agentless、B2，和 OpenHands 沒有顯著差異。Proposed 對 Agentless 的 p 值從 0.012 變成 0.040，仍然顯著。
+
+各類別（只算還原或等價）：
+
+| 類別 | B2 | B3 | Agentless | OpenHands | Proposed |
+|---|---|---|---|---|---|
+| runtime | 16 | 18 | 30 | 39 | 32 |
+| c_syntax | 8 | 13 | 10 | 9 | 9 |
+| kconfig | 7 | 4 | 3 | 6 | 13 |
+| dts | 11 | 11 | 13 | 14 | 15 |
+| compound | 0 | 0 | 2 | 4 | 7 |
+
+真實 bug 的重建在 `replay_real.json`：13 筆修好的案例中，有 15 筆 pipeline×案例和上游修正不同。這部分還沒有人工判讀。
