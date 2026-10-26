@@ -101,10 +101,13 @@ def main():
     ap.add_argument("--runs", required=True)
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--pipelines", nargs="+", default=PIPELINES,
+                    help=f"pipelines to summarize (default: {' '.join(PIPELINES)}). For agentless each iteration is "
+                         "one candidate (reverted on failure); for openhands the single iteration is the whole run")
     args = ap.parse_args()
     cases = {c["id"]: c for c in json.load(open(args.dataset))}
     out = []
-    for p in PIPELINES:
+    for p in args.pipelines:
         for r in load_pipeline_results(args.runs, p):
             if r["final_status"] != "resolved":
                 out.append(summarize(cases[r["case_id"]], r))
@@ -113,7 +116,7 @@ def main():
 
     for c in CATS:
         print(f"===== {c}")
-        for p in PIPELINES:
+        for p in args.pipelines:
             rows = [x for x in out if x["pipeline"] == p and x["category"] == c]
             if not rows:
                 continue

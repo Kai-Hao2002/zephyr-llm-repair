@@ -59,7 +59,30 @@ def extra_file_content(case: Dict, rel: str) -> Optional[str]:
     return open(evaluate._resolve_extra_file_host_path(extra[rel]), encoding="utf-8").read()
 
 
-def replay(case: Dict, res: Dict, originals: Dict[str, str]) -> Dict:
+def openhands_finals(res: Dict, paths: List[str]) -> Dict[str, Optional[str]]:
+    """OpenHands 沒有 SEARCH/REPLACE patch：直接用結果記錄的最終內容 (openhands.final_contents，只含有改過的檔案)。
+    沒改過的檔案回傳 None (= 仍是注入後的內容)；改過但內容沒被記錄 (超過記錄上限) 列在 "_unrecorded"。
+    OpenHands has no SEARCH/REPLACE patch: use the recorded final contents (openhands.final_contents, changed files
+    only). Unchanged files map to None (still the mutated content); a changed file whose content was not recorded
+    (over the recording cap) is reported via the "_unrecorded" key."""
+    oh = res.get("openhands") or {}
+    contents, changed = oh.get("final_contents") or {}, oh.get("changed_files") or []
+    out, unrecorded = {}, []
+    for p in paths:
+        if p in contents:
+            out[p] = contents[p]
+        elif f"(deleted) {p}" in changed:
+            out[p] = ""
+        elif p in changed:
+            unrecorded.append(p)
+        else:
+            out[p] = None
+    if unrecorded:
+        out["_unrecorded"] = unrecorded
+    return out
+
+
+def replay(case: Dict, res: Dict, originals: Dict[str, str], pipeline: str = "") -> Dict:
     injs = case.get("injections") or [case["injection"]]
     with tempfile.TemporaryDirectory() as ws:
         mutated = {}
@@ -83,7 +106,21 @@ def replay(case: Dict, res: Dict, originals: Dict[str, str]) -> Dict:
         # trajectory) the case is marked replay_mismatch instead of being classified.
         inj_paths = {i["target_file"] for i in injs}
         mismatch = []
-        for it in res.get("iteration_log") or []:
+        iterations = res.get("iteration_log") or []
+        if pipeline == "agentless":
+            # Agentless 的每一輪是一個候選，失敗的候選改動會被撤銷，所以只重建修好的那個候選。
+            # Each Agentless iteration is a candidate whose edits are reverted on failure: replay the resolving one only.
+            iterations = [it for it in iterations if it.get("resolved")][:1]
+        if pipeline == "openhands":
+            # OpenHands 沒有 patch，直接寫入記錄的最終內容。OpenHands has no patch: write the recorded final contents.
+            finals = openhands_finals(res, sorted(inj_paths))
+            if "_unrecorded" in finals:
+                return {"_mismatch": [f"unrecorded final content: {p}" for p in finals["_unrecorded"]]}
+            for p, text in finals.items():
+                if text is not None:
+                    open(os.path.join(ws, p), "w", encoding="utf-8").write(text)
+            iterations = []
+        for it in iterations:
             t = it.get("trajectory") or {}
             patch = t.get("patch")
             got = set()
@@ -129,10 +166,12 @@ def main():
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--tag", default="main")
+    ap.add_argument("--pipelines", nargs="+", default=PIPELINES,
+                    help=f"pipelines to replay (default: {' '.join(PIPELINES)}); agentless and openhands are supported")
     args = ap.parse_args()
     cases = {c["id"]: c for c in json.load(open(args.dataset))}
     resolved = []
-    for p in PIPELINES:
+    for p in args.pipelines:
         for r in load_pipeline_results(args.runs, p):
             if r["final_status"] == "resolved":
                 resolved.append((p, r))
@@ -160,7 +199,7 @@ def main():
         if missing:
             rows.append({"pipeline": p, "case_id": c["id"], "error": f"original not found: {missing}"})
             continue
-        files = replay(c, r, originals)
+        files = replay(c, r, originals, p)
         if "_mismatch" in files:
             rows.append({"pipeline": p, "case_id": c["id"], "category": c["category"], "overall": "replay_mismatch",
                          "mismatch_iterations": files["_mismatch"], "files": {}})
@@ -183,7 +222,7 @@ def main():
                         f.write("```diff\n" + v["diff_vs_original"] + "```\n")
                 f.write("\n")
     from collections import Counter
-    for p in PIPELINES:
+    for p in args.pipelines:
         print(p, dict(Counter(x.get("overall") or "error" for x in rows if x["pipeline"] == p)))
 
 

@@ -225,7 +225,7 @@ def grouped(cases, res, feat: str) -> Dict[str, Dict]:
 
 def retrieval(cases, res) -> Dict[str, Dict]:
     out = {}
-    for p in ("b2", "proposed"):
+    for p in [q for q in ("b2", "proposed") if q in PIPELINES]:
         rows = []
         for cid, c in cases.items():
             r = res[p][cid]
@@ -296,7 +296,7 @@ def costs(cases, res) -> Dict[str, Dict]:
 def manual_sample(cases, res, out_path: str, per_pipeline=(("proposed", 8), ("b3", 6), ("b2", 6))) -> List[Dict]:
     rng = random.Random(SEED)
     picked = []
-    for p, k in per_pipeline:
+    for p, k in [(q, k) for q, k in per_pipeline if q in PIPELINES]:
         solved = sorted(cid for cid in cases if res[p][cid]["final_status"] == "resolved")
         for cid in rng.sample(solved, min(k, len(solved))):
             it = resolving_iteration(res[p][cid]) or {}
@@ -315,6 +315,7 @@ def manual_sample(cases, res, out_path: str, per_pipeline=(("proposed", 8), ("b3
 
 
 def main():
+    global PIPELINES, PAIRS
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", required=True)
     ap.add_argument("--dataset", default="dataset/cases/final_dataset_v3.json")
@@ -323,8 +324,19 @@ def main():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--labels", help="manual_labels_main.json (人工判讀；用來算嚴格修復率)")
     ap.add_argument("--replay", help="replay_main.json (tools/replay_patches.py 的輸出)")
+    ap.add_argument("--pipelines", nargs="+",
+                    help=f"pipelines to analyze (default: {' '.join(PIPELINES)}); e.g. b1 b2 b3 agentless openhands proposed")
+    ap.add_argument("--pairs", nargs="+", metavar="A:B",
+                    help="pairs for McNemar/Holm (default: the built-in pairs, or every pair of --pipelines in order)")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
+    # --pipelines / --pairs 沒給時維持原本的 4 條 pipeline 與 6 組比較。
+    # Without --pipelines / --pairs the original 4 pipelines and 6 pairs are kept.
+    if args.pipelines:
+        PIPELINES = args.pipelines
+        PAIRS = [(a, b) for i, a in enumerate(PIPELINES) for b in PIPELINES[i + 1:]]
+    if args.pairs:
+        PAIRS = [tuple(x.split(":", 1)) for x in args.pairs]
 
     cases, res = load(args.runs, args.dataset)
     tax = [classify(cases[cid], res[p][cid]) for p in PIPELINES for cid in sorted(cases)]
