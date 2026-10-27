@@ -15,10 +15,11 @@
 # Env:
 #   MODEL     (required) e.g. gemini-2.5-flash
 #   OUT_ROOT  (required) e.g. eval_runs/v3_25flash
-#   STAGE     pilot | main | real   (default main)
+#   STAGE     pilot | main | real | repeat   (default main)
 #             pilot -> dataset/v3/eval/eval_pilot_cases.json, results OUT_ROOT/pilot/<p>/
 #             main  -> dataset/cases/final_dataset_v3.json,   results OUT_ROOT/<p>/
 #             real  -> dataset/cases/real_bugs_v3.json,       results OUT_ROOT/real/<p>/
+#             repeat -> dataset/v3/eval/repeat_subset_40.json, results OUT_ROOT/<p>/ (第 4 步重複實驗 / step-4 repeats)
 #   PIPELINES (default "b1 b2 b3 proposed")
 #   START_AT  (epoch seconds) delay the first attempt
 #
@@ -36,6 +37,7 @@ case "$STAGE" in
     pilot) export DATASET="$repo_dir/dataset/v3/eval/eval_pilot_cases.json"; res_root="$OUT_ROOT/pilot" ;;
     main)  export DATASET="$repo_dir/dataset/cases/final_dataset_v3.json"; res_root="$OUT_ROOT" ;;
     real)  export DATASET="$repo_dir/dataset/cases/real_bugs_v3.json"; res_root="$OUT_ROOT/real" ;;
+    repeat) export DATASET="$repo_dir/dataset/v3/eval/repeat_subset_40.json"; res_root="$OUT_ROOT" ;;
     *) echo "unknown STAGE $STAGE"; exit 64 ;;
 esac
 work_dir="$HOME/zephyr-eval-work/v3_eval_work_$(basename "$OUT_ROOT")_$STAGE"
