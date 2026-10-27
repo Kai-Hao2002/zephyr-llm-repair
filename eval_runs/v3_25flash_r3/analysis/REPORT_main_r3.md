@@ -331,3 +331,62 @@ B1、B2 沿用 r2 的結果（`eval_runs/v3_25flash_r2/`，commit dbb8c72，程�
 - Agentless 的主要瓶頸是一次性的定位：注入檔沒進候選清單，後面就不可能修好。
 - OpenHands 的主要瓶頸是步數和方向：一半的失敗把 50 步用完或卡住；kconfig 類會往測試設定的方向修。
 - Proposed 只改受保護檔的失敗最少（10 筆，B3 39 筆）。B3 和 Proposed 每輪都會收到受保護檔被還原的提醒（`restore_reminder`），所以差別不是來自這個提醒，比較可能來自 Proposed 的檢索把注入檔找了回來（第 10 節：任一輪命中 54%）。Agentless 的候選之間沒有這種回饋。
+
+## 12. 2×2 比較（第 5 步，2026-10-27 補）
+
+**設計**
+
+| | 固定流程 | 自主 agent |
+|---|---|---|
+| 通用 | Agentless | OpenHands |
+| 領域專用 | Proposed | （沒有這一格） |
+
+- 「領域專用」指 Proposed 的 Zephyr 專用元件：Analyzer 規則、Graph RAG / Hybrid RAG、log 過濾、DevOps/QA 分工。
+- 三條都用 gemini-2.5-flash、同一份資料集和評測程式。
+- 只有三格，所以兩個方向各用一組乾淨的比較：
+  - **領域知識**（流程都固定）：Proposed vs Agentless。
+  - **自主性**（都是通用）：OpenHands vs Agentless。
+  - Proposed vs OpenHands 兩個因素同時不同，只能當參考，不能歸因到單一因素。
+- 數字來自 `analyze_v3.py --pipelines agentless openhands proposed --pairs proposed:agentless openhands:agentless proposed:openhands`（輸出在 `twobytwo/`），Holm 只在這 3 組之間校正，所以 p 值和第 2 節（9 組校正）不同。
+
+**主資料集（139 筆）**
+
+| 比較 | 評測判定：差異（95% CI） | 只有前者 / 只有後者 | Holm p | 只算還原或等價：差異（95% CI） | Holm p |
+|---|---|---|---|---|---|
+| 領域知識：Proposed vs Agentless | +15.1（+6.5～+24.5） | 33 / 12 | **0.0074** | +12.9（+4.3～+21.6） | **0.024** |
+| 自主性：OpenHands vs Agentless | +11.5（+2.2～+20.9） | 30 / 14 | **0.045** | +10.1（+0.7～+18.7） | 0.077 |
+| 參考：Proposed vs OpenHands | +3.6（−5.8～+12.9） | 24 / 19 | 0.54 | +2.9（−6.5～+12.2） | 0.64 |
+
+- 修好筆數：Agentless 59、OpenHands 75、Proposed 80；只算還原或等價是 58、72、76。
+
+**依錯誤類型拆開（評測判定，未校正 exact McNemar，探索性）**
+
+| | n | Agentless | OpenHands | Proposed | 領域知識（P vs A） | 自主性（OH vs A） | 參考（P vs OH） |
+|---|---|---|---|---|---|---|---|
+| 設定類（kconfig + dts + compound） | 57 | 19 | 27 | 37 | 19 / 1，p=4e-5 | 15 / 7，p=0.13 | 17 / 7，p=0.064 |
+| 程式碼類（runtime + c_syntax） | 82 | 40 | 48 | 43 | 14 / 11，p=0.69 | 15 / 7，p=0.13 | 7 / 12，p=0.36 |
+
+- 各類別：kconfig A 4 / OH 8 / P 14、compound 2 / 5 / 8、dts 13 / 14 / 15、runtime 30 / 39 / 34、c_syntax 10 / 9 / 9。
+
+**真實 bug（13 筆，見第 9 節）**
+- 評測判定 Agentless 3、OpenHands 6、Proposed 5；只算等價 2、4、3。
+- n 太小，三組都不顯著，方向和主資料集的「自主性有幫助」一致，但領域知識在真實 bug 上看不到優勢。
+
+**成本（每修好一筆，見第 5 節）**
+- Agentless $0.21、Proposed $0.23、OpenHands $0.43（定價計）。
+- OpenHands 的實際花費（litellm）有 73% 花在失敗案例（第 11 節）。
+- 每筆平均輸入 token：Agentless 3.3 萬、Proposed 10.7 萬、OpenHands 69.7 萬。
+
+**解讀**
+- **兩個因素在這次執行裡都有效，但作用在不同類型的錯誤上。**
+  - 領域知識的效果幾乎都集中在設定類：19 比 1。在程式碼類，Proposed 和 Agentless 打平（14 比 11）。這和第 10 節一致：Hybrid RAG 找回 Kconfig/DTS 的定義檔，是 Proposed 在 kconfig、compound 領先的主因。
+  - 自主性的效果比較平均：設定類和程式碼類都是 15 比 7。OpenHands 能自己 build、跑測試、反覆修改，runtime 是三條裡最好的（39 筆）。
+- 兩個因素的總效果接近（+15.1 vs +11.5），所以 Proposed 和 OpenHands 打平：Proposed 在設定類多 10 筆，OpenHands 在程式碼類多 5 筆，互相抵銷。
+- 「只算還原或等價」時，自主性的優勢掉到 Holm p=0.077，不再顯著。OpenHands 有 3 筆替代修法，集中在 Kconfig 相依被放寬。
+- 成本面：拿到同樣的修復率，領域知識（Proposed）的成本和 Agentless 差不多，自主性（OpenHands）的成本約 2 倍。
+
+**限制**
+- 缺「領域專用 × 自主 agent」這一格（例如 OpenHands 加上 Zephyr 檢索工具），所以無法檢驗兩個因素是否可以疊加，也無法估計交互作用。
+- 「領域專用」包含好幾個元件，第 10 節只拆開了檢索這一項。
+- 都是單次執行（第 4 步先跳過）；分類別的檢定沒有校正，只能當探索性結果。
+- Agentless 和 OpenHands 是本研究依照論文自行改寫到 C/Zephyr 的版本，不是原作者的實作。
