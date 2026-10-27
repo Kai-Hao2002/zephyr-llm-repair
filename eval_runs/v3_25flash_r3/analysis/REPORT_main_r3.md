@@ -318,7 +318,7 @@ B1、B2 沿用 r2 的結果（`eval_runs/v3_25flash_r2/`，commit dbb8c72，程�
   - 6 筆只改了測試的 `prj.conf`、`CMakeLists.txt`，評測會還原；
   - 4 筆改了其他檔，例如 board defconfig、別的驅動。
   - OpenHands 能自己跑 build，但它把「讓這個測試 build 得過」當成目標，往測試設定的方向修，沒有去找被改壞的依賴定義。
-- 有 17 筆失敗（含 9 筆修好的）在事件記錄裡沒看到 build 指令，代表它沒有自己驗證就結束了。
+- 事件記錄裡沒看到 build 指令的有 26 筆（失敗 17、修好 9），這些案例它沒有自己 build 驗證就結束了。
 
 **四條 pipeline 共同的失敗**
 - 30 筆案例四條都沒修好：runtime 13、compound 6、kconfig 5、c_syntax 5、dts 1。
@@ -330,4 +330,4 @@ B1、B2 沿用 r2 的結果（`eval_runs/v3_25flash_r2/`，commit dbb8c72，程�
 **小結**
 - Agentless 的主要瓶頸是一次性的定位：注入檔沒進候選清單，後面就不可能修好。
 - OpenHands 的主要瓶頸是步數和方向：一半的失敗把 50 步用完或卡住；kconfig 類會往測試設定的方向修。
-- Proposed 只改受保護檔的失敗最少（10 筆）。它每輪都會收到受保護檔被還原的提醒，Agentless 的候選之間沒有這種回饋。
+- Proposed 只改受保護檔的失敗最少（10 筆，B3 39 筆）。B3 和 Proposed 每輪都會收到受保護檔被還原的提醒（`restore_reminder`），所以差別不是來自這個提醒，比較可能來自 Proposed 的檢索把注入檔找了回來（第 10 節：任一輪命中 54%）。Agentless 的候選之間沒有這種回饋。
