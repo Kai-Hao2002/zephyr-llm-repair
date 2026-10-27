@@ -80,7 +80,7 @@ B1、B2 沿用 r2 的結果（`eval_runs/v3_25flash_r2/`，commit dbb8c72，程�
 
 - 總數幾乎一樣，但個別案例變動不小，Proposed 有 32 筆結果翻轉。
 - 類別層級上，Proposed 的 compound 從 3 筆變 8 筆、kconfig 從 11 筆變 14 筆；runtime 從 37 筆變 34 筆、c_syntax 從 11 筆變 9 筆。
-  - 這可能和 Graph RAG 加回來有關，也可能只是單次執行的變動。要等檢索 ablation（第 3 步）和重複實驗（第 4 步）才能分辨。
+  - 這可能和 Graph RAG 加回來有關，也可能只是單次執行的變動。第 3 步的 ablation 顯示關閉 Graph RAG 後 compound 6 筆、kconfig 12 筆（見第 10 節），差距在單次執行的變動範圍內；重複實驗（第 4 步）目前先跳過。
 
 ## 5. 成本與時間
 
@@ -131,7 +131,7 @@ B1、B2 沿用 r2 的結果（`eval_runs/v3_25flash_r2/`，commit dbb8c72，程�
 
 - 用 `tools/replay_patches.py` 重建 patch，人工判讀「內容不同」的修好案例，算出「只算還原或等價修法」的修復率。上面那 2 筆沒改到注入檔的優先。
 - 跑 `failure_by_category.py`，做 Agentless、OpenHands 的失敗分類；`analyze_v3.py` 的 PIPELINES 要加入這兩條。
-- 等第 3、4 步跑完後，再分析 Graph RAG 和 Hybrid RAG 各自的貢獻，以及重複實驗的變異。
+- 等第 3、4 步跑完後，再分析 Graph RAG 和 Hybrid RAG 各自的貢獻，以及重複實驗的變異。（第 3 步已完成，見第 10 節；第 4 步先跳過。）
 
 ## 8. 人工判讀後的修復率（2026-10-26 補）
 
@@ -226,3 +226,56 @@ B1、B2 沿用 r2 的結果（`eval_runs/v3_25flash_r2/`，commit dbb8c72，程�
 - 真實 bug 的數量太少，只能看趨勢：OpenHands（4 筆等價）略多於 Proposed（3 筆），和主資料集「兩者沒有顯著差異」一致。
 - 修好但不等價的有 5 筆：2 筆只修了回歸測試涵蓋的驅動（不完整），1 筆只擋下測試用的特定輸入值，2 筆用了不同的寫法而且可能不正確。這說明通過回歸測試和真正修好之間的落差，在真實 bug 上比在合成注入上更明顯。
 - 主資料集的替代修法只占修好的 2～8%；真實 bug 上，OpenHands 有 2/6、Proposed 有 2/5 不是等價修法。
+
+## 10. 檢索消融（第 3 步，2026-10-27 補）
+
+- 三種設定都是 Proposed、gemini-2.5-flash、同一份評測程式（core、agents、graph_rag、evaluate.py 在 5a44080 之後沒有改動）：
+  - 完整版：`eval_runs/v3_25flash_r3/`
+  - 關閉 Graph RAG（`ZEPHYR_GRAPH_RAG=0`）：`eval_runs/v3_25flash_r3_nograph/`
+  - 只保留 Graph RAG（`ZEPHYR_HYBRID_RAG=0`）：`eval_runs/v3_25flash_r3_graphonly/`
+- 每組的 run_meta 都核對過開關和工作區乾淨；暫時性錯誤都移到 archive 後單筆重跑，沒有算進結果。
+- 數字由 `r3_ablation_summary.py` 產生（`ablation_summary.json`）。
+
+**修好筆數（評測判定）**
+
+| | 完整版 | 關閉 Graph RAG | 只保留 Graph RAG |
+|---|---|---|---|
+| 主資料集（139） | **80** | **80** | 53 |
+| 　runtime（63） | 34 | 35 | 18 |
+| 　kconfig（19） | 14 | 12 | 7 |
+| 　compound（19） | 8 | 6 | 0 |
+| 　dts（19） | 15 | 16 | 15 |
+| 　c_syntax（19） | 9 | 11 | 13 |
+| 真實 bug（13） | 5 | 5 | 0 |
+
+**配對檢定（exact McNemar，只有 A 修好 / 只有 B 修好）**
+
+| | 主資料集 | 真實 bug |
+|---|---|---|
+| 完整版 vs 關閉 Graph RAG | 15 / 15，p=1 | 0 / 0（修好的 5 筆完全相同） |
+| 完整版 vs 只保留 Graph RAG | 33 / 6，p=1.4e-5 | 5 / 0，p=0.063 |
+
+**檢索命中（被注入檔或上游修改檔是否出現在檢索結果）**
+
+| | 第一輪 hit@1 | 第一輪 hit@8 | 任一輪命中 | 命中時修好 | 沒命中時修好 |
+|---|---|---|---|---|---|
+| 主資料集 完整版 | 29.5% | 43.9% | 54.0% | 54/75 | 26/64 |
+| 主資料集 關閉 Graph RAG | 28.8% | 45.3% | 55.4% | 52/77 | 28/62 |
+| 主資料集 只保留 Graph RAG | — | — | 0% | — | 53/139 |
+| 真實 bug 完整版 | 0% | 30.8% | 61.5% | 5/8 | 0/5 |
+| 真實 bug 關閉 Graph RAG | 0% | 38.5% | 61.5% | 5/8 | 0/5 |
+
+- 只保留 Graph RAG 時沒有任何檔案層級的檢索結果：Graph RAG 只回傳 Kconfig/DTS 符號的 YAML 說明，不回傳原始檔。
+- Graph RAG 的使用率：完整版有 111/139 個案例至少一輪拿到 Graph RAG 內容（Analyzer 有給關鍵字）；kconfig、dts、compound 是 19/19，runtime 48/63，c_syntax 6/19。
+
+**解讀**
+- Proposed 的檢索效果幾乎都來自 Hybrid RAG。拿掉它，主資料集從 80 筆掉到 53 筆，真實 bug 從 5 筆掉到 0 筆。
+- 在 Hybrid RAG 之上，Graph RAG 在 r3 這次執行沒有可量測的額外貢獻：主資料集 15/15 翻轉、真實 bug 完全相同。
+- 單靠 Graph RAG，連它應該最擅長的設定類也不夠：compound 0 筆、kconfig 7 筆，因為模型還是要找到實際的 Kconfig 或原始檔才能改。dts 三種設定都是 15～16 筆，dts 的錯誤訊息本身就指出檔案，不太需要檢索。
+- c_syntax 在沒有 Hybrid RAG 時反而最好（13 筆 vs 9 筆）。一個可能是少了檢索結果的干擾，但這還沒有讀 trajectory 確認，而且 n=19、單次執行。
+- 檢索命中和修好有關（命中時約 70% 修好，沒命中約 40%），但這是相關性，命中本身也和案例難度有關。
+
+**限制**
+- 都是單次執行；第 4 步的重複實驗先跳過，所以 15/15 這種翻轉量無法和執行間的變動分開。
+- 消融組沒有做 patch 重建和人工判讀，表中都是評測判定的數字。
+
