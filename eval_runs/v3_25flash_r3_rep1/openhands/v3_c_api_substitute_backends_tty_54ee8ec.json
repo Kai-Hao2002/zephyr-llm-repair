@@ -1,0 +1,191 @@
+[
+  {
+    "case_id": "v3_c_api_substitute_backends_tty_54ee8ec",
+    "category": "runtime_crash",
+    "pipeline": "openhands",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "resolved",
+    "iterations": 3,
+    "ttr_seconds": 118.67081713676453,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": true,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "openhands",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 30575,
+            "output_tokens": 1833,
+            "llm_calls": 5
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "success",
+          "patch": null,
+          "applied_files": [
+            "tests/subsys/modem/backends/tty/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "Zephyr OS successfully booted.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[111/115] Linking C static library zephyr/kernel/libkernel.a\n[112/115] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[113/115] Building native simulator runner, and linking final executable\n[114/115] Running utility command for native_runner_executable\n[114/115] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.0-rc1 ***\nRunning TESTSUITE modem_backend_tty_suite\n===================================================================\nSTART - test_close_open\nPASS - test_close_open in 0.000 seconds\n===================================================================\nSTART - test_receive\nPASS - test_receive in 1.010 seconds\n===================================================================\nSTART - test_receive_ready_event_not_raised\nPASS - test_receive_ready_event_not_raised in 1.010 seconds\n===================================================================\nSTART - test_receive_ready_event_raised\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/modem/backends/tty/src/main.c:162: modem_backend_tty_suite_test_receive_ready_event_raised: (result == true is false)",
+    "protected_file_count": 3,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r3_rep1_repeat/openhands/v3_c_api_substitute_backends_tty_54ee8ec",
+    "openhands": {
+      "status": "finished",
+      "error": null,
+      "steps": 3,
+      "llm_calls": 5,
+      "input_tokens": 30575,
+      "output_tokens": 1833,
+      "cost": 0.008579640000000001,
+      "wall_seconds": 29.225303173065186,
+      "model": "gemini/gemini-2.5-flash",
+      "image": "zephyr-oh-agent:1.55.1-z2",
+      "max_steps": 50,
+      "timeout_min": 40.0,
+      "egress_allowed": [
+        "generativelanguage.googleapis.com:443"
+      ],
+      "egress_log": {
+        "allowed": 2,
+        "denied": [
+          "CONNECT raw.githubusercontent.com:443 HTTP/1.1"
+        ],
+        "upstream_errors": []
+      },
+      "changed_files": [
+        "tests/subsys/modem/backends/tty/src/main.c"
+      ],
+      "final_contents": {
+        "tests/subsys/modem/backends/tty/src/main.c": "/*\n * Copyright (c) 2022 Trackunit Corporation\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n/*************************************************************************************************/\n/*                                        Dependencies                                           */\n/*************************************************************************************************/\n#include <zephyr/ztest.h>\n#include <zephyr/kernel.h>\n#include <zephyr/sys/atomic.h>\n\n#include <zephyr/modem/backend/tty.h>\n\n#include <stdio.h>\n#include <stdlib.h>\n#include <fcntl.h>\n#include <unistd.h>\n#include <string.h>\n#include <termios.h>\n\n#define TEST_MODEM_BACKEND_TTY_PIPE_EVENT_OPENED_BIT (0)\n#define TEST_MODEM_BACKEND_TTY_PIPE_EVENT_RRDY_BIT   (1)\n#define TEST_MODEM_BACKEND_TTY_PIPE_EVENT_TIDLE_BIT  (2)\n#define TEST_MODEM_BACKEND_TTY_PIPE_EVENT_CLOSED_BIT (3)\n\n#define TEST_MODEM_BACKEND_TTY_OP_DELAY (K_MSEC(1000))\n\n/*************************************************************************************************/\n/*                                          Mock pipe                                            */\n/*************************************************************************************************/\nstatic struct modem_backend_tty tty_backend;\nstatic struct modem_pipe *tty_pipe;\n\n/*************************************************************************************************/\n/*                                          Mock PTY                                             */\n/*************************************************************************************************/\nstatic int primary_fd;\n\n/*************************************************************************************************/\n/*                                          Buffers                                              */\n/*************************************************************************************************/\nstatic uint8_t buffer1[1024];\nK_KERNEL_STACK_DEFINE(tty_stack, 4096);\n\n/*************************************************************************************************/\n/*                                          Helpers                                              */\n/*************************************************************************************************/\nstatic void test_modem_backend_tty_cfmakeraw(struct termios *termios_p)\n{\n\ttermios_p->c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);\n\ttermios_p->c_oflag &= ~OPOST;\n\ttermios_p->c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);\n\ttermios_p->c_cflag &= ~(CSIZE | PARENB);\n\ttermios_p->c_cflag |= CS8;\n}\n\n/*************************************************************************************************/\n/*                                     Modem pipe callback                                       */\n/*************************************************************************************************/\nstatic atomic_t tty_pipe_events;\n\nstatic void modem_pipe_callback_handler(struct modem_pipe *pipe, enum modem_pipe_event event,\n\t\t\t\t\tvoid *user_data)\n{\n\tswitch (event) {\n\tcase MODEM_PIPE_EVENT_OPENED:\n\t\tatomic_set_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_OPENED_BIT);\n\t\tbreak;\n\n\tcase MODEM_PIPE_EVENT_RECEIVE_READY:\n\t\tatomic_set_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_RRDY_BIT);\n\t\tbreak;\n\n\tcase MODEM_PIPE_EVENT_TRANSMIT_IDLE:\n\t\tatomic_set_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_TIDLE_BIT);\n\t\tbreak;\n\n\tcase MODEM_PIPE_EVENT_CLOSED:\n\t\tatomic_set_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_CLOSED_BIT);\n\t\tbreak;\n\t}\n}\n\n/*************************************************************************************************/\n/*                                         Test setup                                            */\n/*************************************************************************************************/\nstatic void *test_modem_backend_tty_setup(void)\n{\n\tconst char *secondary_name;\n\tstruct termios tio;\n\n\tprimary_fd = posix_openpt(O_RDWR | O_NOCTTY);\n\t__ASSERT_NO_MSG(primary_fd > -1);\n\t__ASSERT_NO_MSG(grantpt(primary_fd) > -1);\n\t__ASSERT_NO_MSG(unlockpt(primary_fd) > -1);\n\t__ASSERT_NO_MSG(tcgetattr(primary_fd, &tio) > -1);\n\ttest_modem_backend_tty_cfmakeraw(&tio);\n\t__ASSERT_NO_MSG(tcsetattr(primary_fd, TCSAFLUSH, &tio) > -1);\n\tsecondary_name = ptsname(primary_fd);\n\n\tstruct modem_backend_tty_config config = {\n\t\t.tty_path = secondary_name,\n\t\t.stack = tty_stack,\n\t\t.stack_size = K_KERNEL_STACK_SIZEOF(tty_stack),\n\t};\n\n\ttty_pipe = modem_backend_tty_init(&tty_backend, &config);\n\tmodem_pipe_attach(tty_pipe, modem_pipe_callback_handler, NULL);\n\t__ASSERT_NO_MSG(modem_pipe_open(tty_pipe, K_SECONDS(10)) == 0);\n\treturn NULL;\n}\n\nstatic void test_modem_backend_tty_before(void *f)\n{\n\tatomic_set(&tty_pipe_events, 0);\n}\n\nstatic void test_modem_backend_tty_teardown(void *f)\n{\n\tmodem_pipe_close(tty_pipe, K_SECONDS(10));\n}\n\n/*************************************************************************************************/\n/*                                             Tests                                             */\n/*************************************************************************************************/\nZTEST(modem_backend_tty_suite, test_close_open)\n{\n\tbool result;\n\n\tzassert_ok(modem_pipe_close(tty_pipe, K_SECONDS(10)), \"Failed to close pipe\");\n\tzassert_ok(modem_pipe_close(tty_pipe, K_SECONDS(10)), \"Pipe should already be closed\");\n\tzassert_ok(modem_pipe_open(tty_pipe, K_SECONDS(10)), \"Failed to open pipe\");\n\tresult = atomic_test_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_TIDLE_BIT);\n\tzassert_true(result, \"Transmit idle event should be set\");\n\tzassert_ok(modem_pipe_open(tty_pipe, K_SECONDS(10)), \"Pipe should already be open\");\n}\n\nZTEST(modem_backend_tty_suite, test_receive_ready_event_not_raised)\n{\n\tbool result;\n\n\tk_sleep(TEST_MODEM_BACKEND_TTY_OP_DELAY);\n\n\tresult = atomic_test_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_RRDY_BIT);\n\tzassert_false(result, \"Receive ready event should not be set\");\n}\n\nZTEST(modem_backend_tty_suite, test_receive_ready_event_raised)\n{\n\tint ret;\n\tbool result;\n\tchar msg[] = \"Test me buddy\";\n\n\tret = write(primary_fd, msg, sizeof(msg));\n\tzassert_true(ret == sizeof(msg), \"Failed to write to primary FD\");\n\n\t\t\tk_yield();\n\t\tk_sleep(K_MSEC(100));\n\n\tresult = atomic_test_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_RRDY_BIT);\n\tzassert_true(result == true, \"Receive ready evennt not set\");\n}\n\nZTEST(modem_backend_tty_suite, test_receive)\n{\n\tint ret;\n\tchar msg[] = \"Test me buddy\";\n\n\tret = write(primary_fd, msg, sizeof(msg));\n\tzassert_true(ret == sizeof(msg), \"Failed to write to primary FD\");\n\tk_sleep(TEST_MODEM_BACKEND_TTY_OP_DELAY);\n\n\tret = modem_pipe_receive(tty_pipe, buffer1, sizeof(buffer1));\n\tzassert_true(ret == sizeof(msg), \"Received incorrect number of bytes\");\n\tret = memcmp(msg, buffer1, sizeof(msg));\n\tzassert_true(ret == 0, \"Received incorrect bytes\");\n}\n\nZTEST(modem_backend_tty_suite, test_transmit)\n{\n\tint ret;\n\tchar msg[] = \"Test me buddy 2\";\n\tbool result;\n\n\tresult = atomic_test_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_TIDLE_BIT);\n\tzassert_false(result, \"Transmit idle event should not be set\");\n\n\tret = modem_pipe_transmit(tty_pipe, msg, sizeof(msg));\n\tzassert_true(ret == sizeof(msg), \"Failed to transmit using pipe\");\n\n\tk_sleep(TEST_MODEM_BACKEND_TTY_OP_DELAY);\n\n\tresult = atomic_test_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_TIDLE_BIT);\n\tzassert_true(result, \"Transmit idle event should be set\");\n\n\tret = read(primary_fd, buffer1, sizeof(buffer1));\n\tzassert_true(ret == sizeof(msg), \"Read incorrect number of bytes\");\n\tret = memcmp(msg, buffer1, sizeof(msg));\n\tzassert_true(ret == 0, \"Read incorrect bytes\");\n}\n\nZTEST_SUITE(modem_backend_tty_suite, NULL, test_modem_backend_tty_setup,\n\t    test_modem_backend_tty_before, NULL, test_modem_backend_tty_teardown);\n"
+      },
+      "events": [
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "SystemPromptEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "MessageEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [150, 170], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c:\\n   150\\tZTEST(modem_backend_tty_suite, test_receive_ready_event_raised)\\n   151\\t{\\n   152\\t\\tint ret;\\n   153\\t\\tbool result;\\n   154\\t\\tchar msg[] = \\\"Test me buddy\\\";\\n   155\\t\\n   156\\t\\tret = write(primary_fd, msg, sizeof(msg));\\n   157\\t\\tzassert_true(ret == sizeof(msg), \\\"Failed to write to primary FD\\\");\\n   158\\t\\n   159\\t\\tk_yield();\\n   160\\t\\n   161\\t\\tresult = atomic_test_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_RRDY_BIT);\\n   162\\t\\tzassert_true(result == true, \\\"Receive ready evennt not set\\\");\\n   163\\t}\\n   164\\t\\n   165\\tZTEST(modem_backend_tty_suite, test_receive)\\n   166\\t{\\n   167\\t\\tint ret;\\n   168\\t\\tchar msg[] = \\\"Test me buddy\\\";\\n   169\\t\\n   170\\t\\tret = write(primary_fd, msg, sizeof(msg));\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"grep -r 'tty_pipe_events\\\\|TEST_MODEM_BACKEND_TTY_PIPE_EVENT_RRDY_BIT' /zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/\", \"is_input\": false, \"timeout\": null, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"/zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c:#define TEST_MODEM_BACKEND_TTY_PIPE_EVENT_RRDY_BIT   (1)\\n/zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c:static atomic_t tty_pipe_events;\\n/zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c:               atomic_set_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_OPENED_BIT);\\n/zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c:               atomic_set_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_RRDY_BIT);\\n/zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c:               atomic_set_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_TIDLE_BIT);\\n/zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c:               atomic_set_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_CLOSED_BIT);\\n/zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c:       ato\n…[417 chars omitted]…\nc:       result = atomic_test_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_RRDY_BIT);\\n/zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c:       result = atomic_test_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_TIDLE_BIT);\\n/zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c:       result = atomic_test_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_TIDLE_BIT);\"}], \"is_error\": false, \"command\": \"grep -r 'tty_pipe_events\\\\|TEST_MODEM_BACKEND_TTY_PIPE_EVENT_RRDY_BIT' /zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/\", \"exit_code\": 0, \"timeout\": false, \"metadata\": {\"exit_code\": 0, \"pid\": -1, \"username\": \"root\", \"hostname\": \"9bfdb0146f69\", \"working_dir\": \"/workspace/project\", \"py_interpreter_path\": \"/opt/python/venv/bin/python\", \"prefix\": \"\", \"suffix\": \"\\n[The command completed with exit code 0.]\"}, \"full_output_save_dir\": \"workspace/conversations/d96f68c6d9594686a42a453e0f8bcda7/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"str_replace\", \"path\": \"/zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c\", \"file_text\": null, \"old_str\": \"\\t\\tk_yield();\", \"new_str\": \"\\t\\tk_yield();\\n\\t\\tk_sleep(K_MSEC(100));\", \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"The file /zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c has been edited. Here's the result of running `cat -n` on a snippet of /zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c:\\n   156\\t\\tret = write(primary_fd, msg, sizeof(msg));\\n   157\\t\\tzassert_true(ret == sizeof(msg), \\\"Failed to write to primary FD\\\");\\n   158\\t\\n   159\\t\\t\\t\\tk_yield();\\n   160\\t\\t\\tk_sleep(K_MSEC(100));\\n   161\\t\\n   162\\t\\tresult = atomic_test_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_RRDY_BIT);\\n   163\\t\\tzassert_true(result == true, \\\"Receive ready evennt not set\\\");\\n   164\\t}\\nReview the changes and make sure they are as expected. Edit the file again if necessary.\"}], \"is_error\": false, \"command\": \"str_replace\", \"path\": \"/zephyrproject/zephyr/tests/subsys/modem/backends/tty/src/main.c\", \"prev_exist\": true, \"old_content\": \"/*\\n * Copyright (c) 2022 Trackunit Corporation\\n *\\n * SPDX-License-Identif\n…[15481 chars omitted]…\nest_transmit)\\n{\\n\\tint ret;\\n\\tchar msg[] = \\\"Test me buddy 2\\\";\\n\\tbool result;\\n\\n\\tresult = atomic_test_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_TIDLE_BIT);\\n\\tzassert_false(result, \\\"Transmit idle event should not be set\\\");\\n\\n\\tret = modem_pipe_transmit(tty_pipe, msg, sizeof(msg));\\n\\tzassert_true(ret == sizeof(msg), \\\"Failed to transmit using pipe\\\");\\n\\n\\tk_sleep(TEST_MODEM_BACKEND_TTY_OP_DELAY);\\n\\n\\tresult = atomic_test_bit(&tty_pipe_events, TEST_MODEM_BACKEND_TTY_PIPE_EVENT_TIDLE_BIT);\\n\\tzassert_true(result, \\\"Transmit idle event should be set\\\");\\n\\n\\tret = read(primary_fd, buffer1, sizeof(buffer1));\\n\\tzassert_true(ret == sizeof(msg), \\\"Read incorrect number of bytes\\\");\\n\\tret = memcmp(msg, buffer1, sizeof(msg));\\n\\tzassert_true(ret == 0, \\\"Read incorrect bytes\\\");\\n}\\n\\nZTEST_SUITE(modem_backend_tty_suite, NULL, test_modem_backend_tty_setup,\\n\\t    test_modem_backend_tty_before, NULL, test_modem_backend_tty_teardown);\\n\", \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "MessageEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        }
+      ]
+    },
+    "api_events": [],
+    "started_at": "2026-10-28T13:47:49+00:00",
+    "run_meta": {
+      "code_commit": "d07e40ba3114f694a2a58b05fe4f09123eec209a",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": true,
+      "proposed_hybrid_rag": true,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
