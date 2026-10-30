@@ -202,6 +202,8 @@ def route_after_apply_patch(state: ZephyrAgentState) -> str:
     diagnosis pass over" behavior); finish if budget is exhausted.
     ApplyPatch succeeding always proceeds to StaticCheck.
     """
+    if state.get("error_type") == "patch_gate_retry":
+        return "retry_patch"  # 只有 ZEPHYR_PROPOSED_OPT 開啟時才會出現 / only with ZEPHYR_PROPOSED_OPT on
     if state.get("error_type") == "patch_format_error":
         return "finish" if state.get("final_status") == "failed_max_retries" else "retry_analyzer"
     return "goto_static_check"

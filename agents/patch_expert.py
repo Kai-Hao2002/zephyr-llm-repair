@@ -9,7 +9,7 @@ source.
 """
 import os
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -18,6 +18,7 @@ from core.llm_usage import extract_usage, append_usage
 from core.llm_provider import get_chat_model, get_model_name
 from core.llm_retry import call_with_retry
 from agents.spec_rule import SPEC_RULE
+from core.proposed_opt import PROPOSED_OPT, RETRIEVAL_CONTEXT_QUOTA_CHARS
 
 _LOG_PATH_PREFIX = "/zephyrproject/zephyr/"
 _LOG_EXT_PATH_RE = re.compile(re.escape(_LOG_PATH_PREFIX) + r"([\w\-./]+\.(?:c|h|conf|dts|dtsi|overlay))\b")
@@ -145,6 +146,54 @@ def collect_relevant_context_paths(workspace_path: str, target_app: str, error_l
     return sorted(p for p in candidates if os.path.isfile(os.path.join(workspace_path, p)))
 
 
+def _log_cited_paths(error_log: str) -> List[str]:
+    """log 提到的路徑，依第一次出現的位置排序。Paths cited in the log, in order of first appearance."""
+    hits = []
+    for pattern in (_LOG_EXT_PATH_RE, _LOG_KCONFIG_PATH_RE) + _LOG_RELATIVE_PATH_RES:
+        hits.extend((m.start(), m.group(1)) for m in pattern.finditer(error_log))
+    return list(dict.fromkeys(path for _, path in sorted(hits)))
+
+
+def select_ordered_context(workspace_path: str, target_app: str, error_log: str, retrieved_files: List[str] = None,
+                           limit: int = MAX_PATCH_CONTEXT_CHARS,
+                           retrieval_quota: int = RETRIEVAL_CONTEXT_QUOTA_CHARS) -> Tuple[List[Tuple[str, str]], Dict[str, Any]]:
+    """
+    依重要性放檔案 (2026-10-31，ZEPHYR_PROPOSED_OPT)：log 提到的檔案、target_app、檢索結果 (照排名)。
+    檢索結果另有配額；單一檔案放不下時略過，繼續放下一個，不像字母排序版本到上限就整批停止。
+    Files by importance: log-cited, target_app, retrieved (by rank). Retrieved files have their own quota; a
+    file that does not fit is skipped and the next one still gets a chance, unlike the alphabetical version
+    that stops at the limit.
+    """
+    app_files = []
+    target_app_dir = os.path.join(workspace_path, target_app)
+    for root, dirs, files in os.walk(target_app_dir):
+        app_files.extend(os.path.relpath(os.path.join(root, f), workspace_path) for f in files if _is_context_source_file(f))
+    tiers = (("log", _log_cited_paths(error_log), limit), ("target_app", sorted(app_files), limit),
+             ("retrieved", list(retrieved_files or []), retrieval_quota))
+    chosen, seen, total = [], set(), 0
+    stats = {"included": {}, "skipped": []}
+    for tier, paths, tier_limit in tiers:
+        tier_total = 0
+        for rel_path in paths:
+            filepath = os.path.join(workspace_path, rel_path)
+            if rel_path in seen or not os.path.isfile(filepath):
+                continue
+            seen.add(rel_path)
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                continue
+            if total + len(content) > limit or tier_total + len(content) > tier_limit:
+                stats["skipped"].append(rel_path)
+                continue
+            chosen.append((rel_path, content))
+            total += len(content)
+            tier_total += len(content)
+        stats["included"][tier] = tier_total
+    return chosen, stats
+
+
 def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     print("\n🛠️ [LLM Patch] Generating precise patch blocks...")
 
@@ -163,7 +212,11 @@ def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     target_app = state.get("target_app", ".")
     error_log = state.get("current_error_log", "")
     project_files_content = ""
-    if os.path.exists(workspace_path):
+    context_stats: Dict[str, Any] = {}
+    if PROPOSED_OPT and os.path.exists(workspace_path):
+        chosen, context_stats = select_ordered_context(workspace_path, target_app, error_log, state.get("retrieved_files", []))
+        project_files_content = "".join(f"\n--- {rel_path} ---\n{content}\n" for rel_path, content in chosen)
+    elif os.path.exists(workspace_path):
         total_chars = 0
         retrieved_files = state.get("retrieved_files", [])
         for rel_path in collect_relevant_context_paths(workspace_path, target_app, error_log, retrieved_files):
@@ -192,6 +245,9 @@ def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     # least knows which directions are already shown not to work.
     attempt_history = state.get("attempt_history", [])
     attempt_history_text = "\n".join(attempt_history) if attempt_history else "(This is the first attempt; there is no history yet.)"
+    if state.get("ineffective_attempts"):
+        attempt_history_text += ("\n\n[Directions shown not to work: the failure stayed the same after these edits]\n"
+                                 + "\n".join(state["ineffective_attempts"]))
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a top-tier embedded software engineer specializing in fixing Zephyr RTOS code.
@@ -241,6 +297,7 @@ Please start generating the patch blocks:""")
     print("   ↳ Patch blocks generated successfully!")
     return {
         "patch_content": patch_text,
+        "context_stats": context_stats,
         "messages": ["Patch Expert generated a patch."],
         "pending_token_usage": append_usage(state.get("pending_token_usage", []), usage_entry),
     }

@@ -200,6 +200,16 @@ def unregister(workspace_path: str) -> None:
     _restored_this_iteration.pop(os.path.abspath(workspace_path), None)
 
 
+def is_protected(workspace_path: str, rel_path: str) -> bool:
+    """這個路徑 (相對 workspace 根目錄) 在建置前會不會被還原。Would this path be reverted before building?"""
+    entry = _registry.get(os.path.abspath(workspace_path))
+    if entry is None:
+        return False
+    rel = os.path.normpath(rel_path)
+    in_app = entry["app_rel"] == "." or rel.startswith(entry["app_rel"] + os.sep)
+    return in_app and rel not in entry["exempt"]
+
+
 def restore(workspace_path: str) -> List[str]:
     """
     把受保護檔案還原成快照版本、刪掉 target_app 底下新增的非豁免檔案，回傳被

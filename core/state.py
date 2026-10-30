@@ -2,6 +2,7 @@
 from typing import TypedDict, Annotated, Any, Dict, List, Optional
 import operator
 from langchain_core.messages import AnyMessage
+from core.proposed_opt import failure_signature
 
 class ZephyrAgentState(TypedDict):
     """
@@ -229,6 +230,16 @@ class ZephyrAgentState(TypedDict):
     # Overall system status
     final_status: str
 
+    # Proposed 架構優化 (core/proposed_opt.py，開關關閉時不使用)：這一輪已用掉的 Patch 重試次數與原因、
+    # 上一次失敗的 log 特徵、已證明無效的方向、這一輪 Patch 的上下文統計。
+    # Proposed optimizations (core/proposed_opt.py, unused when off): gate retries and their reasons in this
+    # iteration, the last failure's log signature, directions shown not to work, this iteration's context stats.
+    gate_retries: int
+    gate_events: List[str]
+    last_failure_signature: str
+    ineffective_attempts: List[str]
+    context_stats: Dict[str, Any]
+
 # ==========================================
 # 輔助函數 (Helper Functions)
 # ==========================================
@@ -258,6 +269,11 @@ def create_initial_state(workspace_path: str, initial_log: str, max_iters: int =
         "messages": [],
         "current_error_log": initial_log,
         "last_build_log": initial_log,
+        "gate_retries": 0,
+        "gate_events": [],
+        "last_failure_signature": failure_signature(initial_log),
+        "ineffective_attempts": [],
+        "context_stats": {},
         "error_type": "initial_build_error",
         "search_keywords": [],
         "retrieved_context": "",

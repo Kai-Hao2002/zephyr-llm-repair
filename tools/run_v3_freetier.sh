@@ -38,6 +38,8 @@ case "$STAGE" in
     main)  export DATASET="$repo_dir/dataset/cases/final_dataset_v3.json"; res_root="$OUT_ROOT" ;;
     real)  export DATASET="$repo_dir/dataset/cases/real_bugs_v3.json"; res_root="$OUT_ROOT/real" ;;
     repeat) export DATASET="$repo_dir/dataset/v3/eval/repeat_subset_40.json"; res_root="$OUT_ROOT" ;;
+    dev) export DATASET="$repo_dir/dataset/dev_v2/dev_set_59.json"; res_root="$OUT_ROOT" ;;
+    devpilot) export DATASET="$repo_dir/dataset/dev_v2/dev_pilot_cases.json"; res_root="$OUT_ROOT/pilot" ;;
     *) echo "unknown STAGE $STAGE"; exit 64 ;;
 esac
 work_dir="$HOME/zephyr-eval-work/v3_eval_work_$(basename "$OUT_ROOT")_$STAGE"
@@ -71,7 +73,8 @@ check_model() {
 import glob, json, os, sys
 root, model = sys.argv[1], sys.argv[2]
 on = lambda k, d: os.environ.get(k, d).strip().lower() not in ("0", "false", "no")
-want = {"proposed_graph_rag": on("ZEPHYR_GRAPH_RAG", "0"), "proposed_hybrid_rag": on("ZEPHYR_HYBRID_RAG", "1")}
+want = {"proposed_graph_rag": on("ZEPHYR_GRAPH_RAG", "0"), "proposed_hybrid_rag": on("ZEPHYR_HYBRID_RAG", "1"),
+        "proposed_opt": on("ZEPHYR_PROPOSED_OPT", "0")}
 bad = []
 for p in sys.argv[3:]:
     for f in glob.glob(os.path.join(root, p, "*.json")):

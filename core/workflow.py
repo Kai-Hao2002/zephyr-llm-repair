@@ -3,12 +3,13 @@ import os
 import time
 import uuid
 import logging
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, List, Tuple
 
 from langgraph.graph import StateGraph, END
 
 # 引入自訂工具鏈與狀態
 from core.state import ZephyrAgentState
+from core.proposed_opt import MAX_GATE_RETRIES_PER_ITERATION, PROPOSED_OPT, failure_signature
 from tools.patch_applier import PatchApplier
 from tools.log_filter import LogFilter
 from tools.qemu_oracle import QemuOracle
@@ -40,7 +41,7 @@ from agents.supervisor import (
 )
 from tools.static_checker import StaticChecker
 from core.trajectory import build_trajectory
-from core.protected_files import (check_test_integrity, peek_restored, pop_restored, restore_reminder,
+from core.protected_files import (check_test_integrity, is_protected, peek_restored, pop_restored, restore_reminder,
                                   restore as restore_protected_files)
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -174,7 +175,7 @@ def _proposed_trajectory(state: ZephyrAgentState, stage: str, status: str, **fie
     Proposed's trajectory record: patch/Analyzer diagnosis/retrieval come
     from state; each node adds only its own step's output (see
     core/trajectory.py)."""
-    return build_trajectory(
+    trajectory = build_trajectory(
         stage, status,
         patch=state.get("patch_content", ""),
         analyzer_diagnosis=state.get("analyzer_diagnosis"),
@@ -183,6 +184,9 @@ def _proposed_trajectory(state: ZephyrAgentState, stage: str, status: str, **fie
         graph_context=state.get("retrieved_context") or None,
         **fields,
     )
+    if PROPOSED_OPT:
+        trajectory.update(gate_events=state.get("gate_events", []), context_stats=state.get("context_stats", {}))
+    return trajectory
 
 
 def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
@@ -263,6 +267,32 @@ def with_last_build_log(message: str, last_build_log: str, note: str) -> str:
     return f"{message}\n\n[Most recent build/run log ({note})]\n{last_build_log}"
 
 
+def _rollback_patch(workspace_path: str, original_contents: Dict[str, str]) -> None:
+    """把 PatchApplier 已經寫入的區塊還原。Undoes the blocks PatchApplier already wrote."""
+    for rel_path, content in original_contents.items():
+        with open(os.path.join(workspace_path, rel_path), "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+
+
+def no_progress_fields(state: ZephyrAgentState, log: str, applied_files: List[str], outcome: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    改完之後失敗的 log 特徵沒變時，明確標記這個方向無效 (2026-10-31，ZEPHYR_PROPOSED_OPT)。標記加在
+    attempt_history 的這一筆 (摘要壓縮之後)，也累積到 ineffective_attempts，後面每一輪的 Patch 都看得到。
+    When a failure's log signature did not change after a patch, mark that direction as ineffective. The note
+    goes on this attempt_history entry (after compression) and into ineffective_attempts for later iterations.
+    """
+    if not PROPOSED_OPT:
+        return outcome
+    signature = failure_signature(log)
+    fields = dict(outcome, last_failure_signature=signature)
+    if signature == state.get("last_failure_signature"):
+        note = f"Edited {', '.join(sorted(set(applied_files)))}: the failure did not change."
+        fields["attempt_history"] = [f"{outcome['attempt_history'][0]}\n[No progress] {note}"]
+        known = state.get("ineffective_attempts", [])
+        fields["ineffective_attempts"] = known if note in known else known + [note]
+    return fields
+
+
 def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     """
     ApplyPatch：把 Patch Expert 產生的 SEARCH/REPLACE 區塊套用到 workspace
@@ -288,6 +318,28 @@ def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     applier = PatchApplier(workspace_path=workspace_path)
     patch_result = applier.apply_patches(patch_content)
 
+    # Patch 不合格時不消耗輪次：帶具體原因在本輪重試 (2026-10-31，ZEPHYR_PROPOSED_OPT)。
+    # A patch that fails the gate does not consume an iteration: retry within this iteration with the reason.
+    if PROPOSED_OPT:
+        applied = patch_result.get("applied_files", [])
+        gate_reason = None
+        if not patch_result["success"]:
+            gate_reason = f"Patch Application Failed:\n{patch_result['error']}"
+            _rollback_patch(workspace_path, patch_result.get("original_contents", {}))
+        elif applied and all(is_protected(workspace_path, f) for f in applied):
+            gate_reason = restore_reminder(sorted(set(applied))).strip()
+        retries = state.get("gate_retries", 0)
+        if gate_reason and retries < MAX_GATE_RETRIES_PER_ITERATION:
+            print(f"   ↩️ Patch rejected before building (retry {retries + 1}/{MAX_GATE_RETRIES_PER_ITERATION} in iteration {current_iter}).")
+            _rollback_patch(workspace_path, patch_result.get("original_contents", {}))
+            return {
+                "current_error_log": with_last_build_log(gate_reason, state.get("last_build_log", ""),
+                                                         "from before this patch; nothing was built after it"),
+                "error_type": "patch_gate_retry",
+                "gate_retries": retries + 1,
+                "gate_events": state.get("gate_events", []) + [gate_reason[:300]],
+            }
+
     if not patch_result["success"]:
         print("   ❌ Patch application failed! Bad format, or no matching original code found.")
         return {
@@ -298,6 +350,8 @@ def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
             "applied_files": [],
             "iterations": current_iter,
             "final_status": failure_final_status,
+            "gate_retries": 0,
+            "gate_events": [],
             **record_attempt_outcome(
                 current_iter, f"Patch application failed (bad format / no matching original code): {patch_result['error']}",
                 compiled=False, tool_invocation_error=True,
@@ -314,6 +368,7 @@ def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
         "applied_files": applied_files,
         "pre_patch_contents": patch_result.get("original_contents", {}),
         "iterations": current_iter,
+        "gate_retries": 0,
     }
 
 
@@ -355,6 +410,7 @@ def static_check_node(state: ZephyrAgentState) -> Dict[str, Any]:
             "from before this patch; the patch is applied but was not built"),
         "error_type": "static_check_failed",
         "final_status": failure_final_status,
+        "gate_events": [],
         **record_attempt_outcome(
             current_iter, f"Patch applied to {applied_files}, but static analysis found problems: {result['log']}",
             compiled=False, tool_invocation_error=False,
@@ -457,7 +513,8 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
             "error_type": eval_result["status"],
             "iterations": current_iter,
             "final_status": failure_final_status,
-            **record_attempt_outcome(
+            "gate_events": [],
+            **no_progress_fields(state, eval_result["log"], applied_files, record_attempt_outcome(
                 current_iter,
                 f"Patch applied to {applied_files}; west build still failed after passing static analysis "
                 f"(status: {eval_result['status']}"
@@ -468,7 +525,7 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
                 trajectory=_proposed_trajectory(state, "build", eval_result["status"],
                                                 applied_files=applied_files, static_check_passed=True,
                                                 filtered_log=eval_result["log"], conflict_tag=conflict_tag),
-            ),
+            )),
         }
 
     print("   ✅ Build succeeded, handing over to the QA Expert to run it and observe the runtime result.")
@@ -504,7 +561,8 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
             "error_type": "missing_required_test",
             "iterations": current_iter,
             "final_status": failure_final_status,
-            **record_attempt_outcome(
+            "gate_events": [],
+            **no_progress_fields(state, eval_result["log"], applied_files, record_attempt_outcome(
                 current_iter,
                 f"Patch applied to {applied_files}; the suite as a whole reported success, but the target test '{required_pass_test}' shows no PASS, "
                 f"so this looks like gaming the check rather than a genuine fix.",
@@ -513,7 +571,7 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
                 trajectory=_proposed_trajectory(state, "run", eval_result["status"],
                                                 applied_files=applied_files, static_check_passed=True,
                                                 filtered_log=eval_result["log"]),
-            ),
+            )),
         }
 
     if eval_result["status"] == "success":
@@ -538,7 +596,8 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
         "error_type": eval_result["status"],
         "iterations": current_iter,
         "final_status": failure_final_status,
-        **record_attempt_outcome(
+        "gate_events": [],
+        **no_progress_fields(state, eval_result["log"], applied_files, record_attempt_outcome(
             current_iter,
             f"Patch applied to {applied_files}; it passed the build and ran, but runtime verification failed "
             f"(status: {eval_result['status']}): {eval_result['log']}",
@@ -547,7 +606,7 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
             trajectory=_proposed_trajectory(state, "run", eval_result["status"],
                                             applied_files=applied_files, static_check_passed=True,
                                             filtered_log=eval_result["log"]),
-        ),
+        )),
     }
 
 # ==========================================
@@ -573,6 +632,7 @@ def build_zephyr_graph() -> StateGraph:
     workflow.add_edge("Patch", "ApplyPatch")
     workflow.add_conditional_edges("ApplyPatch", route_after_apply_patch, {
         "goto_static_check": "StaticCheck",
+        "retry_patch": "Patch",
         "retry_analyzer": "Analyzer",
         "finish": END,
     })
