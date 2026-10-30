@@ -131,7 +131,7 @@ B1、B2 沿用 r2 的結果（`eval_runs/v3_25flash_r2/`，commit dbb8c72，程�
 
 - 用 `tools/replay_patches.py` 重建 patch，人工判讀「內容不同」的修好案例，算出「只算還原或等價修法」的修復率。上面那 2 筆沒改到注入檔的優先。
 - 跑 `failure_by_category.py`，做 Agentless、OpenHands 的失敗分類；`analyze_v3.py` 的 PIPELINES 要加入這兩條。
-- 等第 3、4 步跑完後，再分析 Graph RAG 和 Hybrid RAG 各自的貢獻，以及重複實驗的變異。（第 3 步已完成，見第 10 節；第 4 步先跳過。）
+- 等第 3、4 步跑完後，再分析 Graph RAG 和 Hybrid RAG 各自的貢獻，以及重複實驗的變異。（第 3 步見第 10 節；第 4 步見第 14 節。）
 
 ## 8. 人工判讀後的修復率（2026-10-26 補）
 
@@ -272,7 +272,15 @@ B1、B2 沿用 r2 的結果（`eval_runs/v3_25flash_r2/`，commit dbb8c72，程�
 - Proposed 的檢索效果幾乎都來自 Hybrid RAG。拿掉它，主資料集從 80 筆掉到 53 筆，真實 bug 從 5 筆掉到 0 筆。
 - 在 Hybrid RAG 之上，Graph RAG 在 r3 這次執行沒有可量測的額外貢獻：主資料集 15/15 翻轉、真實 bug 完全相同。
 - 單靠 Graph RAG，連它應該最擅長的設定類也不夠：compound 0 筆、kconfig 7 筆，因為模型還是要找到實際的 Kconfig 或原始檔才能改。dts 三種設定都是 15～16 筆，dts 的錯誤訊息本身就指出檔案，不太需要檢索。
-- c_syntax 在沒有 Hybrid RAG 時反而最好（13 筆 vs 9 筆）。一個可能是少了檢索結果的干擾，但這還沒有讀 trajectory 確認，而且 n=19、單次執行。
+- c_syntax 在沒有 Hybrid RAG 時反而最好（13 筆 vs 9 筆）。逐筆讀過 trajectory（2026-10-30 補）：
+  - 三組是包含關係：完整版修好的 9 筆，關 Graph 也修好；關 Graph 修好的 11 筆，只留 Graph 也修好。沒有任何一筆 c_syntax 是「有檢索才修好」。
+  - 多出來的 4 筆不是 Graph RAG 的貢獻。19 筆裡 15 筆的圖譜是空的（`No keywords provided for graph retrieval.`），其餘 4 筆只有無關的 Kconfig 符號，所以「只留 Graph RAG」在 c_syntax 上等於沒有檢索。B3 沒有檢索，c_syntax 也是 13 筆。
+  - 差異來自 Hybrid RAG 的干擾：
+    - adc_api：檢索回來的大檔（`Kconfig.zephyr` 等）讓 Patch 的上下文到 30 萬字上限，真正要改的 `tests/drivers/adc/adc_api/src/test_adc.c` 被截掉，完整版、關 Graph 各 5 輪都一樣。上下文是依路徑字母排序後才截斷，`tests/` 排在 `boards/`、`drivers/`、`include/`、`kernel/` 之後，最容易被截掉。
+    - uuid：檢索回來的是 `ztest.h` 和其他測試檔，模型 5 輪都去改 `ztest_test.h`；完整版在 r3、rep1、rep2 三次都失敗。
+    - timer_error_case：檢索結果和 uuid 相同，完整版 5 輪都改 `ztest_test.h`；關 Graph、只留 Graph 第 1 輪也改它，第 2 輪才改到 `main.c`。
+    - kernel_queue：關 Graph 用同樣的檢索結果第 1 輪就修好，看起來是執行間的變動。
+  - 對論文：錯誤訊息已經指到檔案時，Hybrid RAG 會擠掉或分散注意力。上下文排序（log 指到的檔案、target_app 優先）是可以改的設計問題，但依「不根據資料集案例調整」的原則，這次不改。
 - 檢索命中和修好有關（命中時約 70% 修好，沒命中約 40%），但這是相關性，命中本身也和案例難度有關。
 
 **限制**
@@ -456,3 +464,52 @@ B1、B2 沿用 r2 的結果（`eval_runs/v3_25flash_r2/`，commit dbb8c72，程�
 **限制**
 - r2、r3 各只跑一次，四項改動同時發生，第 4 項沒有單獨的 ablation。
 - 命中只看 Hybrid RAG 的檔案層級結果，不看 Graph RAG 的 YAML 內容是否有用。
+
+## 14. 執行間變動（第 4 步，2026-10-30 補）
+
+- 子集：`dataset/v3/eval/repeat_subset_40.json`，從主資料集依類別分層抽 40 筆（runtime 18、c_syntax 6、kconfig 6、compound 5、dts 5），種子 20261027。
+- 三次：r3（主實驗中這 40 筆的結果）、rep1、rep2（`eval_runs/v3_25flash_r3_rep{1,2}/`）。四條 pipeline、模型、Docker 映像、評測程式都相同；r3 之後只改了分析工具和啟動腳本（加 `STAGE=repeat`）。
+- 暫時性 API 錯誤都移到各自的 `archive/repeat_transient_*` 後單筆重跑；rep2 B3 isotp_depends 因筆電沒電睡眠而重跑（`archive/repeat_laptop_sleep_20261029/`，見 rep2 的 NOTES.md）。
+- 數字由 `r3_repeat_variance.py` 產生，輸出在 `repeat_variance_stdout.txt`、`repeat_variance.json`。都是評測判定，沒有人工判讀。
+
+| | r3 | rep1 | rep2 | 平均 | SD | 3 次都修好 | 2 次 | 1 次 | 都沒修好 | 會翻轉的案例 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Proposed | 26 | 21 | 22 | 23.0 | 2.6 | 16 | 6 | 9 | 9 | 15 |
+| OpenHands | 23 | 26 | 25 | 24.7 | 1.5 | 19 | 7 | 3 | 11 | 10 |
+| Agentless | 19 | 18 | 18 | 18.3 | 0.6 | 12 | 7 | 5 | 16 | 12 |
+| B3 | 18 | 12 | 12 | 14.0 | 3.5 | 11 | 2 | 5 | 22 | 7 |
+
+**成對比較**（x : y = 只有前者 / 只有後者修好；合併 = 三次的平均差，以案例為單位 bootstrap 95% CI；未校正）
+
+| 比較 | r3 | rep1 | rep2 | 合併差異（百分點） |
+|---|---|---|---|---|
+| Proposed vs OpenHands | 7 : 4 | 8 : 13 | 4 : 7 | −4.2（−17.5～+10.0） |
+| Proposed vs Agentless | 11 : 4 | 10 : 7 | 9 : 5 | +11.7（−2.5～+25.8） |
+| Proposed vs B3 | 12 : 4 | 11 : 2 | 10 : 0 | +22.5（+10.0～+35.0） |
+| OpenHands vs Agentless | 10 : 6 | 11 : 3 | 11 : 4 | +15.8（+1.7～+30.0） |
+| Agentless vs B3 | 8 : 7 | 10 : 4 | 9 : 3 | +10.8（−3.3～+25.0） |
+
+**各類別**（r3 / rep1 / rep2）
+
+| 類別 | n | Proposed | OpenHands | Agentless | B3 |
+|---|---|---|---|---|---|
+| runtime | 18 | 12/7/11 | 14/15/15 | 10/8/9 | 7/4/5 |
+| c_syntax | 6 | 3/3/2 | 2/3/2 | 3/3/3 | 4/2/2 |
+| kconfig | 6 | 5/4/4 | 3/3/3 | 0/2/2 | 2/1/1 |
+| dts | 5 | 4/5/4 | 3/4/4 | 5/4/4 | 5/5/4 |
+| compound | 5 | 2/2/1 | 1/1/1 | 1/1/0 | 0/0/0 |
+
+**解讀**
+- **Proposed 和 OpenHands 打平的結論穩定，但誰領先會換。** r3 是 Proposed 多（7:4），rep1、rep2 都是 OpenHands 多（8:13、4:7）；合併差異 −4.2 個百分點，CI 跨過 0。所以主實驗的「Proposed 57.6% vs OpenHands 54.0%」不能解讀成 Proposed 領先。
+- **Proposed 的 r3 在這 40 筆上偏高。** 子集上 r3 是 26/40（65%），rep1、rep2 是 21、22；三次平均 57.5%，剛好等於全集 r3 的 57.6%。OpenHands 正好相反，三次平均（61.7%）比 r3（57.5%）高。
+- **Proposed 勝過 Agentless、B3 的方向三次都一致**（Agentless 11:4、10:7、9:5；B3 12:4、11:2、10:0）。40 筆的檢定力不夠，Proposed vs Agentless 的合併 CI 碰到 0，但方向和主實驗（33:12，Holm p=0.012）一致。
+- **Proposed 的總數變動主要來自 runtime。** Proposed 的 runtime 是 12/7/11，15 筆會翻轉的案例裡 7 筆在 runtime（runtime 佔子集 18/40）。OpenHands 的 runtime 也有 5 筆翻轉，但方向互相抵銷，總數很穩定（14/15/15）。Agentless 最穩定（SD 0.6），可能因為它的定位和第一個候選都是 temperature 0。
+- **類別層級的結論大致穩定**：Proposed 在 kconfig、compound 三次都最好或並列最好，OpenHands 在 runtime 三次都最好，和第 3、12 節的解讀一致。
+- **單次執行的翻轉量**：每條 pipeline 有 7～15 筆（18～38%）的案例在三次之間結果不同。所以第 10 節消融的 15/15 翻轉、第 13 節 r2 → r3 的 32 筆翻轉，都在執行間變動的範圍內。
+
+**還沒確認的觀察**
+- Proposed 和 B3 都是 r3 高、rep1/rep2 低（B3 18 → 12、12），OpenHands 和 Agentless 沒有這個現象。r3 是 10 月 20 日前後跑的，rep1、rep2 是 10 月 28～30 日。Proposed 和 B3 都走 langchain-google-genai，OpenHands 走 LiteLLM，可能是 API 端模型行為隨時間改變，也可能只是巧合（n=40）。沒有檢查，論文裡只能當作限制提到。
+
+**限制**
+- 只有 40 筆、三次；r3 不是和 rep1、rep2 同時跑的。
+- 都是評測判定；人工判讀只做了 r3。
