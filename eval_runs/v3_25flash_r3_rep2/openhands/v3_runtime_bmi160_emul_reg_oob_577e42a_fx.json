@@ -1,0 +1,213 @@
+[
+  {
+    "case_id": "v3_runtime_bmi160_emul_reg_oob_577e42a_fx",
+    "category": "runtime_crash",
+    "pipeline": "openhands",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "resolved",
+    "iterations": 5,
+    "ttr_seconds": 204.49899291992188,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": true,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "openhands",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 62679,
+            "output_tokens": 2111,
+            "llm_calls": 6
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "success",
+          "patch": null,
+          "applied_files": [
+            "drivers/sensor/bosch/bmi160/emul_bmi160.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "Zephyr OS successfully booted.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[00:00:00.000,000] <inf> spi_emul_ctlr: Register emulator 'bmi@3' at cs 3\n\n[00:00:00.000,000] <inf> sensing: sensing init begin...\n[00:00:00.000,000] <inf> sensing: sensing init, sensor:base-accel-gyro, state:0\n[00:00:00.000,000] <inf> sensing: sensing init, sensor:lid-accel-gyro, state:0\n[00:00:00.000,000] <inf> sensing: init sensor, reporter:base-accel-gyro, client:hinge-angle, connection:0(0x80641e0)\n[00:00:00.000,000] <inf> sensing: init sensor, reporter:lid-accel-gyro, client:hinge-angle, connection:1(0x8064218)\n[00:00:00.000,000] <inf> sensing: sensing init, sensor:hinge-angle, state:0\n[00:00:00.000,000] <inf> sensing: sensing init, sensor:base-accel-gyro, state:0\n[00:00:00.000,000] <inf> sensing: sensing init, sensor:lid-accel-gyro, state:0\n[00:00:00.000,000] <inf> sensing: create sensing runtime thread ok\n[00:00:00.059,700] <inf> phy_3d_sensor: base-accel-gyro: Underlying device: bmi@68\n[00:00:00.119,400] <inf> phy_3d_sensor: lid-accel-gyro: Underlying device: bmi@3\n[00:00:00.119,400] <inf> hinge_angle: hinge-angle:Found reporter 0: base-accel-gyro\n[00:00:00.119,400] <inf> hinge_angle: hinge-angle:Found reporter 1: lid-accel-gyro\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE sensing_tests\n===================================================================\nSTART - test_bmi160_emul_get_reg_value_range\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/sensing/src/main.c:112: sensing_tests_test_bmi160_emul_get_reg_value_range: (ret not equal to -EINVAL)",
+    "protected_file_count": 7,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r3_rep2_repeat/openhands/v3_runtime_bmi160_emul_reg_oob_577e42a_fx",
+    "openhands": {
+      "status": "finished",
+      "error": null,
+      "steps": 5,
+      "llm_calls": 6,
+      "input_tokens": 62679,
+      "output_tokens": 2111,
+      "cost": 0.01333277,
+      "wall_seconds": 102.22537279129028,
+      "model": "gemini/gemini-2.5-flash",
+      "image": "zephyr-oh-agent:1.55.1-z2",
+      "max_steps": 50,
+      "timeout_min": 40.0,
+      "egress_allowed": [
+        "generativelanguage.googleapis.com:443"
+      ],
+      "egress_log": {
+        "allowed": 2,
+        "denied": [
+          "CONNECT raw.githubusercontent.com:443 HTTP/1.1"
+        ],
+        "upstream_errors": []
+      },
+      "changed_files": [
+        "drivers/sensor/bosch/bmi160/emul_bmi160.c"
+      ],
+      "final_contents": {
+        "drivers/sensor/bosch/bmi160/emul_bmi160.c": "/*\n * Copyright 2020 Google LLC\n *\n * SPDX-License-Identifier: Apache-2.0\n *\n * Emulator for the Bosch BMI160 accelerometer / gyro. This supports basic\n * init and reading of canned samples. It supports both I2C and SPI buses.\n */\n\n#define DT_DRV_COMPAT bosch_bmi160\n\n#define LOG_LEVEL CONFIG_SPI_LOG_LEVEL\n#include <zephyr/logging/log.h>\nLOG_MODULE_REGISTER(bosch_bmi160);\n\n#include <zephyr/sys/byteorder.h>\n#include <bmi160.h>\n#include <zephyr/device.h>\n#include <zephyr/drivers/emul.h>\n#include <zephyr/drivers/emul_sensor.h>\n#include <zephyr/drivers/i2c.h>\n#include <zephyr/drivers/i2c_emul.h>\n#include <zephyr/drivers/spi.h>\n#include <zephyr/drivers/spi_emul.h>\n#include <zephyr/sys/util.h>\n\n/** Run-time data used by the emulator */\nstruct bmi160_emul_data {\n\tuint8_t pmu_status;\n\t/** Current register to read (address) */\n\tuint32_t cur_reg;\n};\n\n/** Static configuration for the emulator */\nstruct bmi160_emul_cfg {\n\t/** Chip registers */\n\tuint8_t *reg;\n\tunion {\n\t\t/** Unit address (chip select ordinal) of emulator */\n\t\tuint16_t chipsel;\n\t\t/** I2C address of emulator */\n\t\tuint16_t addr;\n\t};\n};\n\n/* Names for the PMU components */\nstatic const char *const pmu_name[] = {\"acc\", \"gyr\", \"mag\", \"INV\"};\n\nint emul_bmi160_get_reg_value(const struct emul *target, int reg_number, uint8_t *out, size_t count)\n{\n\tconst struct bmi160_emul_cfg *cfg = target->cfg;\n\n\tif (reg_number < 0 || reg_number + count > BMI160_REG_COUNT) {\n\t\treturn -EINVAL;\n\t}\n\n\tmemcpy(out, cfg->reg + reg_number, count);\n\treturn 0;\n}\n\nstatic void reg_write(const struct emul *target, int regn, int val)\n{\n\tstruct bmi160_emul_data *data = target->data;\n\tconst struct bmi160_emul_cfg *cfg = target->cfg;\n\n\tLOG_DBG(\"write %x = %x\", regn, val);\n\tcfg->reg[regn] = val;\n\tswitch (regn) {\n\tcase BMI160_REG_ACC_CONF:\n\t\tLOG_DBG(\"   * acc conf\");\n\t\tbreak;\n\tcase BMI160_REG_ACC_RANGE:\n\t\tLOG_DBG(\"   * acc range\");\n\t\tbreak;\n\tcase BMI160_REG_GYR_CONF:\n\t\tLOG_DBG(\"   * gyr conf\");\n\t\tbreak;\n\tcase BMI160_REG_GYR_RANGE:\n\t\tLOG_DBG(\"   * gyr range\");\n\t\tbreak;\n\tcase BMI160_REG_CMD:\n\t\tswitch (val) {\n\t\tcase BMI160_CMD_SOFT_RESET:\n\t\t\tLOG_DBG(\"   * soft reset\");\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tif ((val & BMI160_CMD_PMU_BIT) == BMI160_CMD_PMU_BIT) {\n\t\t\t\tint which = (val & BMI160_CMD_PMU_MASK) >> BMI160_CMD_PMU_SHIFT;\n\t\t\t\tint shift;\n\t\t\t\tint pmu_val = val & BMI160_CMD_PMU_VAL_MASK;\n\n\t\t\t\tswitch (which) {\n\t\t\t\tcase 0:\n\t\t\t\t\tshift = BMI160_PMU_STATUS_ACC_POS;\n\t\t\t\t\tbreak;\n\t\t\t\tcase 1:\n\t\t\t\t\tshift = BMI160_PMU_STATUS_GYR_POS;\n\t\t\t\t\tbreak;\n\t\t\t\tcase 2:\n\t\t\t\tdefault:\n\t\t\t\t\tshift = BMI160_PMU_STATUS_MAG_POS;\n\t\t\t\t\tbreak;\n\t\t\t\t}\n\t\t\t\tdata->pmu_status &= 3 << shift;\n\t\t\t\tdata->pmu_status |= pmu_val << shift;\n\t\t\t\tLOG_DBG(\"   * pmu %s = %x, new status %x\", pmu_name[which], pmu_val,\n\t\t\t\t\tdata->pmu_status);\n\t\t\t} else {\n\t\t\t\tLOG_DBG(\"Unknown command %x\", val);\n\t\t\t}\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tdefault:\n\t\tLOG_DBG(\"Unknown write %x\", regn);\n\t}\n}\n\nstatic int reg_read(const struct emul *target, int regn)\n{\n\tstruct bmi160_emul_data *data = target->data;\n\tconst struct bmi160_emul_cfg *cfg = target->cfg;\n\tint val;\n\n\tLOG_DBG(\"read %x =\", regn);\n\tval = cfg->reg[regn];\n\tswitch (regn) {\n\tcase BMI160_REG_CHIPID:\n\t\tLOG_DBG(\"   * get chipid\");\n\t\tbreak;\n\tcase BMI160_REG_PMU_STATUS:\n\t\tLOG_DBG(\"   * get pmu\");\n\t\tval = data->pmu_status;\n\t\tbreak;\n\tcase BMI160_REG_STATUS:\n\t\tLOG_DBG(\"   * status\");\n\t\tval |= BMI160_DATA_READY_BIT_MASK;\n\t\tbreak;\n\tcase BMI160_REG_ACC_CONF:\n\t\tLOG_DBG(\"   * acc conf\");\n\t\tbreak;\n\tcase BMI160_REG_GYR_CONF:\n\t\tLOG_DBG(\"   * gyr conf\");\n\t\tbreak;\n\tcase BMI160_SPI_START:\n\t\tLOG_DBG(\"   * Bus start\");\n\t\tbreak;\n\tcase BMI160_REG_ACC_RANGE:\n\t\tLOG_DBG(\"   * acc range\");\n\t\tbreak;\n\tcase BMI160_REG_GYR_RANGE:\n\t\tLOG_DBG(\"   * gyr range\");\n\t\tbreak;\n\tdefault:\n\t\tLOG_DBG(\"Unknown read %x\", regn);\n\t}\n\tLOG_DBG(\"       = %x\", val);\n\n\treturn val;\n}\n\n#if BMI160_BUS_SPI\nstatic int bmi160_emul_io_spi(const struct emul *target, const struct spi_config *config,\n\t\t\t      const struct spi_buf_set *tx_bufs, const struct spi_buf_set *rx_bufs)\n{\n\tstruct bmi160_emul_data *data;\n\tconst struct spi_buf *tx, *txd, *rxd;\n\tunsigned int regn, val;\n\tint count;\n\n\tARG_UNUSED(config);\n\n\tdata = target->data;\n\n\t__ASSERT_NO_MSG(tx_bufs || rx_bufs);\n\t__ASSERT_NO_MSG(!tx_bufs || !rx_bufs || tx_bufs->count == rx_bufs->count);\n\tcount = tx_bufs ? tx_bufs->count : rx_bufs->count;\n\n\tif (count != 2) {\n\t\tLOG_DBG(\"Unknown tx_bufs->count %d\", count);\n\t\treturn -EIO;\n\t}\n\ttx = tx_bufs ? tx_bufs->buffers : NULL;\n\ttxd = tx_bufs ? &tx_bufs->buffers[1] : NULL;\n\trxd = rx_bufs ? &rx_bufs->buffers[1] : NULL;\n\n\tif (tx == NULL) {\n\t\tLOG_DBG(\"tx cannot be NULL\");\n\t\treturn -EIO;\n\t}\n\n\tif (tx->len != 1) {\n\t\tLOG_DBG(\"Unknown tx->len %d\", tx->len);\n\t\treturn -EIO;\n\t}\n\n\tregn = *(uint8_t *)tx->buf;\n\tif ((regn & BMI160_REG_READ) && rxd == NULL) {\n\t\tLOG_ERR(\"Cannot read without rxd\");\n\t\treturn -EPERM;\n\t}\n\n\tif (txd->len == 1) {\n\t\tif (regn & BMI160_REG_READ) {\n\t\t\tregn &= BMI160_REG_MASK;\n\t\t\tval = reg_read(target, regn);\n\t\t\t*(uint8_t *)rxd->buf = val;\n\t\t} else {\n\t\t\tval = *(uint8_t *)txd->buf;\n\t\t\treg_write(target, regn, val);\n\t\t}\n\t} else {\n\t\tif (regn & BMI160_REG_READ) {\n\t\t\tregn &= BMI160_REG_MASK;\n\t\t\tfor (int i = 0; i < txd->len; ++i) {\n\t\t\t\t((uint8_t *)rxd->buf)[i] = reg_read(target, regn + i);\n\t\t\t}\n\t\t} else {\n\t\t\tLOG_ERR(\"Unknown sample write\");\n\t\t\treturn -EIO;\n\t\t}\n\t}\n\n\treturn 0;\n}\n#endif\n\n#if BMI160_BUS_I2C\nstatic int bmi160_emul_transfer_i2c(const struct emul *target, struct i2c_msg *msgs, int num_msgs,\n\t\t\t\t    int addr)\n{\n\tstruct bmi160_emul_data *data;\n\n\tdata = target->data;\n\n\t__ASSERT_NO_MSG(msgs && num_msgs);\n\n\ti2c_dump_msgs_rw(target->dev, msgs, num_msgs, addr, false);\n\tswitch (num_msgs) {\n\tcase 2:\n\t\tif (msgs->flags & I2C_MSG_READ) {\n\t\t\tLOG_ERR(\"Unexpected read\");\n\t\t\treturn -EIO;\n\t\t}\n\t\tif (msgs->len != 1) {\n\t\t\tLOG_ERR(\"Unexpected msg0 length %d\", msgs->len);\n\t\t\treturn -EIO;\n\t\t}\n\t\tdata->cur_reg = msgs->buf[0];\n\n\t\t/* Now process the 'read' part of the message */\n\t\tmsgs++;\n\t\tif (msgs->flags & I2C_MSG_READ) {\n\t\t\tfor (int i = 0; i < msgs->len; ++i) {\n\t\t\t\tmsgs->buf[i] = reg_read(target, data->cur_reg + i);\n\t\t\t}\n\t\t} else {\n\t\t\tif (msgs->len != 1) {\n\t\t\t\tLOG_ERR(\"Unexpected msg1 length %d\", msgs->len);\n\t\t\t}\n\t\t\treg_write(target, data->cur_reg, msgs->buf[0]);\n\t\t}\n\t\tbreak;\n\tdefault:\n\t\tLOG_ERR(\"Invalid number of messages: %d\", num_msgs);\n\t\treturn -EIO;\n\t}\n\n\treturn 0;\n}\n#endif\n\n/* Device instantiation */\n\n#if BMI160_BUS_SPI\nstatic struct spi_emul_api bmi160_emul_api_spi = {\n\t.io = bmi160_emul_io_spi,\n};\n#endif\n\n#if BMI160_BUS_I2C\nstatic struct i2c_emul_api bmi160_emul_api_i2c = {\n\t.transfer = bmi160_emul_transfer_i2c,\n};\n#endif\n\nstatic int bmi160_emul_backend_set_channel(const struct emul *target, struct sensor_chan_spec ch,\n\t\t\t\t\t   const q31_t *value, int8_t shift)\n{\n\tconst struct bmi160_emul_cfg *cfg = target->cfg;\n\tint64_t intermediate = *value;\n\tq31_t scale;\n\tint8_t scale_shift = 0;\n\tint reg_lsb;\n\n\tswitch (ch.chan_type) {\n\tcase SENSOR_CHAN_ACCEL_X:\n\tcase SENSOR_CHAN_ACCEL_Y:\n\tcase SENSOR_CHAN_ACCEL_Z:\n\t\treg_lsb = BMI160_REG_DATA_ACC_X + (ch.chan_type - SENSOR_CHAN_ACCEL_X) * 2;\n\t\tscale = 0x4e7404ea;\n\n\t\tswitch (FIELD_GET(GENMASK(3, 0), cfg->reg[BMI160_REG_ACC_RANGE])) {\n\t\tcase BMI160_ACC_RANGE_4G:\n\t\t\tscale_shift = 6;\n\t\t\tbreak;\n\t\tcase BMI160_ACC_RANGE_8G:\n\t\t\tscale_shift = 7;\n\t\t\tbreak;\n\t\tcase BMI160_ACC_RANGE_16G:\n\t\t\tscale_shift = 8;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tscale_shift = 5;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase SENSOR_CHAN_GYRO_X:\n\tcase SENSOR_CHAN_GYRO_Y:\n\tcase SENSOR_CHAN_GYRO_Z:\n\t\treg_lsb = BMI160_REG_DATA_GYR_X + (ch.chan_type - SENSOR_CHAN_GYRO_X) * 2;\n\t\tscale = 0x45d02bea;\n\n\t\tswitch (FIELD_GET(GENMASK(2, 0), cfg->reg[BMI160_REG_GYR_RANGE])) {\n\t\tcase BMI160_GYR_RANGE_2000DPS:\n\t\t\tscale_shift = 6;\n\t\t\tbreak;\n\t\tcase BMI160_GYR_RANGE_1000DPS:\n\t\t\tscale_shift = 5;\n\t\t\tbreak;\n\t\tcase BMI160_GYR_RANGE_500DPS:\n\t\t\tscale_shift = 4;\n\t\t\tbreak;\n\t\tcase BMI160_GYR_RANGE_250DPS:\n\t\t\tscale_shift = 3;\n\t\t\tbreak;\n\t\tcase BMI160_GYR_RANGE_125DPS:\n\t\t\tscale_shift = 2;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\treturn -EINVAL;\n\t\t}\n\t\tbreak;\n\tcase SENSOR_CHAN_DIE_TEMP:\n\t\treg_lsb = BMI160_REG_TEMPERATURE0;\n\t\tscale = 0x8000;\n\t\tscale_shift = 7;\n\t\tbreak;\n\tdefault:\n\t\treturn -EINVAL;\n\t}\n\n\tif (shift < scale_shift) {\n\t\t/* Original value doesn't have enough int bits, fix it */\n\t\tintermediate >>= scale_shift - shift;\n\t} else if (shift > 0 && shift > scale_shift) {\n\t\t/* Original value might be out-of-bounds, fix it (we're going to lose precision) */\n\t\tintermediate <<= shift - scale_shift;\n\t}\n\n\tif (ch.chan_type == SENSOR_CHAN_DIE_TEMP) {\n\t\t/* Need to subtract 23C */\n\t\tintermediate -= INT64_C(23) << (31 - scale_shift);\n\t}\n\n\tintermediate =\n\t\tCLAMP(DIV_ROUND_CLOSEST(intermediate * INT16_MAX, scale), INT16_MIN, INT16_MAX);\n\n\tcfg->reg[reg_lsb] = FIELD_GET(GENMASK64(7, 0), intermediate);\n\tcfg->reg[reg_lsb + 1] = FIELD_GET(GENMASK64(15, 8), intermediate);\n\treturn 0;\n}\n\nstatic int bmi160_emul_backend_get_sample_range(const struct emul *target,\n\t\t\t\t\t\tstruct sensor_chan_spec ch, q31_t *lower,\n\t\t\t\t\t\tq31_t *upper, q31_t *epsilon, int8_t *shift)\n{\n\tconst struct bmi160_emul_cfg *cfg = target->cfg;\n\n\tswitch (ch.chan_type) {\n\tcase SENSOR_CHAN_ACCEL_X:\n\tcase SENSOR_CHAN_ACCEL_Y:\n\tcase SENSOR_CHAN_ACCEL_Z:\n\tcase SENSOR_CHAN_ACCEL_XYZ: {\n\t\tuint8_t acc_range = cfg->reg[BMI160_REG_ACC_RANGE];\n\n\t\tswitch (acc_range) {\n\t\tcase BMI160_ACC_RANGE_2G:\n\t\t\t*shift = 5;\n\t\t\tbreak;\n\t\tcase BMI160_ACC_RANGE_4G:\n\t\t\t*shift = 6;\n\t\t\tbreak;\n\t\tcase BMI160_ACC_RANGE_8G:\n\t\t\t*shift = 7;\n\t\t\tbreak;\n\t\tcase BMI160_ACC_RANGE_16G:\n\t\t\t*shift = 8;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\treturn -EINVAL;\n\t\t}\n\t\tint64_t intermediate = ((int64_t)(2 * 9.80665 * INT32_MAX)) >> 5;\n\n\t\t*upper = intermediate;\n\t\t*lower = -(*upper);\n\t\t*epsilon = intermediate * 2 / (1 << (16 - *shift));\n\t\treturn 0;\n\t}\n\tcase SENSOR_CHAN_GYRO_X:\n\tcase SENSOR_CHAN_GYRO_Y:\n\tcase SENSOR_CHAN_GYRO_Z:\n\tcase SENSOR_CHAN_GYRO_XYZ: {\n\t\tuint8_t gyro_range = cfg->reg[BMI160_REG_GYR_RANGE];\n\n\t\tswitch (gyro_range) {\n\t\tcase BMI160_GYR_RANGE_125DPS:\n\t\t\t*shift = 2;\n\t\t\tbreak;\n\t\tcase BMI160_GYR_RANGE_250DPS:\n\t\t\t*shift = 3;\n\t\t\tbreak;\n\t\tcase BMI160_GYR_RANGE_500DPS:\n\t\t\t*shift = 4;\n\t\t\tbreak;\n\t\tcase BMI160_GYR_RANGE_1000DPS:\n\t\t\t*shift = 5;\n\t\t\tbreak;\n\t\tcase BMI160_GYR_RANGE_2000DPS:\n\t\t\t*shift = 6;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\treturn -EINVAL;\n\t\t}\n\n\t\tint64_t intermediate = (int64_t)(125 * 3.141592654 * INT32_MAX / 180) >> 2;\n\n\t\t*upper = intermediate;\n\t\t*lower = -(*upper);\n\t\t*epsilon = intermediate * 2 / (1 << (16 - *shift));\n\t\treturn 0;\n\t}\n\tdefault:\n\t\treturn -EINVAL;\n\t}\n}\n\nstatic int bmi160_emul_backend_set_offset(const struct emul *target, struct sensor_chan_spec ch,\n\t\t\t\t\t  const q31_t *values, int8_t shift)\n{\n\tif (ch.chan_type != SENSOR_CHAN_ACCEL_XYZ && ch.chan_type != SENSOR_CHAN_GYRO_XYZ) {\n\t\treturn -EINVAL;\n\t}\n\n\tconst struct bmi160_emul_cfg *cfg = target->cfg;\n\tq31_t scale;\n\tint8_t scale_shift = 0;\n\n\tif (values[0] == 0 && values[1] == 0 && values[2] == 0) {\n\t\tif (ch.chan_type == SENSOR_CHAN_ACCEL_XYZ) {\n\t\t\tcfg->reg[BMI160_REG_OFFSET_EN] &= ~BIT(BMI160_ACC_OFS_EN_POS);\n\t\t} else {\n\t\t\tcfg->reg[BMI160_REG_OFFSET_EN] &= ~BIT(BMI160_GYR_OFS_EN_POS);\n\t\t}\n\t} else {\n\t\tif (ch.chan_type == SENSOR_CHAN_ACCEL_XYZ) {\n\t\t\tcfg->reg[BMI160_REG_OFFSET_EN] |= BIT(BMI160_ACC_OFS_EN_POS);\n\t\t} else {\n\t\t\tcfg->reg[BMI160_REG_OFFSET_EN] |= BIT(BMI160_GYR_OFS_EN_POS);\n\t\t}\n\t}\n\n\tif (ch.chan_type == SENSOR_CHAN_ACCEL_XYZ) {\n\t\t/*\n\t\t * bits = (values[i]mps2 / 9.80665g/mps2) / 0.0039g\n\t\t *      = values[i] / 0.038245935mps2/bit\n\t\t * 0.038245935 in Q31 format is 0x4e53e28 with shift 0\n\t\t */\n\t\tscale = 0x4e53e28;\n\t} else {\n\t\t/*\n\t\t * bits = (values[i]rad/s * 180 / pi) / 0.061deg/s\n\t\t *      = values[i] / 0.001064651rad/s\n\t\t */\n\t\tscale = 0x22e2f0;\n\t}\n\n\tfor (int i = 0; i < 3; ++i) {\n\t\tint64_t intermediate = values[i];\n\n\t\tif (shift > scale_shift) {\n\t\t\t/* Input uses a bigger scale, we need to increase its value to match */\n\t\t\tintermediate <<= (shift - scale_shift);\n\t\t} else if (shift < scale_shift) {\n\t\t\t/* Scale uses a bigger shift, we need to decrease its value to match */\n\t\t\tscale >>= (scale_shift - shift);\n\t\t}\n\n\t\tint64_t reg_value = intermediate / scale;\n\n\t\t__ASSERT_NO_MSG(ch.chan_type != SENSOR_CHAN_ACCEL_XYZ ||\n\t\t\t\t(reg_value >= INT8_MIN && reg_value <= INT8_MAX));\n\t\t__ASSERT_NO_MSG(ch.chan_type != SENSOR_CHAN_GYRO_XYZ ||\n\t\t\t\t(reg_value >= -0x1ff - 1 && reg_value <= 0x1ff));\n\t\tif (ch.chan_type == SENSOR_CHAN_ACCEL_XYZ) {\n\t\t\tcfg->reg[BMI160_REG_OFFSET_ACC_X + i] = reg_value & 0xff;\n\t\t} else {\n\t\t\tcfg->reg[BMI160_REG_OFFSET_GYR_X + i] = reg_value & 0xff;\n\t\t\tcfg->reg[BMI160_REG_OFFSET_EN] =\n\t\t\t\t(cfg->reg[BMI160_REG_OFFSET_EN] & ~GENMASK(i * 2 + 1, i * 2)) |\n\t\t\t\t(reg_value & GENMASK(9, 8));\n\t\t}\n\t}\n\n\treturn 0;\n}\n\nstatic int bmi160_emul_backend_set_attribute(const struct emul *target, struct sensor_chan_spec ch,\n\t\t\t\t\t     enum sensor_attribute attribute, const void *value)\n{\n\tif (attribute == SENSOR_ATTR_OFFSET &&\n\t    (ch.chan_type == SENSOR_CHAN_ACCEL_XYZ || ch.chan_type == SENSOR_CHAN_GYRO_XYZ)) {\n\t\tconst struct sensor_three_axis_attribute *attribute_value = value;\n\n\t\treturn bmi160_emul_backend_set_offset(target, ch, attribute_value->values,\n\t\t\t\t\t\t      attribute_value->shift);\n\t}\n\treturn -EINVAL;\n}\n\nstatic int bmi160_emul_backend_get_attribute_metadata(const struct emul *target,\n\t\t\t\t\t\t      struct sensor_chan_spec ch,\n\t\t\t\t\t\t      enum sensor_attribute attribute, q31_t *min,\n\t\t\t\t\t\t      q31_t *max, q31_t *increment, int8_t *shift)\n{\n\tARG_UNUSED(target);\n\tswitch (ch.chan_type) {\n\tcase SENSOR_CHAN_ACCEL_X:\n\tcase SENSOR_CHAN_ACCEL_Y:\n\tcase SENSOR_CHAN_ACCEL_Z:\n\tcase SENSOR_CHAN_ACCEL_XYZ:\n\t\tif (attribute == SENSOR_ATTR_OFFSET) {\n\t\t\t/* Offset uses 3.9mg per bit in an 8 bit register:\n\t\t\t *   0.0039g * 9.8065m/s2: yields the increment in SI units\n\t\t\t *   * INT8_MIN (or MAX) : yields the minimum (or maximum) values\n\t\t\t *   * INT32_MAX >> 3    : converts to q31 format within range [-8, 8]\n\t\t\t */\n\t\t\t*min = (q31_t)((int64_t)(0.0039 * 9.8065 * INT8_MIN * INT32_MAX) >> 3);\n\t\t\t*max = (q31_t)((int64_t)(0.0039 * 9.8065 * INT8_MAX * INT32_MAX) >> 3);\n\t\t\t*increment = (q31_t)((int64_t)(0.0039 * 9.8065 * INT32_MAX) >> 3);\n\t\t\t*shift = 3;\n\t\t\treturn 0;\n\t\t}\n\t\treturn -EINVAL;\n\tcase SENSOR_CHAN_GYRO_X:\n\tcase SENSOR_CHAN_GYRO_Y:\n\tcase SENSOR_CHAN_GYRO_Z:\n\tcase SENSOR_CHAN_GYRO_XYZ:\n\t\tif (attribute == SENSOR_ATTR_OFFSET) {\n\t\t\t/* Offset uses 0.061deg/s per bit in an 10 bit register:\n\t\t\t *   0.061deg/s * pi / 180: yields the increment in SI units\n\t\t\t *   * INT10_MIN (or MAX) : yields the minimum (or maximum) values\n\t\t\t *   * INT32_MAX          : converts to q31 format within range [-1, 1]\n\t\t\t */\n\t\t\t*min = (q31_t)(0.061 * 3.141593 / 180.0 * -512 * INT32_MAX);\n\t\t\t*max = (q31_t)(0.061 * 3.141593 / 180.0 * 511 * INT32_MAX);\n\t\t\t*increment = (q31_t)(0.061 * 3.141593 / 180.0 * INT32_MAX);\n\t\t\t*shift = 0;\n\t\t\treturn 0;\n\t\t}\n\t\treturn -EINVAL;\n\tdefault:\n\t\treturn -EINVAL;\n\t}\n}\n\nstatic const struct emul_sensor_driver_api backend_api = {\n\t.set_channel = bmi160_emul_backend_set_channel,\n\t.get_sample_range = bmi160_emul_backend_get_sample_range,\n\t.set_attribute = bmi160_emul_backend_set_attribute,\n\t.get_attribute_metadata = bmi160_emul_backend_get_attribute_metadata,\n};\n\nstatic int emul_bosch_bmi160_init(const struct emul *target, const struct device *parent)\n{\n\tconst struct bmi160_emul_cfg *cfg = target->cfg;\n\tstruct bmi160_emul_data *data = target->data;\n\tuint8_t *reg = cfg->reg;\n\n\tARG_UNUSED(parent);\n\n\tdata->pmu_status = 0;\n\n\treg[BMI160_REG_CHIPID] = BMI160_CHIP_ID;\n\n\treturn 0;\n}\n\n#define BMI160_EMUL_DATA(n)                                                                        \\\n\tstatic uint8_t bmi160_emul_reg_##n[BMI160_REG_COUNT];                                      \\\n\tstatic struct bmi160_emul_data bmi160_emul_data_##n;\n\n#define BMI160_EMUL_DEFINE(n, bus_api)                                                             \\\n\tEMUL_DT_INST_DEFINE(n, emul_bosch_bmi160_init, &bmi160_emul_data_##n,                      \\\n\t\t\t    &bmi160_emul_cfg_##n, &bus_api, &backend_api)\n\n/* Instantiation macros used when a device is on a SPI bus */\n#define BMI160_EMUL_SPI(n)                                                                         \\\n\tBMI160_EMUL_DATA(n)                                                                        \\\n\tstatic const struct bmi160_emul_cfg bmi160_emul_cfg_##n = {                                \\\n\t\t.reg = bmi160_emul_reg_##n, .chipsel = DT_INST_REG_ADDR(n)};                       \\\n\tBMI160_EMUL_DEFINE(n, bmi160_emul_api_spi)\n\n#define BMI160_EMUL_I2C(n)                                                                         \\\n\tBMI160_EMUL_DATA(n)                                                                        \\\n\tstatic const struct bmi160_emul_cfg bmi160_emul_cfg_##n = {.reg = bmi160_emul_reg_##n,     \\\n\t\t\t\t\t\t\t\t   .addr = DT_INST_REG_ADDR(n)};   \\\n\tBMI160_EMUL_DEFINE(n, bmi160_emul_api_i2c)\n\n/*\n * Main instantiation macro. Use of COND_CODE_1() selects the right\n * bus-specific macro at preprocessor time.\n */\n#define BMI160_EMUL(n)                                                                             \\\n\tCOND_CODE_1(DT_INST_ON_BUS(n, spi), (BMI160_EMUL_SPI(n)), (BMI160_EMUL_I2C(n)))\n\nDT_INST_FOREACH_STATUS_OKAY(BMI160_EMUL)\n"
+      },
+      "events": [
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "SystemPromptEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "MessageEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/sensing/src/main.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [100, 120], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"NOTE: We only show up to 116 since there're only 116 lines in this file.\\nHere's the result of running `cat -n` on /zephyrproject/zephyr/tests/subsys/sensing/src/main.c:\\n   100\\t * start (or extend) one byte past the end of the emulator's register\\n   101\\t * file, rather than reading adjacent memory.\\n   102\\t */\\n   103\\tZTEST(sensing_tests, test_bmi160_emul_get_reg_value_range)\\n   104\\t{\\n   105\\t\\tconst struct emul *bmi160_emul = EMUL_DT_GET(DT_NODELABEL(bmi160_i2c));\\n   106\\t\\tuint8_t out = 0xAA;\\n   107\\t\\tint ret;\\n   108\\t\\n   109\\t\\tzassert_not_null(bmi160_emul, \\\"BMI160 I2C emulator not found\\\");\\n   110\\t\\n   111\\t\\tret = emul_bmi160_get_reg_value(bmi160_emul, BMI160_REG_COUNT, &out, 1);\\n   112\\t\\tzassert_equal(ret, -EINVAL,\\n   113\\t\\t\\t      \\\"expected -EINVAL reading one byte past the register file, got %d\\\", ret);\\n   114\\t}\\n   115\\t\\n   116\\tZTEST_SUITE(sensing_tests, NULL, NULL, NULL, NULL, NULL);\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/sensing/src/main.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"grep -r \\\"emul_bmi160_get_reg_value\\\" /zephyrproject/zephyr\", \"is_input\": false, \"timeout\": null, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"/zephyrproject/zephyr/drivers/sensor/bosch/bmi160/emul_bmi160.h:int emul_bmi160_get_reg_value(const struct emul *target, int reg_number, uint8_t *out,\\n/zephyrproject/zephyr/drivers/sensor/bosch/bmi160/emul_bmi160.c:int emul_bmi160_get_reg_value(const struct emul *target, int reg_number, uint8_t *out, size_t count)\\n/zephyrproject/zephyr/tests/subsys/sensing/src/main.c: * Validate that emul_bmi160_get_reg_value() rejects a read that would\\n/zephyrproject/zephyr/tests/subsys/sensing/src/main.c:  ret = emul_bmi160_get_reg_value(bmi160_emul, BMI160_REG_COUNT, &out, 1);\"}], \"is_error\": false, \"command\": \"grep -r \\\"emul_bmi160_get_reg_value\\\" /zephyrproject/zephyr\", \"exit_code\": -1, \"timeout\": false, \"metadata\": {\"exit_code\": -1, \"pid\": -1, \"username\": null, \"hostname\": null, \"working_dir\": null, \"py_interpreter_path\": null, \"prefix\": \"\", \"suffix\": \"\\n[The command has no new output after 30 seconds. You may wait longer to see additional output by sending empty command '', send other commands to interact with the current process, send keys (\\\"C-c\\\", \\\"C-z\\\", \\\"C-d\\\") to interrupt/kill the previous command before sending your new command, or use the timeout parameter in terminal for future commands.]\"}, \"full_output_save_dir\": \"workspace/conversations/47ede362c3de40649fa3ae7b5d1ad471/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/drivers/sensor/bosch/bmi160/emul_bmi160.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/drivers/sensor/bosch/bmi160/emul_bmi160.c:\\n     1\\t/*\\n     2\\t * Copyright 2020 Google LLC\\n     3\\t *\\n     4\\t * SPDX-License-Identifier: Apache-2.0\\n     5\\t *\\n     6\\t * Emulator for the Bosch BMI160 accelerometer / gyro. This supports basic\\n     7\\t * init and reading of canned samples. It supports both I2C and SPI buses.\\n     8\\t */\\n     9\\t\\n    10\\t#define DT_DRV_COMPAT bosch_bmi160\\n    11\\t\\n    12\\t#define LOG_LEVEL CONFIG_SPI_LOG_LEVEL\\n    13\\t#include <zephyr/logging/log.h>\\n    14\\tLOG_MODULE_REGISTER(bosch_bmi160);\\n    15\\t\\n    16\\t#include <zephyr/sys/byteorder.h>\\n    17\\t#include <bmi160.h>\\n    18\\t#include <zephyr/device.h>\\n    19\\t#include <zephyr/drivers/emul.h>\\n    20\\t#include <zephyr/drivers/emul_sensor.h>\\n    21\\t#include <zephyr/drivers/i2c.h>\\n    22\\t#include <zephyr/drivers/i2c_emul.h>\\n    23\\t#include <zephyr/drivers/sp\n…[20585 chars omitted]…\n                              \\\\\\n   569\\t\\tBMI160_EMUL_DATA(n)                                                                        \\\\\\n   570\\t\\tstatic const struct bmi160_emul_cfg bmi160_emul_cfg_##n = {.reg = bmi160_emul_reg_##n,     \\\\\\n   571\\t\\t\\t\\t\\t\\t\\t\\t\\t   .addr = DT_INST_REG_ADDR(n)};   \\\\\\n   572\\t\\tBMI160_EMUL_DEFINE(n, bmi160_emul_api_i2c)\\n   573\\t\\n   574\\t/*\\n   575\\t * Main instantiation macro. Use of COND_CODE_1() selects the right\\n   576\\t * bus-specific macro at preprocessor time.\\n   577\\t */\\n   578\\t#define BMI160_EMUL(n)                                                                             \\\\\\n   579\\t\\tCOND_CODE_1(DT_INST_ON_BUS(n, spi), (BMI160_EMUL_SPI(n)), (BMI160_EMUL_I2C(n)))\\n   580\\t\\n   581\\tDT_INST_FOREACH_STATUS_OKAY(BMI160_EMUL)\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/drivers/sensor/bosch/bmi160/emul_bmi160.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"str_replace\", \"path\": \"/zephyrproject/zephyr/drivers/sensor/bosch/bmi160/emul_bmi160.c\", \"file_text\": null, \"old_str\": \"if (reg_number < 0 || reg_number + count > BMI160_REG_COUNT + 1) {\", \"new_str\": \"if (reg_number < 0 || reg_number + count > BMI160_REG_COUNT) {\", \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"The file /zephyrproject/zephyr/drivers/sensor/bosch/bmi160/emul_bmi160.c has been edited. Here's the result of running `cat -n` on a snippet of /zephyrproject/zephyr/drivers/sensor/bosch/bmi160/emul_bmi160.c:\\n    50\\t{\\n    51\\t\\tconst struct bmi160_emul_cfg *cfg = target->cfg;\\n    52\\t\\n    53\\t\\tif (reg_number < 0 || reg_number + count > BMI160_REG_COUNT) {\\n    54\\t\\t\\treturn -EINVAL;\\n    55\\t\\t}\\n    56\\t\\n    57\\t\\tmemcpy(out, cfg->reg + reg_number, count);\\nReview the changes and make sure they are as expected. Edit the file again if necessary.\"}], \"is_error\": false, \"command\": \"str_replace\", \"path\": \"/zephyrproject/zephyr/drivers/sensor/bosch/bmi160/emul_bmi160.c\", \"prev_exist\": true, \"old_content\": \"/*\\n * Copyright 2020 Google LLC\\n *\\n * SPDX-License-Identifier: Apache-2.0\\n *\\n * Emulator for the Bosch BMI160 accelerometer / gyro. This supports basic\\n * init and reading of canned samples. It supports both I2C \n…[36160 chars omitted]…\ni160_emul_cfg bmi160_emul_cfg_##n = {                                \\\\\\n\\t\\t.reg = bmi160_emul_reg_##n, .chipsel = DT_INST_REG_ADDR(n)};                       \\\\\\n\\tBMI160_EMUL_DEFINE(n, bmi160_emul_api_spi)\\n\\n#define BMI160_EMUL_I2C(n)                                                                         \\\\\\n\\tBMI160_EMUL_DATA(n)                                                                        \\\\\\n\\tstatic const struct bmi160_emul_cfg bmi160_emul_cfg_##n = {.reg = bmi160_emul_reg_##n,     \\\\\\n\\t\\t\\t\\t\\t\\t\\t\\t   .addr = DT_INST_REG_ADDR(n)};   \\\\\\n\\tBMI160_EMUL_DEFINE(n, bmi160_emul_api_i2c)\\n\\n/*\\n * Main instantiation macro. Use of COND_CODE_1() selects the right\\n * bus-specific macro at preprocessor time.\\n */\\n#define BMI160_EMUL(n)                                                                             \\\\\\n\\tCOND_CODE_1(DT_INST_ON_BUS(n, spi), (BMI160_EMUL_SPI(n)), (BMI160_EMUL_I2C(n)))\\n\\nDT_INST_FOREACH_STATUS_OKAY(BMI160_EMUL)\\n\", \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "finish",
+          "action": "{\"message\": \"The defect has been fixed by correcting the boundary check in `emul_bmi160_get_reg_value`. The condition `reg_number + count > BMI160_REG_COUNT + 1` was changed to `reg_number + count > BMI160_REG_COUNT` to correctly return `-EINVAL` when attempting to read one byte past the end of the register file.\", \"kind\": \"FinishAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "finish",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"The defect has been fixed by correcting the boundary check in `emul_bmi160_get_reg_value`. The condition `reg_number + count > BMI160_REG_COUNT + 1` was changed to `reg_number + count > BMI160_REG_COUNT` to correctly return `-EINVAL` when attempting to read one byte past the end of the register file.\"}], \"is_error\": false, \"kind\": \"FinishObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        }
+      ]
+    },
+    "api_events": [],
+    "started_at": "2026-10-30T02:15:31+00:00",
+    "run_meta": {
+      "code_commit": "30b64528915c6abf57fdff29f984d75b403daa1a",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": true,
+      "proposed_hybrid_rag": true,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
