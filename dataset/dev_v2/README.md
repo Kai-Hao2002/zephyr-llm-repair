@@ -27,4 +27,15 @@
 
 開發集採用 59 筆：`dev_set_59.json`。與測試集的重疊在論文揭露；dts 只有 1 筆，開發集無法評估 DTS 的效果。
 `target_test` 已填入驗證結果。`initial_error_log` 已用 2026-10-31 修好的 LogFilter 從
-`~/zephyr-eval-work/v3_dev/logs/` 重新產生。標準答案和穩定性檢查還沒做。
+`~/zephyr-eval-work/v3_dev/logs/` 重新產生。
+
+## 標準答案與穩定性檢查（2026-10-31）
+
+- 標準答案（`dev_gold_check.json`）：58/59 通過。`inject_dts_gpio_latch_offbyone_riscv32` 是檢查工具的問題：
+  注入的 overlay 只存在 `extra_files`，`git show` 取不到。它的未注入版本在穩定性檢查裡通過，所以保留。
+- 穩定性（`dev_flaky_check.json`，33 筆 runtime / compound，注入版 3 次、原始版 1 或 2 次）：32/33 判定穩定。
+  `inject_dts_gpio_latch_offbyone_riscv32` 3 次都在開機時 Store/AMO fault，測試還沒開始，沒有失敗測試名稱，
+  工具才判定不穩定；實際上每次都失敗，保留。
+- `inject_api_substitute_lock_preemptible` 的 `target_test` 原本被自動挑成 `test_yield_cooperative`，
+  改為實際失敗的 `test_lock_preemptible` 後重跑穩定性檢查，通過。其餘 runtime / compound 的
+  `target_test` 都和實際失敗的測試一致。
