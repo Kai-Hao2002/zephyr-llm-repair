@@ -103,7 +103,7 @@ def test_runtime_tail_is_capped():
            + "".join(f"E:      a{i}: 0000000{i}\n" for i in range(100))
            + "E: >>> ZEPHYR FATAL ERROR 3: Kernel oops on CPU 0\n")
     out = LogFilter().compress_log(log)
-    tail = out.split("[Runtime Log Tail]\n", 1)[1].splitlines()
+    tail = out.split("[Runtime Log Tail]\n", 1)[1].split("\n\n[Build Messages]")[0].splitlines()
     assert len(tail) <= LogFilter.runtime_tail_max_lines + 1
     assert tail[0].startswith("START - ") and "ZEPHYR FATAL ERROR" in tail[-1]
 
@@ -140,6 +140,45 @@ def test_cascading_c_errors_keep_head_and_last():
     assert "'f1'" in out and "'f15'" in out and "'f16'" not in out
     assert "expected declaration or statement at end of input" in out
     assert "280 more distinct compilation errors omitted" in out
+
+
+def test_failed_unit_and_macro_site_kept_when_error_is_in_header():
+    log = ("FAILED: CMakeFiles/app.dir/src/main.c.obj\n"
+           "ccache gcc -DX -o CMakeFiles/app.dir/src/main.c.obj -c /zephyrproject/zephyr/tests/lib/foo/src/main.c\n"
+           "/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:243:26: error: initializer element is not constant\n"
+           "/zephyrproject/zephyr/include/zephyr/sys/iterable_sections.h:189:9: note: in expansion of macro 'TYPE_SECTION_ITERABLE'\n"
+           "/zephyrproject/zephyr/tests/lib/foo/src/main.c:294:1: note: in expansion of macro 'ZTEST_SUITE'\n"
+           "/zephyrproject/zephyr/tests/lib/foo/src/main.c:294:1: note: in expansion of macro 'ZTEST_SUITE'\n")
+    out = LogFilter().compress_log(log + NINJA)
+    assert out.startswith("[Failed Compilation Units]\n/zephyrproject/zephyr/tests/lib/foo/src/main.c\n")
+    assert out.count("main.c:294:1: note: in expansion of macro") == 1
+    assert out.index("ztest_test.h:243") < out.index("main.c:294:1")
+    assert "iterable_sections.h" not in out
+
+
+def test_macro_site_of_a_compiler_warning_is_dropped():
+    log = ("/zephyrproject/zephyr/a.h:1:1: error: bad thing\n"
+           "/zephyrproject/zephyr/b.h:2:2: warning: unused\n"
+           "/zephyrproject/zephyr/src/main.c:3:3: note: in expansion of macro 'M'\n")
+    assert "main.c:3:3" not in LogFilter().compress_log(log + NINJA)
+
+
+def test_runtime_failure_comes_before_benign_build_warning():
+    out = LogFilter().compress_log(BENIGN_KCONFIG_THEN_ASSERT)
+    assert out.startswith("[Runtime Log Tail]\n")
+    assert out.index("main.c:776") < out.index("[Build Messages]") < out.index("MAX_THREAD_BYTES")
+    assert "[Build Warning]" in out and "[Kconfig/Configuration Error Detected]" not in out
+
+
+def test_kconfig_warning_stays_an_error_when_the_program_never_booted():
+    out = LogFilter().compress_log(KCONFIG_WARNING + NINJA)
+    assert "[Kconfig/Configuration Error Detected]" in out and "[Build Messages]" not in out
+
+
+def test_host_abort_counts_as_runtime_failure():
+    log = (BENIGN_KCONFIG_THEN_ASSERT.split("START - ")[0]
+           + "START - test_memset\n*** buffer overflow detected ***: terminated\nAborted\n")
+    assert LogFilter().compress_log(log).startswith("[Runtime Log Tail]\nSTART - test_memset\n")
 
 
 def test_docker_desktop_hint_is_dropped():

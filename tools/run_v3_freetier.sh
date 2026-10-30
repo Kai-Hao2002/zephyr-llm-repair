@@ -71,7 +71,7 @@ check_model() {
 import glob, json, os, sys
 root, model = sys.argv[1], sys.argv[2]
 on = lambda k, d: os.environ.get(k, d).strip().lower() not in ("0", "false", "no")
-want = {"proposed_graph_rag": on("ZEPHYR_GRAPH_RAG", "1"), "proposed_hybrid_rag": on("ZEPHYR_HYBRID_RAG", "1")}
+want = {"proposed_graph_rag": on("ZEPHYR_GRAPH_RAG", "0"), "proposed_hybrid_rag": on("ZEPHYR_HYBRID_RAG", "1")}
 bad = []
 for p in sys.argv[3:]:
     for f in glob.glob(os.path.join(root, p, "*.json")):

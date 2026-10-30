@@ -4,6 +4,8 @@ import logging
 from collections import deque
 from typing import List
 
+from tools.devops_analyzer import extract_failed_units
+
 class LogFilter:
     """
     分層日誌過濾器。
@@ -78,6 +80,15 @@ class LogFilter:
         # 9. Docker Desktop CLI 的提示行 / Docker Desktop CLI hint lines
         self.docker_hint_re = re.compile(r"^What's next:\s*$|Debug this container error with Gordon|^\s*docker ai\b")
 
+        # 10. gcc 的巨集展開位置 (e.g., src/main.c:294:1: note: in expansion of macro 'ZTEST_SUITE')。
+        # 錯誤回報在標頭檔時，這一行才指出真正被編譯的檔案；只留 .c/.cc/.cpp 的位置，
+        # 標頭檔內部的展開鏈不留。
+        # gcc's macro expansion site: when an error is reported inside a header, this line names
+        # the file being compiled. Only sites in .c/.cc/.cpp files are kept, not chains inside headers.
+        self.macro_site_re = re.compile(r"^\S+\.(?:c|cc|cpp):\d+:\d+:\s+note:\s+in expansion of macro\b")
+        self.compiler_warning_re = re.compile(r"^\S+:\d+:\d+:\s+warning:")
+        self.macro_site_max = 10
+
     def compress_log(self, raw_log: str) -> str:
         """
         輸入原始編譯日誌字串，回傳高密度的錯誤摘要。
@@ -93,7 +104,9 @@ class LogFilter:
         # with Gordon → docker ai ...")，與 Zephyr 無關，先整行拿掉。
         # Docker Desktop CLI hint appended when a container exits non-zero; unrelated to Zephyr.
         lines = [l for l in raw_log.splitlines() if not self.docker_hint_re.search(ansi_escape.sub('', l))]
-        extracted_lines: List[str] = []
+        # 元素是一行文字，或一筆 C 錯誤的區塊 (後面的巨集展開位置會附加進去，輸出前才攤平)。
+        # Items are lines, or the block of one C error (macro sites get appended to it; flattened on output).
+        extracted_lines: List = []
         capturing_cmake_stack = False
         kconfig_warning_lines_left = 0
         seen_dedupe = set()
@@ -102,6 +115,8 @@ class LogFilter:
         dup_omitted = 0
         c_error_count = 0
         c_error_tail = deque(maxlen=self.c_error_max_tail)
+        current_c_block = None
+        macro_sites = set()
 
         for line in lines:
             # 清除顏色代碼並去除前後空白
@@ -118,6 +133,15 @@ class LogFilter:
                     kconfig_warning_lines_left -= 1
                     continue
                 kconfig_warning_lines_left = 0
+
+            # --- 附在 C 錯誤後面的巨集展開位置；編譯器警告的展開位置不留 ---
+            if self.compiler_warning_re.match(clean_line):
+                current_c_block = None
+            elif current_c_block is not None and self.macro_site_re.match(clean_line):
+                if clean_line not in macro_sites and len(macro_sites) < self.macro_site_max:
+                    macro_sites.add(clean_line)
+                    current_c_block.append(clean_line)
+                continue
 
             # --- 處理 CMake 的連續 Call Stack ---
             if capturing_cmake_stack:
@@ -142,12 +166,13 @@ class LogFilter:
                 # The same error line repeats per compilation unit / call site; keep the first.
                 if clean_line in seen_dedupe:
                     dup_omitted += 1
+                    current_c_block = None
                     continue
                 seen_dedupe.add(clean_line)
                 c_error_count += 1
-                block = ["\n[C/C++ Compilation Error Detected]", clean_line]
+                current_c_block = block = ["\n[C/C++ Compilation Error Detected]", clean_line]
                 if c_error_count <= self.c_error_max_head:
-                    extracted_lines.extend(block)
+                    extracted_lines.append(block)
                 else:
                     # 少一個右大括號會讓後面每個函式都報錯 (v3_c_heap_kasan_brace: 446 筆、91 KB)；
                     # 保留前段與最後幾筆 (gcc 最後的 "expected ... at end of input" 才指出真正位置)。
@@ -193,14 +218,16 @@ class LogFilter:
             omitted = c_error_count - self.c_error_max_head - len(c_error_tail)
             if omitted:
                 extracted_lines.append(f"\n[... {omitted} more distinct compilation errors omitted]")
-            for block in c_error_tail:
-                extracted_lines.extend(block)
+            extracted_lines.extend(c_error_tail)
         if link_omitted:
             extracted_lines.append(f"[... {link_omitted} more distinct link errors omitted]")
         if dup_omitted:
             extracted_lines.append(f"[... {dup_omitted} duplicate compilation error lines omitted]")
 
-        compressed_output = "\n".join(extracted_lines).strip()
+        flat_lines: List[str] = []
+        for item in extracted_lines:
+            flat_lines.extend(item) if isinstance(item, list) else flat_lines.append(item)
+        compressed_output = "\n".join(flat_lines).strip()
 
         # 程式有開機執行 (看得到開機橫幅) 時，一律附上執行期的尾段：建置期規則
         # 可能只命中無害的 Kconfig 警告 (例如 MAX_THREAD_BYTES/USERSPACE)，
@@ -211,8 +238,20 @@ class LogFilter:
         # tail - hiding the assertion in 22 v2 runtime_crash cases.
         if compressed_output:
             runtime_tail = self._runtime_tail(lines, ansi_escape)
-            if runtime_tail:
+            # 程式已經開機、尾段又有失敗訊息時，建置期的訊息只是警告，失敗訊息放最前面 (2026-10-31)。
+            # The program built and ran, so build-phase text is only warnings: lead with the failure.
+            if runtime_tail and any(self._FAILURE_RE.search(l) for l in runtime_tail.splitlines()):
+                build_part = compressed_output.replace("[Kconfig/Configuration Error Detected]", "[Build Warning]")
+                compressed_output = f"[Runtime Log Tail]\n{runtime_tail}\n\n[Build Messages]\n{build_part}"
+            elif runtime_tail:
                 compressed_output += "\n\n[Runtime Log Tail]\n" + runtime_tail
+
+            # 錯誤回報在標頭檔時，模型要看到真正被編譯的檔案 (r3：c_syntax 8/19 筆因此看不到注入檔)。
+            # When an error is reported in a header, show the file actually being compiled.
+            units = extract_failed_units("\n".join(ansi_escape.sub('', l) for l in lines))
+            if units:
+                unit_lines = "\n".join(f"/zephyrproject/zephyr/{u}" for u in units)
+                compressed_output = f"[Failed Compilation Units]\n{unit_lines}\n\n{compressed_output}"
 
         if not compressed_output:
             self.logger.warning("No standard patterns matched, returning tail.")
@@ -223,7 +262,8 @@ class LogFilter:
 
     _BOOT_BANNER_RE = re.compile(r"\*\*\* Booting Zephyr OS")
     _TEST_START_RE = re.compile(r"^START - \w+")
-    _FAILURE_RE = re.compile(r"Assertion failed|ASSERTION FAIL|^FAIL - |ZEPHYR FATAL ERROR|Segmentation fault|Fault")
+    _FAILURE_RE = re.compile(r"Assertion failed|ASSERTION FAIL|^FAIL - |ZEPHYR FATAL ERROR|Segmentation fault|Fault"
+                             r"|\*\*\* .+ \*\*\*: terminated|^Aborted\b")
     runtime_tail_max_lines = 40
 
     def _runtime_tail(self, lines: List[str], ansi_escape) -> str:

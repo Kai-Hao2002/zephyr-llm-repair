@@ -5,13 +5,15 @@ graph_rag/build_case_graph.py，把輸出的 JSON 轉成 NetworkX 圖，交給 G
 外面 (<workspace>.graph/)，Hybrid RAG 不會把它當成原始碼索引進去。Kconfig/DTS/overlay/.conf 這類檔案
 被修改後下一次檢索會重建，圖始終反映目前的 workspace。
 
-開關 ZEPHYR_GRAPH_RAG (預設開啟；Graph RAG 是論文提案方法的一部分，關閉用於 ablation)，記在 run_meta。
+開關 ZEPHYR_GRAPH_RAG，記在 run_meta。2026-10-31 起預設關閉：r3 消融顯示 Graph RAG 在 Hybrid RAG 之上沒有可量測的
+貢獻，Proposed 只保留 Hybrid RAG；設成 1 可重現舊實驗。
 
 Per-case knowledge graph (host side, 2026-10-18): runs graph_rag/build_case_graph.py in the zephyr-sandbox
 container against the injected workspace and turns its JSON into a NetworkX graph for GraphRetriever. The
 graph lives outside the workspace (<workspace>.graph/), so Hybrid RAG never indexes it; it is rebuilt when
-Kconfig/DTS/overlay/.conf files change, so it always reflects the current workspace. Switch ZEPHYR_GRAPH_RAG
-(on by default, Graph RAG being part of the proposed method; off for ablations), recorded in run_meta.
+Kconfig/DTS/overlay/.conf files change, so it always reflects the current workspace. Switch ZEPHYR_GRAPH_RAG,
+recorded in run_meta. Off by default from 2026-10-31: the r3 ablation showed no measurable gain on top of Hybrid
+RAG, so Proposed keeps Hybrid RAG only; set it to 1 to reproduce older experiments.
 """
 import json
 import logging
@@ -23,7 +25,7 @@ from typing import Dict, Optional, Tuple
 
 import networkx as nx
 
-GRAPH_RAG = os.environ.get("ZEPHYR_GRAPH_RAG", "1").strip().lower() not in ("0", "false", "no")
+GRAPH_RAG = os.environ.get("ZEPHYR_GRAPH_RAG", "0").strip().lower() not in ("0", "false", "no")
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CONFIG_SUFFIXES = (".dts", ".dtsi", ".overlay", ".conf", ".defconfig")

@@ -28,8 +28,9 @@ def test_rebuild_only_after_config_change():
     open(os.path.join(ws, "subsys", "Kconfig"), "w").write("config A\n")
     open(os.path.join(ws, "subsys", "a.c"), "w").write("int a;\n")
     calls = []
-    orig = cg._build
+    orig, orig_switch = cg._build, cg.GRAPH_RAG
     cg._build = lambda w, a, b: (calls.append(w) or (_graph(), {"source": "target_app"}))
+    cg.GRAPH_RAG = True  # 預設關閉 (2026-10-31)，這裡測開啟時的行為 / off by default; this tests the on path
     try:
         assert cg.get_case_graph(ws, ".", "native_sim")[1]["rebuilt"]
         assert not cg.get_case_graph(ws, ".", "native_sim")[1]["rebuilt"]
@@ -40,7 +41,7 @@ def test_rebuild_only_after_config_change():
         assert cg.get_case_graph(ws, ".", "native_sim")[1]["rebuilt"]
         assert len(calls) == 2
     finally:
-        cg._build = orig
+        cg._build, cg.GRAPH_RAG = orig, orig_switch
         cg.drop_case_graph(ws)
 
 
