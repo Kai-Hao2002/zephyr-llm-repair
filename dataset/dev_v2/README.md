@@ -26,5 +26,5 @@
 ## 決定（2026-10-30）
 
 開發集採用 59 筆：`dev_set_59.json`。與測試集的重疊在論文揭露；dts 只有 1 筆，開發集無法評估 DTS 的效果。
-`target_test` 已填入驗證結果。`initial_error_log` 是用目前的 LogFilter 壓縮的，LogFilter 修好後要從
+`target_test` 已填入驗證結果。`initial_error_log` 已用 2026-10-31 修好的 LogFilter 從
 `~/zephyr-eval-work/v3_dev/logs/` 重新產生。標準答案和穩定性檢查還沒做。
