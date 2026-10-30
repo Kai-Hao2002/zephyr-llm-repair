@@ -22,3 +22,9 @@
 與測試集仍有重疊（59 筆中）：同檔案且同 operator 家族 10 筆、同注入檔 17 筆、同 target_app 42 筆。
 33 筆的 target_test 是驗證時自動挑的，資料集欄位尚未更新。沒有做標準答案檢查和穩定性檢查。
 原始 log：`~/zephyr-eval-work/v3_dev/logs/`。
+
+## 決定（2026-10-30）
+
+開發集採用 59 筆：`dev_set_59.json`。與測試集的重疊在論文揭露；dts 只有 1 筆，開發集無法評估 DTS 的效果。
+`target_test` 已填入驗證結果。`initial_error_log` 是用目前的 LogFilter 壓縮的，LogFilter 修好後要從
+`~/zephyr-eval-work/v3_dev/logs/` 重新產生。標準答案和穩定性檢查還沒做。
