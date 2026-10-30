@@ -330,10 +330,12 @@ B1、B2 沿用 r2 的結果（`eval_runs/v3_25flash_r2/`，commit dbb8c72，程�
 
 **四條 pipeline 共同的失敗**
 - 30 筆案例四條都沒修好：runtime 13、compound 6、kconfig 5、c_syntax 5、dts 1。
-- c_syntax 有一個四條共同的失敗模式。測試檔少了右大括號或分號時，編譯器的第一個錯誤出現在 `ZTEST` 巨集展開的地方，也就是 `ztest_test.h` / `ztest_assert.h`。四條 pipeline 都去改這兩個 ztest 標頭，而不是改測試檔：
+- c_syntax 有一個四條共同的失敗模式（2026-10-30 更正：原本寫成錯誤訊息本身指到錯的檔案，不準確）。測試檔少了右大括號或分號時，gcc 的第一個錯誤確實在 `ztest_test.h` / `ztest_assert.h`，但 gcc 也輸出了 `FAILED: ...main.c.obj` 和 `main.c:<行號>: note: in expansion of macro`。原始 log 19/19 筆都有被注入的檔案，其中 18 筆的 `FAILED:` 行直接指出它。`tools/log_filter.py` 把這些行濾掉了，過濾後有 8 筆完全看不到被注入的檔案，只剩 ztest 標頭。四條 pipeline 都去改這兩個 ztest 標頭，而不是改測試檔：
   - 失敗的 c_syntax 案例裡，改過 ztest 標頭的有 B3 6/6、Agentless 8/9、OpenHands 9/10、Proposed 9/10；
-  - 四條都失敗的 5 筆 c_syntax 都是這種（刪右大括號 3 筆、刪分號 2 筆）。
-  - 這是錯誤訊息誤導定位，不是某條 pipeline 特有的問題。這也可以解釋第 10 節裡只保留 Graph RAG 時 c_syntax 反而比較好：少了 Hybrid RAG 依錯誤訊息找回來的 ztest 標頭（這點還沒逐筆確認）。
+  - 四條都失敗的 5 筆 c_syntax 都是這種（刪右大括號 3 筆、刪分號 2 筆），其中 4 筆是過濾後看不到被注入檔案的那 8 筆。
+  - 這 8 筆的結果：Agentless、OpenHands、Proposed 都是 0/8，B3 是 4/8。其餘 11 筆：B3 9、Agentless 10、OpenHands 9、Proposed 9。
+  - 所以這個失敗模式主要來自我們的 LogFilter，不是編譯器輸出的問題，也不是某條 pipeline 特有的問題。第 10 節的逐筆檢查已確認 Hybrid RAG 會把模型帶去 ztest 標頭，但那是在 log 已經被濾掉線索之後發生的。
+  - 數字由 `r3_csyntax_log_check.py` 產生（`r3_csyntax_log_check_stdout.txt`）。
 
 **小結**
 - Agentless 的主要瓶頸是一次性的定位：注入檔沒進候選清單，後面就不可能修好。
