@@ -45,7 +45,7 @@ from dotenv import load_dotenv
 
 from core.state import create_initial_state, ZephyrAgentState
 from core.trajectory import clip_text
-from core.proposed_opt import PROPOSED_OPT
+from core.proposed_opt import B3_GATE, PROPOSED_OPT
 from graph_rag.case_graph import GRAPH_RAG
 from agents.knowledge_expert import HYBRID_RAG
 from tools.devops_analyzer import FAILED_UNIT_HINT, extract_failed_units, failed_units_note
@@ -669,6 +669,8 @@ def collect_run_meta() -> Dict[str, Any]:
         "proposed_hybrid_rag": HYBRID_RAG,
         # Proposed 的架構優化 (core/proposed_opt.py)。Proposed's architecture optimizations.
         "proposed_opt": PROPOSED_OPT,
+        # B3 的套用閘門 (core/baseline_pipelines.run_b3)。B3's apply gate.
+        "b3_gate": B3_GATE,
         # Agentless baseline 的候選 patch 數 (core/agentless_pipeline.py)。Agentless candidate count.
         "agentless_n": int(os.environ.get("ZEPHYR_AGENTLESS_N", "4")),
         # OpenHands baseline 的設定 (只在 --pipeline openhands 時有意義)。OpenHands settings (used only by that pipeline).

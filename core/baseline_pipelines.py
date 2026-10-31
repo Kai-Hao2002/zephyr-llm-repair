@@ -36,9 +36,10 @@ import os
 from typing import Any, Dict, List
 
 from core.state import ZephyrAgentState
-from core.workflow import evaluate_repair_attempt, with_last_build_log
+from core.workflow import _rollback_patch, evaluate_repair_attempt, with_last_build_log
+from core.proposed_opt import B3_GATE, MAX_GATE_RETRIES_PER_ITERATION
 from core.trajectory import build_trajectory
-from core.protected_files import pop_restored, restore_reminder
+from core.protected_files import is_protected, pop_restored, restore_reminder
 from tools.patch_applier import PatchApplier
 from agents.patch_expert import collect_relevant_context_paths, MAX_PATCH_CONTEXT_CHARS
 from agents.baselines import b1_generate_full_file_patch, b2_generate_patch, b3_generate_patch
@@ -221,20 +222,47 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
 
     for current_iter in range(1, max_iters + 1):
         print(f"\n🧪 [B3 Closed-Loop] Iteration {current_iter}/{max_iters}...")
-        project_files_content = _read_context_files(workspace_path, target_app, error_log, [])
-        patch_text, usage_entry = b3_generate_patch(error_log, project_files_content, _render_b3_history(history))
+        # 套用閘門 (2026-10-31，ZEPHYR_B3_GATE)：和優化版 Proposed 相同，不合格的 patch 還原後在本輪重試，
+        # 不消耗迭代；關閉時第一次就離開迴圈，行為和之前相同。
+        # Apply gate (ZEPHYR_B3_GATE): as in optimized Proposed, a rejected patch is rolled back and retried
+        # within the iteration; with the switch off the loop exits on the first pass, as before.
+        usages: List[Dict[str, Any]] = []
+        gate_events: List[str] = []
+        while True:
+            project_files_content = _read_context_files(workspace_path, target_app, error_log, [])
+            patch_text, usage_entry = b3_generate_patch(error_log, project_files_content, _render_b3_history(history))
+            usages.append(usage_entry)
 
-        applier = PatchApplier(workspace_path=workspace_path)
-        apply_result = applier.apply_patches(patch_text)
+            applier = PatchApplier(workspace_path=workspace_path)
+            apply_result = applier.apply_patches(patch_text)
+            if not B3_GATE:
+                break
+            applied = apply_result.get("applied_files", [])
+            gate_reason = None
+            if not apply_result["success"]:
+                gate_reason = f"Patch Application Failed:\n{apply_result['error']}"
+                _rollback_patch(workspace_path, apply_result.get("original_contents", {}))
+            elif applied and all(is_protected(workspace_path, f) for f in applied):
+                gate_reason = restore_reminder(sorted(set(applied))).strip()
+            if not gate_reason or len(gate_events) >= MAX_GATE_RETRIES_PER_ITERATION:
+                break
+            print(f"   ↩️ Patch rejected before building (retry {len(gate_events) + 1}/{MAX_GATE_RETRIES_PER_ITERATION} "
+                  f"in iteration {current_iter}).")
+            _rollback_patch(workspace_path, apply_result.get("original_contents", {}))
+            error_log = with_last_build_log(gate_reason, last_build_log, "from before this patch; nothing was built after it")
+            gate_events.append(gate_reason[:300])
+
         if not apply_result["success"]:
             print(f"   ❌ Patch application failed: {apply_result['error']}")
             failure = f"Patch Application Failed:\n{apply_result['error']}"
             history.append({"iteration": current_iter, "patch": patch_text,
                             "outcome": "patch application failed (nothing was built)", "log": failure})
             error_log = with_last_build_log(failure, last_build_log, "from before this patch; nothing was built after it")
-            iteration_log.append(_iteration_log_entry(current_iter, False, False, True, [usage_entry], _trajectory(workspace_path,
+            iteration_log.append(_iteration_log_entry(current_iter, False, False, True, usages, _trajectory(workspace_path,
                 "apply", "patch_format_error", patch=patch_text, applied_files=apply_result.get("applied_files", []), apply_error=apply_result["error"],
             )))
+            if B3_GATE:
+                iteration_log[-1]["trajectory"]["gate_events"] = gate_events
             if current_iter >= max_iters:
                 return {"final_status": "failed_max_retries", "iterations": current_iter,
                         "error_type": "patch_format_error", "iteration_log": iteration_log}
@@ -242,10 +270,12 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
 
         eval_result = evaluate_repair_attempt(workspace_path, board, target_app, required_pass_test)
         iteration_log.append(_iteration_log_entry(
-            current_iter, eval_result["compiled"], eval_result["resolved"], False, [usage_entry],
+            current_iter, eval_result["compiled"], eval_result["resolved"], False, usages,
             _trajectory(workspace_path, "run" if eval_result["compiled"] else "build", eval_result["status"], patch=patch_text,
                              applied_files=apply_result["applied_files"], filtered_log=eval_result["log"]),
         ))
+        if B3_GATE:
+            iteration_log[-1]["trajectory"]["gate_events"] = gate_events
         if eval_result["resolved"]:
             print("   🎉 Runtime verification passed!")
             return {"final_status": "resolved", "iterations": current_iter, "error_type": "success",

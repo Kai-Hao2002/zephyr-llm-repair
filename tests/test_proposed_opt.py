@@ -7,6 +7,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import agents.patch_expert as pe
+import core.baseline_pipelines as bp
 import core.protected_files as pf
 import core.workflow as wf
 from agents.supervisor import route_after_apply_patch
@@ -115,6 +116,55 @@ def test_unchanged_failure_is_marked_and_remembered():
 def test_graph_routes_the_gate_back_to_patch():
     edges = {(e.source, e.target) for e in wf.build_zephyr_graph().get_graph().edges}
     assert ("ApplyPatch", "Patch") in edges
+
+
+def _run_b3(ws, patches, gate):
+    seen = []
+
+    def fake_gen(error_log, files, history=""):
+        seen.append(error_log)
+        return patches[len(seen) - 1], {"node": "b3_closed_loop", "input_tokens": 1, "output_tokens": 1}
+
+    def fake_eval(ws_, board, app, test):
+        good = "fixed" in open(os.path.join(ws, "drivers/a.c")).read()
+        return {"status": "success" if good else "crash", "resolved": good, "compiled": True, "log": "boom"}
+
+    orig = (bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files, bp.B3_GATE)
+    bp.b3_generate_patch, bp.evaluate_repair_attempt = fake_gen, fake_eval
+    bp._read_context_files, bp.B3_GATE = (lambda *a, **k: ""), gate
+    try:
+        out = bp.run_b3({"workspace_path": ws, "target_app": "tests/app", "board": "native_sim",
+                         "current_error_log": "boom"}, 5)
+    finally:
+        bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files, bp.B3_GATE = orig
+    return out, seen
+
+
+def test_b3_gate_retries_within_the_iteration_and_rolls_back():
+    ws = _workspace()
+    partial = _block("drivers/a.c", "int a;", "int partial;") + _block("drivers/b.c", "not there", "x")
+    out, seen = _run_b3(ws, [partial, _block("drivers/a.c", "int a;", "int fixed;")], True)
+    assert out["final_status"] == "resolved" and out["iterations"] == 1
+    assert len(out["iteration_log"][0]["token_usage"]) == 2
+    assert len(out["iteration_log"][0]["trajectory"]["gate_events"]) == 1
+    assert "Patch Application Failed" in seen[1]
+    assert open(os.path.join(ws, "drivers/a.c")).read() == "int fixed;\n"
+
+
+def test_b3_gate_spends_an_iteration_after_two_retries():
+    ws = _workspace()
+    bad = _block("drivers/a.c", "not there", "x")
+    out, seen = _run_b3(ws, [bad, bad, bad, _block("drivers/a.c", "int a;", "int fixed;")], True)
+    assert out["iterations"] == 2 and len(seen) == 4
+    assert len(out["iteration_log"][0]["token_usage"]) == 3
+
+
+def test_b3_gate_off_keeps_the_old_loop():
+    ws = _workspace()
+    out, seen = _run_b3(ws, [_block("drivers/a.c", "not there", "x"), _block("drivers/a.c", "int a;", "int fixed;")], False)
+    assert out["iterations"] == 2 and len(seen) == 2
+    assert "gate_events" not in out["iteration_log"][0]["trajectory"]
+    assert len(out["iteration_log"][0]["token_usage"]) == 1
 
 
 if __name__ == "__main__":

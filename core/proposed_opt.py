@@ -17,6 +17,10 @@ import os
 import re
 
 PROPOSED_OPT = os.environ.get("ZEPHYR_PROPOSED_OPT", "0").strip().lower() in ("1", "true", "yes")
+# B3 只取套用閘門 (core/baseline_pipelines.run_b3)，讓「迭代」和優化版 Proposed 同義；排序內容和無進展記憶
+# 屬於 Proposed 的架構，B3 沒有。B3 gets the apply gate only, so an iteration means the same thing as in
+# optimized Proposed; ordered context and no-progress memory stay Proposed's own architecture.
+B3_GATE = os.environ.get("ZEPHYR_B3_GATE", "0").strip().lower() in ("1", "true", "yes")
 MAX_GATE_RETRIES_PER_ITERATION = 2
 RETRIEVAL_CONTEXT_QUOTA_CHARS = 100_000
 
