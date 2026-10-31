@@ -54,7 +54,7 @@ from core import llm_retry
 from core.llm_retry import LLMHangError, is_daily_quota, is_transient, pop_events, set_strict_fallbacks
 from core.workflow import build_zephyr_graph, build_devops_docker_cmd
 from core.baseline_pipelines import run_b1, run_b2, run_b3
-from core.llm_provider import set_provider, get_provider, set_single_model, is_single_model, get_model_name
+from core.llm_provider import PATCH_LLM_TIMEOUT, set_provider, get_provider, set_single_model, is_single_model, get_model_name
 from graph_rag.hybrid_retriever import EMBEDDING_MODEL
 from tools.fault_injector import MUTATE_SCRIPT_HOST_PATH, MUTATE_SCRIPT_CONTAINER_PATH
 from tools.qemu_oracle import QemuOracle
@@ -661,6 +661,7 @@ def collect_run_meta() -> Dict[str, Any]:
         # Docker (29.5.3) while `docker images` finds it, so use the latter.
         "docker_image_id": _command_output(["docker", "images", "zephyr-sandbox", "--no-trunc", "--format", "{{.ID}}"]),
         "strict_fallbacks": True,
+        "patch_llm_timeout": PATCH_LLM_TIMEOUT,
         "free_tier_retry_policy": llm_retry.FREE_TIER,
         "proposed_failed_unit_hint": FAILED_UNIT_HINT,
         # Proposed 的 Graph RAG (每筆案例現場建圖，graph_rag/case_graph.py)。Proposed's per-case Graph RAG.

@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 
 from core.llm_usage import extract_usage
-from core.llm_provider import get_chat_model, get_model_name
+from core.llm_provider import PATCH_LLM_TIMEOUT, get_chat_model, get_model_name
 from core.llm_retry import call_with_retry
 from agents.spec_rule import SPEC_RULE
 
@@ -79,16 +79,16 @@ def b1_generate_full_file_patch(error_log: str) -> Tuple[Dict[str, str], Dict[st
     回傳 (patch 內容, 這次呼叫的 token 用量)。
     Returns (patch content, this call's token usage).
     """
-    # timeout=300：見 agents/patch_expert.py 的同款說明——這三個 baseline
+    # timeout：見 agents/patch_expert.py 的同款說明——這三個 baseline
     # 呼叫都是修補生成 (context 可能不小)，沒有 timeout 的話一次卡住的
     # API 呼叫會讓整個 --pipeline b1/b2/b3 跑分無限期卡住 (2026-09-01 實測
     # 曾讓一次 B3 pilot 卡了 1 小時 44 分鐘)。
-    # timeout=300: same rationale as agents/patch_expert.py — these three
+    # timeout: same rationale as agents/patch_expert.py — these three
     # baseline calls are all patch generation (context can be sizable);
     # without a timeout, one hung API call blocks an entire --pipeline
     # b1/b2/b3 run indefinitely (confirmed 2026-09-01: a B3 pilot hung for
     # 1h44m).
-    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=300)
+    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=PATCH_LLM_TIMEOUT)
     # include_raw=True：見 agents/analyzer.py 的同款說明，需要底層 AIMessage
     # 才拿得到 usage_metadata。
     # include_raw=True: see agents/analyzer.py — needs the underlying
@@ -125,16 +125,16 @@ def b2_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
     回傳 (patch 內容, 這次呼叫的 token 用量)。
     Returns (patch content, this call's token usage).
     """
-    # timeout=300：見 agents/patch_expert.py 的同款說明——這三個 baseline
+    # timeout：見 agents/patch_expert.py 的同款說明——這三個 baseline
     # 呼叫都是修補生成 (context 可能不小)，沒有 timeout 的話一次卡住的
     # API 呼叫會讓整個 --pipeline b1/b2/b3 跑分無限期卡住 (2026-09-01 實測
     # 曾讓一次 B3 pilot 卡了 1 小時 44 分鐘)。
-    # timeout=300: same rationale as agents/patch_expert.py — these three
+    # timeout: same rationale as agents/patch_expert.py — these three
     # baseline calls are all patch generation (context can be sizable);
     # without a timeout, one hung API call blocks an entire --pipeline
     # b1/b2/b3 run indefinitely (confirmed 2026-09-01: a B3 pilot hung for
     # 1h44m).
-    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=300)
+    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=PATCH_LLM_TIMEOUT)
     prompt = ChatPromptTemplate.from_messages([
         ("system", _PATCH_FORMAT_SYSTEM_PROMPT),
         ("human", "[Current project source and configuration file contents (including candidate files additionally found by keyword retrieval)]\n{project_files}\n\n"
@@ -172,16 +172,16 @@ def b3_generate_patch(error_log: str, project_files_content: str,
     回傳 (patch 內容, 這次呼叫的 token 用量)。
     Returns (patch content, this call's token usage).
     """
-    # timeout=300：見 agents/patch_expert.py 的同款說明——這三個 baseline
+    # timeout：見 agents/patch_expert.py 的同款說明——這三個 baseline
     # 呼叫都是修補生成 (context 可能不小)，沒有 timeout 的話一次卡住的
     # API 呼叫會讓整個 --pipeline b1/b2/b3 跑分無限期卡住 (2026-09-01 實測
     # 曾讓一次 B3 pilot 卡了 1 小時 44 分鐘)。
-    # timeout=300: same rationale as agents/patch_expert.py — these three
+    # timeout: same rationale as agents/patch_expert.py — these three
     # baseline calls are all patch generation (context can be sizable);
     # without a timeout, one hung API call blocks an entire --pipeline
     # b1/b2/b3 run indefinitely (confirmed 2026-09-01: a B3 pilot hung for
     # 1h44m).
-    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=300)
+    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=PATCH_LLM_TIMEOUT)
     prompt = ChatPromptTemplate.from_messages([
         ("system", _PATCH_FORMAT_SYSTEM_PROMPT),
         ("human", "[Your earlier attempts in this session and their outcomes (oldest first)]\n{previous_attempts}\n"

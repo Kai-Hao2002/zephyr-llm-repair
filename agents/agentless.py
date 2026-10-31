@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Tuple
 from langchain_core.prompts import ChatPromptTemplate
 
 from agents.baselines import _PATCH_FORMAT_SYSTEM_PROMPT
-from core.llm_provider import get_chat_model, get_model_name
+from core.llm_provider import PATCH_LLM_TIMEOUT, get_chat_model, get_model_name
 from core.llm_retry import call_with_retry
 from core.llm_usage import extract_usage
 
@@ -24,7 +24,7 @@ SAMPLE_TEMPERATURE = 0.8
 
 
 def _ask(system: str, human: str, values: Dict[str, str], node: str, temperature: float = 0.0) -> Tuple[str, Dict]:
-    llm = get_chat_model(role=_ROLE, temperature=temperature, timeout=300)
+    llm = get_chat_model(role=_ROLE, temperature=temperature, timeout=PATCH_LLM_TIMEOUT)
     chain = ChatPromptTemplate.from_messages([("system", system), ("human", human)]) | llm
     response = call_with_retry(lambda: chain.invoke(values), what=node)
     return str(response.text), extract_usage(response, node=node, model=get_model_name(_ROLE))

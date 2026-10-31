@@ -15,7 +15,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from core.state import ZephyrAgentState
 from core.llm_usage import extract_usage, append_usage
-from core.llm_provider import get_chat_model, get_model_name
+from core.llm_provider import PATCH_LLM_TIMEOUT, get_chat_model, get_model_name
 from core.llm_retry import call_with_retry
 from agents.spec_rule import SPEC_RULE
 from core.proposed_opt import PROPOSED_OPT, RETRIEVAL_CONTEXT_QUOTA_CHARS
@@ -197,14 +197,14 @@ def select_ordered_context(workspace_path: str, target_app: str, error_log: str,
 def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     print("\n🛠️ [LLM Patch] Generating precise patch blocks...")
 
-    # timeout=300 (見 agents/analyzer.py 的說明，這裡的上限拉長是因為送進去
+    # timeout 見 core/llm_provider.PATCH_LLM_TIMEOUT (也見 agents/analyzer.py 的說明，這裡的上限拉長是因為送進去
     # 的上下文可能到 300k 字元，真正生成花的時間本來就比分類任務長，
     # 120 秒可能連正常、沒卡住的請求都會誤殺)。
-    # timeout=300 (see agents/analyzer.py; longer here because the context
+    # Timeout: see core/llm_provider.PATCH_LLM_TIMEOUT (and agents/analyzer.py; longer here because the context
     # sent in can be up to 300k chars — genuine generation legitimately
     # takes longer than a classification task, and 120s risked cutting off
     # requests that weren't actually hung).
-    llm = get_chat_model(role="pro", temperature=0, timeout=300)
+    llm = get_chat_model(role="pro", temperature=0, timeout=PATCH_LLM_TIMEOUT)
 
     # 動態讀取專案內的原始碼檔案，提供給 LLM 作為上下文——範圍限縮邏輯見
     # collect_relevant_context_paths。

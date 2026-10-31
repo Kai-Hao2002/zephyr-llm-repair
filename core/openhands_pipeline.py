@@ -24,7 +24,7 @@ import tempfile
 from typing import Any, Dict, List, Tuple
 
 from agents.spec_rule import SPEC_RULE
-from core.llm_provider import get_model_name, get_provider
+from core.llm_provider import PATCH_LLM_TIMEOUT, get_model_name, get_provider
 from core.protected_files import pop_restored
 from core.trajectory import build_trajectory
 from core.workflow import evaluate_repair_attempt
@@ -123,7 +123,7 @@ def run_openhands(state: Dict[str, Any]) -> Dict[str, Any]:
         cmd = [OH_PYTHON, os.path.join(_REPO, "tools", "openhands_runner.py"),
                "--workspace", workspace, "--target-app", state["target_app"], "--task-file", task_file,
                "--model", litellm_model(), "--image", OH_IMAGE, "--max-steps", str(OH_MAX_STEPS),
-               "--timeout-min", str(OH_TIMEOUT_MIN), "--out", out_file,
+               "--timeout-min", str(OH_TIMEOUT_MIN), "--llm-timeout", str(PATCH_LLM_TIMEOUT), "--out", out_file,
                "--allow-host", _LLM_API_HOST[get_provider()]]
         env = dict(os.environ, LLM_API_KEY=os.environ[key_env])
         proc = subprocess.run(cmd, env=env, capture_output=True, text=True,

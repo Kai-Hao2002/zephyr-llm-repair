@@ -137,6 +137,14 @@ def get_model_name(role: str) -> str:
     return _model_for_role(role)
 
 
+# 修補生成呼叫的逾時秒數，所有 pipeline 共用。300 秒對 gemini-4-argon 太短：SDK 會把這個值放進
+# X-Server-Timeout，伺服器到期就回 504，重試也沒用 (2026-10-31 實測，同一筆 900 秒內一次成功)。
+# Timeout for patch-generation calls, shared by all pipelines. 300s is too short for gemini-4-argon:
+# the SDK sends this value as X-Server-Timeout and the server answers 504 once it expires, so retries
+# cannot help (measured 2026-10-31: the same case succeeded first try with 900s).
+PATCH_LLM_TIMEOUT = 900
+
+
 def get_chat_model(role: str, temperature: float = 0, timeout: int = 120) -> Any:
     """
     role 必須是 "fast" 或 "pro"。回傳的物件都是 LangChain 的
