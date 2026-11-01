@@ -2,6 +2,21 @@ import glob, json, os, shutil, subprocess, time
 os.chdir(os.path.expanduser("~/zephyr-llm-repair"))
 STOP = os.path.expanduser("~/zephyr-eval-work/v4_main_STOP")
 LIMIT, MIN_GB = 185.0, 6
+CAP_TEXT = "spending cap"
+START = time.time() - 300
+
+def cap_hit():
+    # 只看這次開跑後寫入的結果，舊的錯誤已封存在 _transient
+    for f in glob.glob("eval_runs/v4_main/**/*", recursive=True):
+        if "/pilot/" in f or "/_transient/" in f or not f.endswith((".json", ".log")):
+            continue
+        try:
+            if os.path.getmtime(f) >= START and CAP_TEXT in open(f, errors="ignore").read():
+                return f
+        except OSError:
+            continue
+    return None
+
 while True:
     cost = 0.0
     files = [f for f in glob.glob("eval_runs/v4_main/**/*.json", recursive=True) if "/pilot/" not in f and "/_transient/" not in f]
@@ -16,12 +31,13 @@ while True:
     free = shutil.disk_usage(os.path.expanduser("~")).free / 2**30
     with open(os.path.expanduser("~/zephyr-eval-work/v4_main_watch.log"), "a") as w:
         w.write(f"{time.strftime('%F %T')} results={len(files)} cost=${cost:.2f} free={free:.1f}GB\n")
-    if cost >= LIMIT or free < MIN_GB:
-        open(STOP, "w").write(f"cost={cost:.2f} free={free:.1f}\n")
+    cap = cap_hit()
+    if cost >= LIMIT or free < MIN_GB or cap:
+        open(STOP, "w").write(f"cost={cost:.2f} free={free:.1f} cap={cap}\n")
         subprocess.run("pkill -f xargs.*v4job; pkill -f v4job.sh; pkill -f run_with_key_rotation; pkill -f run_batch.sh; pkill -f evaluate.py; pkill -f openhands_runner", shell=True)
         time.sleep(3)
         subprocess.run("docker ps -q | xargs -r docker rm -f", shell=True)
         break
     if not subprocess.run(["pgrep", "-f", "v4job.sh"], capture_output=True).stdout:
         break
-    time.sleep(600)
+    time.sleep(60)
