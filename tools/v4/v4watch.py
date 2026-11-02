@@ -1,4 +1,6 @@
-import glob, json, os, shutil, subprocess, time
+import glob, json, os, shutil, subprocess, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import v4usage
 os.chdir(os.path.expanduser("~/zephyr-llm-repair"))
 STOP = os.path.expanduser("~/zephyr-eval-work/v4_main_STOP")
 LIMIT, MIN_GB = 185.0, 6
@@ -28,6 +30,10 @@ while True:
         for i in r.get("iteration_log") or []:
             for u in i.get("token_usage") or []:
                 cost += u.get("input_tokens", 0) / 1e6 * 2 + u.get("output_tokens", 0) / 1e6 * 10
+    try:
+        v4usage.write()
+    except Exception as e:
+        print("usage report failed:", e)
     free = shutil.disk_usage(os.path.expanduser("~")).free / 2**30
     with open(os.path.expanduser("~/zephyr-eval-work/v4_main_watch.log"), "a") as w:
         w.write(f"{time.strftime('%F %T')} results={len(files)} cost=${cost:.2f} free={free:.1f}GB\n")
