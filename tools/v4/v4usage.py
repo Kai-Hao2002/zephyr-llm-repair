@@ -49,7 +49,7 @@ def write():
              "所以是上限估計；實際費用以 AI Studio 帳單為準。輸出 token 含 thinking。", "",
              "| pipeline | 完成 | 修好 | 錯誤 | 輸入 M | 輸出 M | LLM 呼叫 | 已用 | 每筆 | 跑完推估 |",
              "|---|---|---|---|---|---|---|---|---|---|", *rows, "",
-             f"已用合計 ${total:.2f}；照目前每筆平均，跑完推估 ${proj:.0f}。月上限 $250，回報費用到 $185 會自動暫停。"]
+             f"已用合計 ${total:.2f}；照目前每筆平均，跑完推估 ${proj:.0f}。月上限 $250；費用不再自動暫停（11/3 起）。"]
     open(os.path.join(REPO, "eval_runs/v4_main/usage.md"), "w").write("\n".join(lines) + "\n")
 
 

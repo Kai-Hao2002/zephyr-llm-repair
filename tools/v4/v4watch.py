@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import v4usage
 os.chdir(os.path.expanduser("~/zephyr-llm-repair"))
 STOP = os.path.expanduser("~/zephyr-eval-work/v4_main_STOP")
-LIMIT, MIN_GB = 185.0, 6
+LIMIT, MIN_GB = float("inf"), 6  # 使用者 11/3 取消費用自動暫停；磁碟與 spending cap 仍會停
 CAP_TEXT = "spending cap"
 START = time.time() - 300
 
