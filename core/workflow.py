@@ -1,16 +1,20 @@
 # core/workflow.py
 import os
+import time
+import uuid
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple
 
 from langgraph.graph import StateGraph, END
 
 # 引入自訂工具鏈與狀態
 from core.state import ZephyrAgentState
+from core.proposed_opt import MAX_GATE_RETRIES_PER_ITERATION, PROPOSED_OPT, failure_signature
 from tools.patch_applier import PatchApplier
 from tools.log_filter import LogFilter
 from tools.qemu_oracle import QemuOracle
-from tools.devops_analyzer import classify_build_failure, annotate_log_with_classification
+from tools.devops_analyzer import (FAILED_UNIT_HINT, annotate_log_with_classification, classify_build_failure,
+                                   extract_failed_units, failed_units_note)
 
 # 需要呼叫 LLM 的代理人節點邏輯都搬到 agents/*.py 了 (跟 README 描述的架構
 # 對齊)；ApplyPatch/StaticCheck/DevOps/QA 這幾個節點雖然對應提案
@@ -36,12 +40,15 @@ from agents.supervisor import (
     record_attempt_outcome, record_iteration_success,
 )
 from tools.static_checker import StaticChecker
+from core.trajectory import build_trajectory
+from core.protected_files import (check_test_integrity, is_protected, peek_restored, pop_restored, restore_reminder,
+                                  restore as restore_protected_files)
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 
-def build_devops_docker_cmd(workspace_path: str, board: str, target_app: str) -> str:
+def build_devops_docker_cmd(workspace_path: str, board: str, target_app: str) -> Tuple[str, str]:
     """
     組出 DevOps Expert 用來建置/執行一個案例的 docker 指令。抽成獨立函式，
     讓 evaluate.py 準備好 workspace 之後，可以用完全相同的指令先做一次
@@ -96,12 +103,37 @@ def build_devops_docker_cmd(workspace_path: str, board: str, target_app: str) ->
     providing real isolation — only breaking CMake's own cache writes;
     dropping it matches the writable, native container filesystem
     FaultInjector actually verified this dataset against.
+
+    回傳 (docker_cmd, container_name)：這裡的容器沒有 --name 就是隨機命名
+    (docker 自己配的形容詞_人名組合)，QemuOracle.evaluate() 的 container_name
+    安全網 (finally 區塊裡的 `docker kill`) 因此永遠沒東西可傳、形同虛設——
+    這正是孤兒容器一再出現的根因 (2026-09 發現：happy_elion/xenodochial_euclid/
+    epic_chatterjee 這些孤兒容器名稱，就是隨機命名的產物)。呼叫端必須把回傳的
+    container_name 傳進 oracle.evaluate(container_name=...)，安全網才真正有效。
+
+    Returns (docker_cmd, container_name): without --name the container gets
+    a random Docker-assigned name (an adjective_surname pair), so
+    QemuOracle.evaluate()'s container_name safety net (the `docker kill` in
+    its finally block) never has anything to target — this is the actual
+    root cause of the recurring orphaned-container bug (found 2026-09: the
+    orphans' names — happy_elion/xenodochial_euclid/epic_chatterjee — are
+    exactly Docker's random-name pattern). Callers must pass the returned
+    container_name into oracle.evaluate(container_name=...) for the safety
+    net to do anything.
     """
-    return (
-        f"docker run --rm -i -v {os.path.abspath(workspace_path)}:/zephyrproject/zephyr "
+    # 加隨機後綴：多條 pipeline 並行建置時，只用毫秒時間戳可能撞名，撞名的建置
+    # 會以 Docker 錯誤收場、被誤判成修復失敗。
+    # Random suffix: parallel pipelines could collide on a millisecond timestamp
+    # alone, and a colliding build would fail with a Docker error and be
+    # misjudged as a failed repair.
+    container_name = f"devops_run_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+    docker_cmd = (
+        f"docker run --rm -i --name {container_name} "
+        f"-v {os.path.abspath(workspace_path)}:/zephyrproject/zephyr "
         f"-w /zephyrproject/zephyr/{target_app} zephyr-sandbox "
         f"bash -c 'west build -b {board} -d /tmp/build -p always -t run .'"
     )
+    return docker_cmd, container_name
 
 
 # route_after_apply_patch/route_after_static_check/route_after_devops
@@ -134,7 +166,27 @@ def _compute_failure_final_status(current_iter: int, max_iterations: int) -> str
 # ("build-failed-before-QEMU-ever-started"). RQ1/RQ3's Bounded Compilation
 # Success Rate (Pass@k) is derived from this, a metric independent of
 # Functional Pass Rate (= resolved).
-_COMPILED_STATUSES = frozenset({"crash", "missing_required_test", "success"})
+_COMPILED_STATUSES = frozenset({"crash", "missing_required_test", "test_integrity_violation", "success"})
+
+
+def _proposed_trajectory(state: ZephyrAgentState, stage: str, status: str, **fields) -> Dict[str, Any]:
+    """Proposed 的軌跡紀錄：patch/Analyzer 診斷/檢索結果一律從 state 讀，
+    各節點只補自己那一步的輸出 (見 core/trajectory.py)。
+    Proposed's trajectory record: patch/Analyzer diagnosis/retrieval come
+    from state; each node adds only its own step's output (see
+    core/trajectory.py)."""
+    trajectory = build_trajectory(
+        stage, status,
+        patch=state.get("patch_content", ""),
+        analyzer_diagnosis=state.get("analyzer_diagnosis"),
+        retrieved_files=state.get("retrieved_files"),
+        restored_files=pop_restored(state.get("workspace_path")),
+        graph_context=state.get("retrieved_context") or None,
+        **fields,
+    )
+    if PROPOSED_OPT:
+        trajectory.update(gate_events=state.get("gate_events", []), context_stats=state.get("context_stats", {}))
+    return trajectory
 
 
 def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
@@ -157,24 +209,88 @@ def evaluate_repair_attempt(workspace_path: str, board: str, target_app: str,
     once would let a test-deleting shortcut patch be misjudged as a
     successful repair).
     """
-    docker_cmd = build_devops_docker_cmd(workspace_path, board, target_app)
+    # 評測端：建置前先把 target_app 底下被 agent 改過的受保護檔案還原 (見
+    # core/protected_files.py)，改測試讓它通過的 patch 因此不會被判定為修好。
+    # Evaluator side: restore protected test-app files the agent changed before
+    # building (see core/protected_files.py), so test-tampering patches can't pass.
+    restore_protected_files(workspace_path)
+    docker_cmd, container_name = build_devops_docker_cmd(workspace_path, board, target_app)
     oracle = QemuOracle(timeout=600)
-    eval_result = oracle.evaluate(docker_cmd, required_pass_test=required_pass_test)
+    eval_result = oracle.evaluate(docker_cmd, container_name=container_name, required_pass_test=required_pass_test)
     log_filter = LogFilter()
     compiled = eval_result["status"] in _COMPILED_STATUSES
 
     if eval_result["status"] == "missing_required_test":
         compressed_log = log_filter.compress_log(eval_result["log"]) + (
-            f"\n\n[判定失敗：套件整體成功，但目標測試 '{required_pass_test}' 未見 PASS，"
-            f"patch 疑似繞過而非真正修復。]"
+            f"\n\n[Verdict: FAILED. The suite as a whole succeeded, but the target test '{required_pass_test}' shows no PASS, "
+            f"so the patch appears to have bypassed the check rather than genuinely fixing the problem.]"
         )
         return {"status": "missing_required_test", "resolved": False, "compiled": compiled, "log": compressed_log}
 
     if eval_result["status"] == "success":
+        # 被注入的測試檔若被刪了 assertion、加了 skip，或在注入行以外改了測試/規格，套件「通過」不算修好
+        # (見 core/protected_files.py)。A pass obtained by deleting assertions, adding skips, or editing
+        # test/spec lines outside the injected lines is not a fix (see core/protected_files.py).
+        # 給 agent 的訊息不含檔名：被注入的檔案清單不能讓 agent 知道；細節只寫進評測端 log。訊息不說
+        # 「去修受測程式而不是測試」：有些缺陷就在測試檔裡 (2026-10-12 起)。
+        # The agent-facing message names no file (the injected-file list must stay hidden); details go
+        # to the evaluator's log only. It no longer says "fix the code under test instead of the tests":
+        # some defects live in test files (since 2026-10-12).
+        violations = check_test_integrity(workspace_path)
+        if violations:
+            logging.getLogger(__name__).warning("Test integrity violation: %s", "; ".join(violations))
+            return {"status": "test_integrity_violation", "resolved": False, "compiled": True,
+                    "log": "[Verdict: FAILED. The suite passed, but test or specification code was changed "
+                           "(assertions removed, tests skipped/forced to pass, or test logic, expected values, "
+                           "thread priorities, timing or the test scenario altered), so this does not count as a "
+                           "fix. Do not change what the tests check or expect. If the defect itself is in a test "
+                           "file, change only the faulty statement and leave the rest of the test as it was.]"}
         return {"status": "success", "resolved": True, "compiled": compiled, "log": "Zephyr OS successfully booted."}
 
     return {"status": eval_result["status"], "resolved": False, "compiled": compiled,
-            "log": log_filter.compress_log(eval_result["log"])}
+            "log": log_filter.compress_log(eval_result["log"]),
+            # 只有 Proposed 的 DevOps Expert 會用 (見 tools/devops_analyzer.extract_failed_units)。
+            # Used only by Proposed's DevOps Expert (see tools/devops_analyzer.extract_failed_units).
+            "failed_units": extract_failed_units(eval_result["log"])}
+
+
+def with_last_build_log(message: str, last_build_log: str, note: str) -> str:
+    """
+    patch 套用失敗或 StaticCheck 失敗時沒有 build；把最近一次 build/run 的 log 附在失敗訊息後面，
+    否則下一輪只看得到那則失敗訊息、看不到目前的錯誤 (2026-10-13；B3 共用)。
+    On a patch-apply or StaticCheck failure nothing is built; append the most recent build/run log to
+    the failure message, otherwise the next iteration sees only that message and loses the current
+    error (2026-10-13; shared with B3).
+    """
+    if not last_build_log:
+        return message
+    return f"{message}\n\n[Most recent build/run log ({note})]\n{last_build_log}"
+
+
+def _rollback_patch(workspace_path: str, original_contents: Dict[str, str]) -> None:
+    """把 PatchApplier 已經寫入的區塊還原。Undoes the blocks PatchApplier already wrote."""
+    for rel_path, content in original_contents.items():
+        with open(os.path.join(workspace_path, rel_path), "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+
+
+def no_progress_fields(state: ZephyrAgentState, log: str, applied_files: List[str], outcome: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    改完之後失敗的 log 特徵沒變時，明確標記這個方向無效 (2026-10-31，ZEPHYR_PROPOSED_OPT)。標記加在
+    attempt_history 的這一筆 (摘要壓縮之後)，也累積到 ineffective_attempts，後面每一輪的 Patch 都看得到。
+    When a failure's log signature did not change after a patch, mark that direction as ineffective. The note
+    goes on this attempt_history entry (after compression) and into ineffective_attempts for later iterations.
+    """
+    if not PROPOSED_OPT:
+        return outcome
+    signature = failure_signature(log)
+    fields = dict(outcome, last_failure_signature=signature)
+    if signature == state.get("last_failure_signature"):
+        note = f"Edited {', '.join(sorted(set(applied_files)))}: the failure did not change."
+        fields["attempt_history"] = [f"{outcome['attempt_history'][0]}\n[No progress] {note}"]
+        known = state.get("ineffective_attempts", [])
+        fields["ineffective_attempts"] = known if note in known else known + [note]
+    return fields
 
 
 def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
@@ -197,32 +313,62 @@ def apply_patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     max_iterations = state.get("max_iterations", 5)
     failure_final_status = _compute_failure_final_status(current_iter, max_iterations)
 
-    print(f"\n⚙️ [ApplyPatch] 套用第 {current_iter} 次迭代的修補...")
+    print(f"\n⚙️ [ApplyPatch] Applying the patch of iteration {current_iter}...")
 
     applier = PatchApplier(workspace_path=workspace_path)
     patch_result = applier.apply_patches(patch_content)
 
+    # Patch 不合格時不消耗輪次：帶具體原因在本輪重試 (2026-10-31，ZEPHYR_PROPOSED_OPT)。
+    # A patch that fails the gate does not consume an iteration: retry within this iteration with the reason.
+    if PROPOSED_OPT:
+        applied = patch_result.get("applied_files", [])
+        gate_reason = None
+        if not patch_result["success"]:
+            gate_reason = f"Patch Application Failed:\n{patch_result['error']}"
+            _rollback_patch(workspace_path, patch_result.get("original_contents", {}))
+        elif applied and all(is_protected(workspace_path, f) for f in applied):
+            gate_reason = restore_reminder(sorted(set(applied))).strip()
+        retries = state.get("gate_retries", 0)
+        if gate_reason and retries < MAX_GATE_RETRIES_PER_ITERATION:
+            print(f"   ↩️ Patch rejected before building (retry {retries + 1}/{MAX_GATE_RETRIES_PER_ITERATION} in iteration {current_iter}).")
+            _rollback_patch(workspace_path, patch_result.get("original_contents", {}))
+            return {
+                "current_error_log": with_last_build_log(gate_reason, state.get("last_build_log", ""),
+                                                         "from before this patch; nothing was built after it"),
+                "error_type": "patch_gate_retry",
+                "gate_retries": retries + 1,
+                "gate_events": state.get("gate_events", []) + [gate_reason[:300]],
+            }
+
     if not patch_result["success"]:
-        print("   ❌ 修補應用失敗！格式錯誤或找不到匹配的原始碼。")
+        print("   ❌ Patch application failed! Bad format, or no matching original code found.")
         return {
-            "current_error_log": f"Patch Application Failed:\n{patch_result['error']}",
+            "current_error_log": with_last_build_log(
+                f"Patch Application Failed:\n{patch_result['error']}", state.get("last_build_log", ""),
+                "from before this patch; nothing was built after it"),
             "error_type": "patch_format_error",
             "applied_files": [],
             "iterations": current_iter,
             "final_status": failure_final_status,
+            "gate_retries": 0,
+            "gate_events": [],
             **record_attempt_outcome(
-                current_iter, f"套用修補失敗 (格式錯誤/找不到匹配的原始碼)：{patch_result['error']}",
+                current_iter, f"Patch application failed (bad format / no matching original code): {patch_result['error']}",
                 compiled=False, tool_invocation_error=True,
                 pending_token_usage=state.get("pending_token_usage", []),
+                trajectory=_proposed_trajectory(state, "apply", "patch_format_error",
+                                                applied_files=patch_result.get("applied_files", []), apply_error=patch_result["error"]),
             ),
         }
 
     applied_files = patch_result.get("applied_files", [])
-    print(f"   ✅ 修補成功應用至: {applied_files}")
+    print(f"   ✅ Patch applied successfully to: {applied_files}")
     return {
         "error_type": "patch_applied",
         "applied_files": applied_files,
+        "pre_patch_contents": patch_result.get("original_contents", {}),
         "iterations": current_iter,
+        "gate_retries": 0,
     }
 
 
@@ -248,23 +394,30 @@ def static_check_node(state: ZephyrAgentState) -> Dict[str, Any]:
     board = state.get("board", "qemu_x86")
     applied_files = state.get("applied_files", [])
 
-    print(f"\n🔍 [StaticCheck] 對第 {current_iter} 次迭代的修補做靜態分析...")
+    print(f"\n🔍 [StaticCheck] Running static analysis on the patch of iteration {current_iter}...")
+    restore_protected_files(workspace_path)
     checker = StaticChecker()
-    result = checker.check(workspace_path, target_app, board, applied_files)
+    result = checker.check(workspace_path, target_app, board, applied_files, state.get("pre_patch_contents") or {})
 
     if result["passed"]:
-        print("   ✅ 靜態分析通過，進入完整建置。")
+        print("   ✅ Static analysis passed, proceeding to the full build.")
         return {"error_type": "static_check_passed"}
 
-    print("   ⚠️ 靜態分析發現問題，直接打回 Patch 重新生成，跳過這次完整建置。")
+    print("   ⚠️ Static analysis found problems; sending the patch straight back for regeneration and skipping the full build this time.")
     return {
-        "current_error_log": result["log"],
+        "current_error_log": restore_reminder(peek_restored(workspace_path)) + with_last_build_log(
+            result["log"], state.get("last_build_log", ""),
+            "from before this patch; the patch is applied but was not built"),
         "error_type": "static_check_failed",
         "final_status": failure_final_status,
+        "gate_events": [],
         **record_attempt_outcome(
-            current_iter, f"修補已套用至 {applied_files}，但靜態分析發現問題：{result['log']}",
+            current_iter, f"Patch applied to {applied_files}, but static analysis found problems: {result['log']}",
             compiled=False, tool_invocation_error=False,
             pending_token_usage=state.get("pending_token_usage", []),
+            trajectory=_proposed_trajectory(state, "static_check", "static_check_failed",
+                                            applied_files=applied_files, static_check_passed=False,
+                                            static_check_log=result["log"]),
         ),
     }
 
@@ -333,7 +486,7 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
     target_app = state.get("target_app", ".")
     required_pass_test = state.get("required_pass_test")
 
-    print(f"\n🔨 [DevOps] 第 {current_iter} 次迭代：開始在隔離容器中編譯 (west build)...")
+    print(f"\n🔨 [DevOps] Iteration {current_iter}: starting compilation in an isolated container (west build)...")
     # timeout=15 對一次真正的 west build (可能要編譯 Zephyr kernel + app)
     # 來說遠遠不夠，幾乎每次都會提早 timeout，把任何案例都誤判為建置卡住
     # ——FaultInjector 驗證資料集時本來就是用 600s (tools/fault_injector.py)，
@@ -350,25 +503,32 @@ def devops_node(state: ZephyrAgentState) -> Dict[str, Any]:
     if not eval_result["compiled"]:
         conflict_tag = classify_build_failure(eval_result["log"])
         annotated_log = annotate_log_with_classification(eval_result["log"])
-        print(f"   💥 建置失敗 (狀態: {eval_result['status']})"
-              + (f"，日誌樣式疑似屬於「{conflict_tag}」類別" if conflict_tag else ""))
+        if FAILED_UNIT_HINT:
+            annotated_log = failed_units_note(eval_result.get("failed_units") or []) + annotated_log
+        print(f"   💥 Build failed (status: {eval_result['status']})"
+              + (f", the log pattern looks like the \"{conflict_tag}\" category" if conflict_tag else ""))
         return {
-            "current_error_log": annotated_log,
+            "current_error_log": restore_reminder(peek_restored(workspace_path)) + annotated_log,
+            "last_build_log": annotated_log,
             "error_type": eval_result["status"],
             "iterations": current_iter,
             "final_status": failure_final_status,
-            **record_attempt_outcome(
+            "gate_events": [],
+            **no_progress_fields(state, eval_result["log"], applied_files, record_attempt_outcome(
                 current_iter,
-                f"修補已套用至 {applied_files}，通過靜態分析後 west build 仍然失敗 "
-                f"(狀態: {eval_result['status']}"
-                + (f"，疑似屬於「{conflict_tag}」類別" if conflict_tag else "")
-                + f")：{annotated_log}",
+                f"Patch applied to {applied_files}; west build still failed after passing static analysis "
+                f"(status: {eval_result['status']}"
+                + (f", likely the \"{conflict_tag}\" category" if conflict_tag else "")
+                + f"): {annotated_log}",
                 compiled=False, tool_invocation_error=False,
                 pending_token_usage=state.get("pending_token_usage", []),
-            ),
+                trajectory=_proposed_trajectory(state, "build", eval_result["status"],
+                                                applied_files=applied_files, static_check_passed=True,
+                                                filtered_log=eval_result["log"], conflict_tag=conflict_tag),
+            )),
         }
 
-    print("   ✅ 建置成功，交給 QA Expert 執行並觀察執行期結果。")
+    print("   ✅ Build succeeded, handing over to the QA Expert to run it and observe the runtime result.")
     return {"error_type": "devops_build_passed", "pending_eval_result": eval_result}
 
 
@@ -394,52 +554,64 @@ def qa_node(state: ZephyrAgentState) -> Dict[str, Any]:
     eval_result = state["pending_eval_result"]
 
     if eval_result["status"] == "missing_required_test":
-        print(f"   ⚠️ [QA] 套件回報成功，但目標測試 '{required_pass_test}' 沒有真的通過——patch 疑似投機取巧 (刪除/跳過該測試)，不算修復成功。")
+        print(f"   ⚠️ [QA] The suite reported success, but the target test '{required_pass_test}' did not really pass. The patch looks like it games the check (deleting/skipping the test), so this does not count as a fix.")
         return {
-            "current_error_log": eval_result["log"],
+            "current_error_log": restore_reminder(peek_restored(state.get("workspace_path"))) + eval_result["log"],
+            "last_build_log": eval_result["log"],
             "error_type": "missing_required_test",
             "iterations": current_iter,
             "final_status": failure_final_status,
-            **record_attempt_outcome(
+            "gate_events": [],
+            **no_progress_fields(state, eval_result["log"], applied_files, record_attempt_outcome(
                 current_iter,
-                f"修補已套用至 {applied_files}，套件整體回報成功，但目標測試 '{required_pass_test}' 未見 PASS，"
-                f"疑似投機取巧而非真正修復。",
+                f"Patch applied to {applied_files}; the suite as a whole reported success, but the target test '{required_pass_test}' shows no PASS, "
+                f"so this looks like gaming the check rather than a genuine fix.",
                 compiled=eval_result["compiled"], tool_invocation_error=False,
                 pending_token_usage=state.get("pending_token_usage", []),
-            ),
+                trajectory=_proposed_trajectory(state, "run", eval_result["status"],
+                                                applied_files=applied_files, static_check_passed=True,
+                                                filtered_log=eval_result["log"]),
+            )),
         }
 
     if eval_result["status"] == "success":
-        print("   🎉 [QA] 執行期驗證通過！")
+        print("   🎉 [QA] Runtime verification passed!")
         return {
             "current_error_log": eval_result["log"],
             "error_type": "success",
             "iterations": current_iter,
             "final_status": "resolved",
-            **record_iteration_success(current_iter, state.get("pending_token_usage", [])),
+            **record_iteration_success(
+                current_iter, state.get("pending_token_usage", []),
+                trajectory=_proposed_trajectory(state, "run", "success",
+                                                applied_files=applied_files, static_check_passed=True,
+                                                filtered_log=eval_result["log"]),
+            ),
         }
 
-    print(f"   💥 [QA] 執行期驗證失敗 (狀態: {eval_result['status']})，正在過濾日誌...")
+    print(f"   💥 [QA] Runtime verification failed (status: {eval_result['status']}), filtering the log...")
     return {
-        "current_error_log": eval_result["log"],
+        "current_error_log": restore_reminder(peek_restored(state.get("workspace_path"))) + eval_result["log"],
+        "last_build_log": eval_result["log"],
         "error_type": eval_result["status"],
         "iterations": current_iter,
         "final_status": failure_final_status,
-        **record_attempt_outcome(
+        "gate_events": [],
+        **no_progress_fields(state, eval_result["log"], applied_files, record_attempt_outcome(
             current_iter,
-            f"修補已套用至 {applied_files}，通過建置後執行，但執行期驗證失敗 "
-            f"(狀態: {eval_result['status']})：{eval_result['log']}",
+            f"Patch applied to {applied_files}; it passed the build and ran, but runtime verification failed "
+            f"(status: {eval_result['status']}): {eval_result['log']}",
             compiled=eval_result["compiled"], tool_invocation_error=False,
             pending_token_usage=state.get("pending_token_usage", []),
-        ),
+            trajectory=_proposed_trajectory(state, "run", eval_result["status"],
+                                            applied_files=applied_files, static_check_passed=True,
+                                            filtered_log=eval_result["log"]),
+        )),
     }
 
 # ==========================================
 # 3. 定義邊界與建立狀態機
 # ==========================================
-def route_after_analyzer(state: ZephyrAgentState) -> str:
-    return "goto_knowledge" if len(state.get("search_keywords", [])) > 0 else "goto_patch"
-
 def build_zephyr_graph() -> StateGraph:
     workflow = StateGraph(ZephyrAgentState)
     workflow.add_node("Analyzer", analyzer_node)
@@ -451,11 +623,16 @@ def build_zephyr_graph() -> StateGraph:
     workflow.add_node("QA", qa_node)
 
     workflow.set_entry_point("Analyzer")
-    workflow.add_conditional_edges("Analyzer", route_after_analyzer, {"goto_knowledge": "Knowledge", "goto_patch": "Patch"})
+    # Knowledge 每輪都執行：Analyzer 的關鍵字只決定要不要做圖譜檢索，Hybrid RAG 每輪都跑 (2026-10-19，見
+    # agents/knowledge_expert.py)。之前沒有關鍵字就直接跳到 Patch。
+    # Knowledge runs every iteration: the Analyzer's keywords only decide graph retrieval, Hybrid RAG always runs
+    # (2026-10-19, see agents/knowledge_expert.py). Previously no keywords skipped straight to Patch.
+    workflow.add_edge("Analyzer", "Knowledge")
     workflow.add_edge("Knowledge", "Patch")
     workflow.add_edge("Patch", "ApplyPatch")
     workflow.add_conditional_edges("ApplyPatch", route_after_apply_patch, {
         "goto_static_check": "StaticCheck",
+        "retry_patch": "Patch",
         "retry_analyzer": "Analyzer",
         "finish": END,
     })

@@ -2,6 +2,7 @@
 from typing import TypedDict, Annotated, Any, Dict, List, Optional
 import operator
 from langchain_core.messages import AnyMessage
+from core.proposed_opt import failure_signature
 
 class ZephyrAgentState(TypedDict):
     """
@@ -22,7 +23,14 @@ class ZephyrAgentState(TypedDict):
     # 當前的錯誤日誌 (由 DevOps Expert 過濾後的精簡版本)
     # The current error log (compressed version from DevOps Expert)
     current_error_log: str
-    
+
+    # 最近一次真的 build/run 的 log (一開始是初始 log)。patch 套用失敗或 StaticCheck 失敗時沒有 build，
+    # current_error_log 會換成那則失敗訊息，這份 log 附在後面，讓下一輪仍看得到目前的錯誤 (2026-10-13)。
+    # The log of the most recent actual build/run (initially the initial log). On a patch-apply or
+    # StaticCheck failure nothing is built and current_error_log becomes that failure message; this log
+    # is appended so the next iteration still sees the current error (2026-10-13).
+    last_build_log: str
+
     # 錯誤類型 (例如: "build_error", "cmake_error", "qemu_crash", "success")
     # Error type categorization
     error_type: str
@@ -83,6 +91,11 @@ class ZephyrAgentState(TypedDict):
     # touched, not the whole tree).
     applied_files: List[str]
 
+    # 上一次 ApplyPatch 改動的每個檔案在 patch 之前的內容 {相對路徑: 內容}；StaticCheck 用它只回報這次
+    # patch 新增的 cppcheck 問題 (2026-10-13)。Pre-patch content of each file the last ApplyPatch changed;
+    # StaticCheck uses it to report only cppcheck findings the patch introduced (2026-10-13).
+    pre_patch_contents: Dict[str, str]
+
     # === 4. 評分指標蒐集 (Metrics Collection，見 evaluate.py/analyze_results.py) ===
 
     # 每次迭代結束時 (跟 attempt_history 完全同一組寫入點，見
@@ -134,6 +147,18 @@ class ZephyrAgentState(TypedDict):
     # never fired at all for this case (e.g. B1/B3 have no RAG at all, or
     # Proposed/B2 never had Analyzer decide retrieval was needed).
     first_retrieval_files: Optional[List[str]]
+
+    # Analyzer 最近一次的診斷 ({"iteration", "reasoning", "error_category",
+    # "search_keywords"})，只給 core/trajectory.py 的軌跡紀錄用。iteration
+    # 是 Analyzer 執行當下所屬的迭代編號——StaticCheck 失敗直接回 Patch 時
+    # Analyzer 不會重跑，下一輪軌跡裡的診斷就是上一輪留下的，靠這個欄位分辨。
+    # Analyzer's most recent diagnosis ({"iteration", "reasoning",
+    # "error_category", "search_keywords"}), used only for the trajectory
+    # records in core/trajectory.py. iteration is the iteration the Analyzer
+    # ran for — a StaticCheck failure goes straight back to Patch without
+    # re-running Analyzer, so the next iteration's trajectory carries the
+    # previous diagnosis; this field tells them apart.
+    analyzer_diagnosis: Optional[Dict[str, Any]]
 
     # DevOps Expert (devops_node) 建置成功時，把完整的 evaluate_repair_attempt()
     # 回傳結果暫存在這裡，交給下一個節點 QA Expert (qa_node) 解讀——兩個
@@ -205,6 +230,16 @@ class ZephyrAgentState(TypedDict):
     # Overall system status
     final_status: str
 
+    # Proposed 架構優化 (core/proposed_opt.py，開關關閉時不使用)：這一輪已用掉的 Patch 重試次數與原因、
+    # 上一次失敗的 log 特徵、已證明無效的方向、這一輪 Patch 的上下文統計。
+    # Proposed optimizations (core/proposed_opt.py, unused when off): gate retries and their reasons in this
+    # iteration, the last failure's log signature, directions shown not to work, this iteration's context stats.
+    gate_retries: int
+    gate_events: List[str]
+    last_failure_signature: str
+    ineffective_attempts: List[str]
+    context_stats: Dict[str, Any]
+
 # ==========================================
 # 輔助函數 (Helper Functions)
 # ==========================================
@@ -233,6 +268,12 @@ def create_initial_state(workspace_path: str, initial_log: str, max_iters: int =
     return {
         "messages": [],
         "current_error_log": initial_log,
+        "last_build_log": initial_log,
+        "gate_retries": 0,
+        "gate_events": [],
+        "last_failure_signature": failure_signature(initial_log),
+        "ineffective_attempts": [],
+        "context_stats": {},
         "error_type": "initial_build_error",
         "search_keywords": [],
         "retrieved_context": "",
@@ -240,10 +281,12 @@ def create_initial_state(workspace_path: str, initial_log: str, max_iters: int =
         "patch_content": "",
         "attempt_history": [],
         "applied_files": [],
+        "pre_patch_contents": {},
         "iteration_log": [],
         "pending_token_usage": [],
         "first_retrieval_files": None,
         "pending_eval_result": None,
+        "analyzer_diagnosis": None,
         "workspace_path": workspace_path,
         "board": board,
         "target_app": target_app,
@@ -259,20 +302,20 @@ def create_initial_state(workspace_path: str, initial_log: str, max_iters: int =
 if __name__ == "__main__":
     from langchain_core.messages import HumanMessage, AIMessage
     
-    print("=== 初始化狀態 (Initializing State) ===")
+    print("=== Initializing State ===")
     state = create_initial_state(
         workspace_path="/test/zephyr_project",
         initial_log="CMake Error at CMakeLists.txt:10",
         max_iters=3
     )
-    print(f"專案路徑 (Workspace): {state['workspace_path']}")
-    print(f"初始錯誤 (Initial Error): {state['current_error_log']}")
-    print(f"目前迭代/最大上限 (Iterations): {state['iterations']} / {state['max_iterations']}")
+    print(f"Workspace: {state['workspace_path']}")
+    print(f"Initial Error: {state['current_error_log']}")
+    print(f"Iterations: {state['iterations']} / {state['max_iterations']}")
     
     # 模擬 LangGraph 框架自動附加訊息的行為
-    print("\n=== 模擬訊息附加 (Simulating Message Appending) ===")
-    state["messages"] = operator.add(state["messages"], [HumanMessage(content="分析這個日誌")])
-    state["messages"] = operator.add(state["messages"], [AIMessage(content="發現 CMake 錯誤，需要檢索 Kconfig。")])
+    print("\n=== Simulating Message Appending ===")
+    state["messages"] = operator.add(state["messages"], [HumanMessage(content="Analyze this log")])
+    state["messages"] = operator.add(state["messages"], [AIMessage(content="Found a CMake error; Kconfig needs to be retrieved.")])
     
     for msg in state["messages"]:
         print(f"[{type(msg).__name__}]: {msg.content}")

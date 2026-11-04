@@ -166,7 +166,11 @@ class QemuOracle:
             r"Bus Fault",
             r"CPU Page Fault",
             r"Segmentation fault",
-            r"Aborted",
+            # 主機端 SIGABRT：bash 印 "Aborted (core dumped)" 或 "<行號>: <pid> Aborted ..."。
+            # 舊版的 r"Aborted" 不分大小寫，連 log 內文 "Enrollment aborted" 都會命中 (2026-10-03 v3 驗證發現)。
+            # Host-side SIGABRT only ("Aborted (core dumped)" / "<pid> Aborted ..."); the old bare,
+            # case-insensitive r"Aborted" also matched log text such as "Enrollment aborted".
+            r"(?-i:(?:^|\d\s+)Aborted(?:\s|$))",  # 大小寫敏感：kernel 會印小寫 "aborted essential thread" / case-sensitive
             r"Illegal instruction",
             r"PROJECT EXECUTION FAILED",
             # 20th systemic pipeline bug: 上面六個具名硬體錯誤字串
@@ -367,6 +371,41 @@ class QemuOracle:
         # Compile patterns to regex for faster matching
         self.success_regex = [re.compile(p) for p in self.success_patterns]
         self.crash_regex = [re.compile(p, re.IGNORECASE) for p in self.crash_patterns]
+
+        # 預期內的 fault：userspace/保護機制測試會故意觸發 fault (例如
+        # syscall 參數檢查失敗 -> Kernel oops)，fault handler 照樣印出
+        # ">>> ZEPHYR FATAL ERROR"，接著 ztest 的 k_sys_fatal_error_handler 印
+        # "Caught system error -- reason N 1" + "Fatal error expected as part of
+        # test case." 後測試繼續跑。舊版看到 FATAL 那一行就直接判 crash，QEMU 上
+        # 有 userspace 的測試 (例如 tests/kernel/stack/stack 在 qemu_riscv32)
+        # 因此連原始版本都被誤判為 crash (2026-10-03 v3 pilot 發現)。
+        # 現在 fault handler 類的特徵先記為「待定」，看到 ztest 的預期內訊息就
+        # 取消；看到 "unexpected"、行程結束、或 fault_resolution_timeout 秒內
+        # 沒有新輸出，才判定 crash。
+        # Expected faults: userspace/protection tests deliberately fault; the fault
+        # handler still prints ">>> ZEPHYR FATAL ERROR", then ztest prints
+        # "Caught system error -- reason N 1" and the suite continues. Fault-handler
+        # signatures are now held as pending and cleared by ztest's expected-fault
+        # message; "unexpected", EOF, or no output for fault_resolution_timeout
+        # seconds turns them into a crash.
+        self.deferrable_crash_patterns = {
+            r"Kernel Panic", r"Fatal fault", r"ASSERTION FAIL", r"Usage Fault", r"Bus Fault",
+            r"CPU Page Fault", r"Illegal instruction", r"ZEPHYR FATAL ERROR",
+        }
+        self.expected_fault_re = re.compile(
+            r"Fatal error expected as part of test case|Assert error expected as part of test case"
+            r"|Caught system error -- reason \d+ 1\b|Caught system error -- reason \d+\s*$"
+        )
+        self.unexpected_fault_re = re.compile(
+            r"Fatal error was unexpected|Assert failed was unexpected|Caught system error -- reason \d+ 0\b"
+        )
+        self.fault_resolution_timeout = 30
+        # 編譯器診斷行 (gcc 的 "file:line:col: error: ..."、internal compiler error) 不是執行期 crash：
+        # BUILD_ASSERT 失敗會印 "error: static assertion failed: ..."，被不分大小寫的
+        # "ASSERTION FAIL" 命中，建置失敗因此被判成 crash (v3 ltc2959 compound 案例，2026-10-05 發現)。
+        # Compiler diagnostics are not runtime crashes: a failed BUILD_ASSERT prints
+        # "error: static assertion failed: ...", which the case-insensitive "ASSERTION FAIL" matched.
+        self.compiler_diagnostic_re = re.compile(r":\d+:\d+:\s+(?:fatal\s+)?error:\s|internal compiler error")
         self.unsupported_regex = [re.compile(p) for p in self.unsupported_patterns]
         self.completion_success_regex = [re.compile(p) for p in self.completion_success_patterns]
 
@@ -435,7 +474,7 @@ class QemuOracle:
         if required_pass_test:
             wait_for_completion = True
 
-        self.logger.info("啟動 Test Oracle 並監控 QEMU 輸出... (Starting Test Oracle to monitor QEMU...)")
+        self.logger.info("Starting Test Oracle to monitor QEMU...")
 
         # 由於我們需要監測 Docker 的輸出，使用 pexpect.spawn
         # Using pexpect.spawn to monitor Docker output interactively
@@ -444,6 +483,9 @@ class QemuOracle:
             child = pexpect.spawn(command, encoding='utf-8', timeout=self.timeout)
             
             captured_log = ""
+            pending_crash = None  # deferrable crash signature awaiting ztest's verdict
+            current_test = None   # last "START - <test>" seen
+            pending_test = None   # test that was running when the pending fault appeared
             result = {"status": "unknown", "log": "", "error_signature": None}
             in_build_phase = False
 
@@ -451,7 +493,7 @@ class QemuOracle:
             while True:
                 try:
                     # 每次讀取一行 (\r\n 處理跨平台換行)
-                    child.expect(r'\r?\n')
+                    child.expect(r'\r?\n', timeout=self.fault_resolution_timeout if pending_crash else -1)
                     line = child.before.strip()
                     if line:
                         captured_log += line + "\n"
@@ -460,7 +502,7 @@ class QemuOracle:
                         # -1. 檢查 Docker daemon 本身是否斷線/崩潰 (不受 build phase 限制)
                         for pattern in self.docker_infra_error_regex:
                             if pattern.search(line):
-                                self.logger.error(f"偵測到 Docker 基礎設施錯誤，與目標 commit 無關 (Docker infrastructure error detected, unrelated to the target commit): {pattern.pattern}")
+                                self.logger.error(f"Docker infrastructure error detected, unrelated to the target commit: {pattern.pattern}")
                                 result["status"] = "docker_infra_error"
                                 result["error_signature"] = pattern.pattern
                                 break
@@ -475,7 +517,7 @@ class QemuOracle:
                         # comment above)
                         for pattern in self.west_update_error_regex:
                             if pattern.search(line):
-                                self.logger.error(f"偵測到 west update 模組抓取失敗，與目標 commit 無關 (west update module-fetch failure detected, unrelated to the target commit): {pattern.pattern}")
+                                self.logger.error(f"west update module-fetch failure detected, unrelated to the target commit: {pattern.pattern}")
                                 result["status"] = "west_update_error"
                                 result["error_signature"] = pattern.pattern
                                 break
@@ -513,7 +555,7 @@ class QemuOracle:
                                 # target commit has a bug.
                                 for pattern in self.target_path_missing_regex:
                                     if pattern.search(line):
-                                        self.logger.error(f"偵測到 target_app 路徑在這個 commit 上不存在，與目標 commit 是否有 bug 無關 (target_app path doesn't exist at this commit, unrelated to whether the target commit has a bug): {pattern.pattern}")
+                                        self.logger.error(f"target_app path doesn't exist at this commit, unrelated to whether the target commit has a bug: {pattern.pattern}")
                                         result["status"] = "target_path_missing"
                                         result["error_signature"] = pattern.pattern
                                         break
@@ -531,7 +573,7 @@ class QemuOracle:
                         # 0. 檢查該板子是否根本不支援模擬 (Check for an unsupported board)
                         for pattern in self.unsupported_regex:
                             if pattern.search(line):
-                                self.logger.warning(f"此開發板不支援模擬，與目標 commit 無關 (Board doesn't support emulation, unrelated to the target commit): {pattern.pattern}")
+                                self.logger.warning(f"Board doesn't support emulation, unrelated to the target commit: {pattern.pattern}")
                                 result["status"] = "unsupported_board"
                                 result["error_signature"] = pattern.pattern
                                 break
@@ -540,12 +582,46 @@ class QemuOracle:
                             break
 
                         # 1. 檢查是否發生崩潰 (Check for crash)
-                        for pattern in self.crash_regex:
-                            if pattern.search(line):
-                                self.logger.error(f"偵測到執行期崩潰 (Runtime crash detected): {pattern.pattern}")
+                        m_start = re.match(r"START - (\w+)", line)
+                        if m_start:
+                            current_test = m_start.group(1)
+                        if pending_crash:
+                            # 測試自己的 handler 攔下 fault/assert 而沒印 ztest 的 "Caught ..." 時，
+                            # 該測試接著印 PASS 就代表這個 fault 是預期內的 (例如 thread_apis 的
+                            # test_essential_thread_abort)。
+                            # A test-specific handler may swallow the fault without ztest's "Caught ...";
+                            # a PASS for the test that was running means the fault was expected.
+                            if pending_test and re.match(rf"PASS - {re.escape(pending_test)}\b", line):
+                                self.logger.info(f"Fault inside {pending_test} was expected (test passed)")
+                                pending_crash = None
+                                pending_test = None
+                        if pending_crash:
+                            if self.unexpected_fault_re.search(line):
                                 result["status"] = "crash"
-                                result["error_signature"] = pattern.pattern
-                                break
+                                result["error_signature"] = pending_crash
+                            elif self.expected_fault_re.search(line):
+                                self.logger.info(f"Expected fault in test case, continuing: {line}")
+                                pending_crash = None
+                                continue
+                        if result["status"] != "crash" and not self.compiler_diagnostic_re.search(line):
+                            for pattern in self.crash_regex:
+                                if pattern.search(line):
+                                    # ztest 的 "Assertion failed at" 也會被 ASSERTION FAIL (不分大小寫) 比對到，
+                                    # 但它是測試失敗本身，照舊立即判 crash；只有 kernel __ASSERT 的大寫
+                                    # "ASSERTION FAIL [...]" 才可能是預期內的。
+                                    # ztest's "Assertion failed at" also matches ASSERTION FAIL (case-insensitive)
+                                    # but is a definitive test failure; only kernel __ASSERT's uppercase form may be expected.
+                                    is_ztest_assert = pattern.pattern == r"ASSERTION FAIL" and "ASSERTION FAIL" not in line
+                                    if pattern.pattern in self.deferrable_crash_patterns and not is_ztest_assert:
+                                        if not pending_crash:
+                                            pending_crash, pending_test = pattern.pattern, current_test
+                                        break
+                                    self.logger.error(f"Runtime crash detected: {pattern.pattern}")
+                                    result["status"] = "crash"
+                                    result["error_signature"] = pattern.pattern
+                                    break
+                        if result["status"] == "crash":
+                            self.logger.error(f"Runtime crash detected: {result['error_signature']}")
                         
                         # 如果已經崩潰，跳出迴圈
                         if result["status"] == "crash":
@@ -560,20 +636,26 @@ class QemuOracle:
                         # 完成測試後往往不會自己結束。
                         suite_completed = False
                         for pattern in self.completion_success_regex:
+                            if pattern.search(line) and pending_crash:
+                                # 有未解決的 fault 卻印出成功：保守地照舊判 crash
+                                # Unresolved fault before a success summary: stay conservative (crash)
+                                result["status"] = "crash"
+                                result["error_signature"] = pending_crash
+                                break
                             if pattern.search(line):
-                                self.logger.info("偵測到 ztest 套件執行完畢且全數通過！ (ztest suite completed and passed!)")
+                                self.logger.info("ztest suite completed and passed!")
                                 result["status"] = "success"
                                 suite_completed = True
                                 break
 
-                        if suite_completed:
+                        if suite_completed or result["status"] == "crash":
                             break
 
                         # 2. 檢查是否成功啟動 (Check for success)
                         if result["status"] != "success":
                             for pattern in self.success_regex:
                                 if pattern.search(line):
-                                    self.logger.info("偵測到成功啟動特徵！ (Successful boot signature detected!)")
+                                    self.logger.info("Successful boot signature detected!")
                                     result["status"] = "success"
                                     break
 
@@ -582,8 +664,12 @@ class QemuOracle:
 
                 except pexpect.TIMEOUT:
                     # 如果 QEMU 卡住且超過指定時間沒有新輸出
-                    self.logger.warning(f"QEMU 執行超時 ({self.timeout}s). (QEMU execution timed out.)")
-                    result["status"] = "timeout"
+                    self.logger.warning(f"QEMU execution timed out ({self.timeout}s).")
+                    if pending_crash:
+                        result["status"] = "crash"
+                        result["error_signature"] = pending_crash
+                    else:
+                        result["status"] = "timeout"
                     break
                 
                 except pexpect.EOF:
@@ -597,8 +683,11 @@ class QemuOracle:
                     # whole run genuinely completed cleanly — keep "success".
                     # Otherwise this is the build-failed-before-QEMU-ever-
                     # started case, i.e. "eof_no_boot".
-                    self.logger.info("進程已結束 (Process exited).")
-                    if result["status"] != "success":
+                    self.logger.info("Process exited.")
+                    if pending_crash:
+                        result["status"] = "crash"
+                        result["error_signature"] = pending_crash
+                    elif result["status"] != "success":
                         result["status"] = "eof_no_boot"
                     break
 
@@ -610,17 +699,42 @@ class QemuOracle:
 
             # 保險機制：直接對 Docker daemon 下達 kill，不管本地子進程有沒有
             # 成功終止容器都確保清乾淨 (--rm 容器被 kill 後會自動移除)。
+            # 過去這裡的例外被靜默吞掉 (bare except: pass)，加上呼叫端長期
+            # 沒傳 container_name (見 build_devops_docker_cmd 的說明)，導致
+            # 孤兒容器一再出現卻完全沒有任何紀錄——2026-09 修好 container_name
+            # 沒傳的問題後，這裡也一併補上：kill 失敗時印警告 (不再無聲吞掉)，
+            # 並加一道 `docker rm -f` 作為 kill 之外的保底，防止容器卡在某種
+            # kill 訊號沒生效的狀態。
             # Safety net: kill the container directly via the Docker daemon
-            # regardless of whether the local child process managed to stop it
-            # (a `--rm` container is auto-removed once killed).
+            # regardless of whether the local child process managed to stop
+            # it (a `--rm` container is auto-removed once killed). This used
+            # to silently swallow failures (bare except: pass), and combined
+            # with every caller forgetting to pass container_name (see
+            # build_devops_docker_cmd), orphaned containers kept recurring
+            # with zero visibility — fixed 2026-09 alongside the
+            # container_name wiring: log a warning on failure instead of
+            # swallowing it, and follow up with `docker rm -f` as a second
+            # safety net in case `kill` alone doesn't fully tear the
+            # container down.
             if container_name:
                 try:
-                    subprocess.run(
+                    kill_result = subprocess.run(
                         ["docker", "kill", container_name],
-                        capture_output=True, timeout=10
+                        capture_output=True, timeout=10, text=True
                     )
-                except Exception:
-                    pass
+                    if kill_result.returncode != 0 and "No such container" not in kill_result.stderr:
+                        self.logger.warning(
+                            f"docker kill {container_name} failed, falling back to docker rm -f: {kill_result.stderr.strip()}"
+                        )
+                        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=15)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Exception while cleaning up container {container_name}, falling back to docker rm -f: {e}"
+                    )
+                    try:
+                        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=15)
+                    except Exception:
+                        pass
 
             result["log"] = captured_log
 
@@ -634,11 +748,9 @@ class QemuOracle:
             if required_pass_test and result["status"] == "success":
                 if not check_required_test_passed(captured_log, required_pass_test):
                     self.logger.warning(
-                        f"套件回報成功，但目標測試 '{required_pass_test}' 沒有明確的 PASS 紀錄——"
-                        f"可能被刪除、跳過或改名，不算修復成功。"
-                        f" (Suite reported success, but no explicit PASS for target test "
+                        f"Suite reported success, but no explicit PASS for target test "
                         f"'{required_pass_test}' — possibly deleted, skipped, or renamed; "
-                        f"not counted as a successful repair.)"
+                        f"not counted as a successful repair."
                     )
                     result["status"] = "missing_required_test"
                     result["error_signature"] = f"required test '{required_pass_test}' did not pass"
@@ -654,7 +766,7 @@ if __name__ == "__main__":
     # 這裡我們模擬上一階段的 west_executor 產生的 docker 啟動指令
     # 注意：我們加入了 -t run 來要求 west 建置完畢後直接啟動 QEMU
     # Note: We added `-t run` to instruct west to run QEMU immediately after building.
-    test_project_path = "/絕對路徑/到您的/hello_world" # <--- 請修改為您的絕對路徑 (Must be absolute path)
+    test_project_path = "/absolute/path/to/your/hello_world" # <--- 請修改為您的絕對路徑 (Must be absolute path)
     
     # -i 允許互動模式，這對 pexpect 抓取 stdout 很重要
     docker_cmd = (
@@ -663,13 +775,13 @@ if __name__ == "__main__":
         "bash -c 'west build -b qemu_x86 -d /tmp/build -p always -t run .'"
     )
     
-    print("=== 執行 QEMU 閉環驗證測試 (Testing QEMU Closed-Loop Oracle) ===")
+    print("=== Testing QEMU Closed-Loop Oracle ===")
     eval_result = oracle.evaluate(docker_cmd)
     
-    print("\n--- 驗證結果 (Evaluation Result) ---")
-    print(f"狀態 (Status): {eval_result['status']}")
+    print("\n--- Evaluation Result ---")
+    print(f"Status: {eval_result['status']}")
     if eval_result['error_signature']:
-        print(f"捕捉到的錯誤特徵 (Error Signature): {eval_result['error_signature']}")
-    print("部分日誌 (Partial Log):")
+        print(f"Error Signature: {eval_result['error_signature']}")
+    print("Partial Log:")
     # 只印出最後 300 個字元避免洗頻
     print(eval_result['log'][-300:])

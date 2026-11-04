@@ -1,0 +1,233 @@
+[
+  {
+    "case_id": "v3new_runtime_heap_34f8f2d",
+    "category": "runtime_crash",
+    "pipeline": "agentless",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "resolved",
+    "iterations": 3,
+    "ttr_seconds": 329.77138781547546,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "agentless_dirs",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 4087,
+            "output_tokens": 2095
+          },
+          {
+            "node": "agentless_files",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 17849,
+            "output_tokens": 1459
+          },
+          {
+            "node": "agentless_elements",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 3519,
+            "output_tokens": 3926
+          },
+          {
+            "node": "agentless_repair_1",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 4342,
+            "output_tokens": 8626
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": "The issue is a kernel panic caused by an assertion failure in `lib/heap/heap.c` at line 380: `CHECK(bi < bucket_idx(h, h->end_chunk))`.\n\nLet's break down the problem:\n1.  **`bucket_idx(h, sz)` function:** This function calculates a bucket index based on the chunk size `sz`. It uses `31 - __builtin_clz(usable_sz)`, which can return values up to 31.\n2.  **`h->buckets` array:** The `h->buckets` array is sized according to `CONFIG_SYS_HEAP_MAX_BUCKET_IDX`, which defaults to 15. This means valid indices are 0 to 15. If `bucket_idx` returns a value greater than `CONFIG_SYS_HEAP_MAX_BUCKET_IDX`, it would lead to an out-of-bounds access when `h->buckets[bi]` is accessed. The Kconfig help text for `CONFIG_SYS_HEAP_MAX_BUCKET_IDX` states that \"Chunks larger than this will be placed in the largest bucket,\" implying that the index should be capped.\n3.  **The Assertion `CHECK(bi < bucket_idx(h, h->end_chunk))`:**\n    *   `bi` is `bucket_idx(h, sz)`, where `sz` is the requested allocation size.\n    *   `bucket_idx(h, h->end_chunk)` is the bucket index corresponding to a chunk the size of the entire heap.\n    *   In the failing `test_fragmentation` scenario with `SMALL_HEAP_SZ = 2048`, `h->end_chunk` is 512 chunks. `min_chunk_size(h)` is 2 chunks.\n    *   `bucket_idx(h, h->end_chunk)` evaluates to `bucket_idx(h, 512)` which is `31 - __builtin_clz(512 - 2 + 1) = 31 - __builtin_clz(511) = 31 - 23 = 8`.\n    *   If an allocation requests a chunk size `sz` such that `bucket_idx(h, sz)` also evaluates to 8 (e.g., `sz = 257` chunks), then `bi` would be 8.\n    *   The assertion then becomes `CHECK(8 < 8)`, which is false, causing the panic.\n\n**Conclusion:**\nThe assertion `CHECK(bi < bucket_idx(h, h->end_chunk))` is logically flawed because it's possible for the requested chunk size to fall into the same bucket as the total heap size, making the strict inequality false.\n\n**The Fix:**\n1.  **Clamp `bucket_idx` return value:** Modify the `bucket_idx` function in `lib/heap/heap.h` to ensure it never returns an index greater than `CONFIG_SYS_HEAP_MAX_BUCKET_IDX`. This prevents potential out-of-bounds array access and correctly implements the \"chunks larger than this will be placed in the largest bucket\" behavior.\n2.  **Remove the incorrect assertion:** Remove the `CHECK(bi < bucket_idx(h, h->end_chunk))` assertion from `lib/heap/heap.c` as it's not a valid invariant.\n\nlib/heap/heap.h\n<<<<<<<< SEARCH\nstatic inline int bucket_idx(struct z_heap *h, chunksz_t sz)\n{\n\tunsigned int usable_sz = sz - min_chunk_size(h) + 1;\n\treturn 31 - __builtin_clz(usable_sz);\n}\n========\nstatic inline int bucket_idx(struct z_heap *h, chunksz_t sz)\n{\n\tunsigned int usable_sz = sz - min_chunk_size(h) + 1;\n\tint idx = 31 - __builtin_clz(usable_sz);\n\n\t/* Clamp the index to the maximum allowed bucket index.\n\t * Chunks larger than what fits in CONFIG_SYS_HEAP_MAX_BUCKET_IDX\n\t * are placed in the largest bucket.\n\t */\n\treturn MIN(idx, CONFIG_SYS_HEAP_MAX_BUCKET_IDX);\n}\n>>>>>>>> REPLACE\n\nlib/heap/heap.c\n<<<<<<<< SEARCH\n\tstruct z_heap_bucket *b = &h->buckets[bi];\n\n\tCHECK(bi < bucket_idx(h, h->end_chunk));\n\n\t/* First try a bounded count of items from the minimal bucket\n\t * size.  These may not fit, trying (e.g.) three means that\n========\n\tstruct z_heap_bucket *b = &h->buckets[bi];\n\n\t/* First try a bounded count of items from the minimal bucket\n\t * size.  These may not fit, trying (e.g.) three means that\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "lib/heap/heap.h",
+            "lib/heap/heap.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/heap/heap.h:317:25: error: ‘CONFIG_SYS_HEAP_MAX_BUCKET_IDX’ undeclared (first use in this function)\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 2,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "agentless_repair_2",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 4342,
+            "output_tokens": 23416
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "The panic `ASSERTION FAIL [bi < bucket_idx(h, h->end_chunk)] @ WEST_TOPDIR/zephyr/lib/heap/heap.c:380` indicates an issue during chunk allocation, specifically related to the bucket index calculation.\n\nThe root cause appears to be a circular dependency and incorrect initialization in `sys_heap_init`:\n1.  **`h->end_chunk` initialization:** In `sys_heap_init`, `h->end_chunk` is assigned the result of `bytes_to_chunksz(h, bytes, 0)`. The `bytes_to_chunksz` function itself uses `h->end_chunk` in its `min` operation: `min(calculated_value, h->end_chunk)`. If `h` (and thus `h->end_chunk`) is zero-initialized, this `min` will return 0, leading `h->end_chunk` to be set to 0.\n2.  **Consequences of `h->end_chunk = 0`:**\n    *   `chunk_header_bytes(h)` (which depends on `h->end_chunk` via `big_heap_bytes`) will incorrectly evaluate to 4 bytes because `0 * CHUNK_UNIT` is 0, making `big_heap_bytes` return `false`.\n    *   Any call to `bytes_to_chunksz` (e.g., for user allocations) will then return 0 because of `min(calculated_value, 0)`.\n    *   When `alloc_chunk` is called with a requested `sz = 0`, `bi = bucket_idx(h, 0)` which evaluates to `31` (due to `__builtin_clz(0xFFFFFFFF)` if `min_chunk_size(h)` is 2).\n    *   The assertion `CHECK(bi < bucket_idx(h, h->end_chunk))` becomes `CHECK(31 < bucket_idx(h, 0))`. Since `bucket_idx(h, 0)` is also 31, the assertion `CHECK(31 < 31)` fails.\n3.  **Incorrect initial free chunk setup:** The original `sys_heap_init` set `chunk 0` (the heap metadata) with the size of the *entire heap* (`h->end_chunk`). This is incorrect; `chunk 0` should only cover the `struct z_heap` and its buckets. The actual free space should start *after* this metadata chunk.\n\n**The Fix:**\n\n1.  **Introduce `is_big_heap` field:** Add a `bool is_big_heap` member to `struct z_heap` to store whether the heap instance uses 32-bit chunk headers. This breaks the circular dependency where `chunk_header_bytes` (and related functions) depended on `h->end_chunk` which was itself being initialized.\n2.  **Refactor `big_heap_bytes`:** Rename `big_heap_bytes` to `heap_uses_big_headers` and make it a standalone helper that takes the `total_heap_bytes` as an argument to determine the heap's \"big\" property.\n3.  **Update `chunk_header_bytes`:** Modify `chunk_header_bytes` to use the `h->is_big_heap` field directly.\n4.  **Correct `bytes_to_chunksz` clamping:** Ensure `bytes_to_chunksz` clamps the calculated chunk size against the maximum possible value for `chunksz_t` before applying the `h->end_chunk` limit. This provides a more robust overflow guard.\n5.  **Revise `sys_heap_init` logic:**\n    *   Initialize `h->is_big_heap` first, using the total `bytes` argument.\n    *   Set `h->end_chunk` to `bytes / CHUNK_UNIT` (the total chunks in the buffer).\n    *   Calculate `num_buckets` and `heap_metadata_chunks` based on the now-correct `h->is_big_heap`.\n    *   `memset` the entire heap memory to zero for a clean state.\n    *   Set `chunk 0` (the heap metadata) to its correct size and mark it as used.\n    *   Initialize the *first allocatable chunk* correctly, starting after the metadata.\n    *   Adjust the `set_left_chunk_size` call for the initial free chunk to avoid operating on the conceptual sentinel chunk (`h->end_chunk`) if it's the right-most boundary of the heap, as its `left_chunk_size` field is not stored in the `z_heap_chunk_header` for \"big\" heaps.\n\nThis comprehensive fix addresses the initialization problems, clarifies the heap's structural properties, and ensures correct behavior during allocation.\n\n```\nlib/heap/heap.h\n<<<<<<<< SEARCH\n\tuint32_t avail_buckets;\n#ifdef CONFIG_SYS_HEAP_RUNTIME_STATS\n\tsize_t free_bytes;\n\tsize_t allocated_bytes;\n\tsize_t max_allocated_bytes;\n#endif\n#ifdef CONFIG_SYS_HEAP_CANARIES_RANDOM\n\tuint32_t canary_base;\n#endif\n\tstruct z_heap_bucket buckets[];\n};\n\nstatic inline bool big_heap_chunks(chunksz_t chunks)\n{\n\tif (IS_ENABLED(CONFIG_SYS_HEAP_SMALL_ONLY)) {\n\t\treturn false;\n\t}\n\tif (IS_ENABLED(CONFIG_SYS_HEAP_BIG_ONLY) || sizeof(void *) > 4U) {\n\t\treturn true;\n\t}\n\treturn chunks > 0x7fffU;\n}\n\nstatic inline bool big_heap_bytes(size_t bytes)\n{\n\treturn big_heap_chunks(bytes / CHUNK_UNIT);\n}\n\nstatic inline size_t chunk_header_bytes(struct z_heap *h)\n{\n\treturn big_heap_bytes(h->end_chunk * CHUNK_UNIT) ? 8 : 4;\n}\n========\n\tuint32_t avail_buckets;\n\tbool is_big_heap; /* True if this heap instance uses 32-bit chunk headers */\n#ifdef CONFIG_SYS_HEAP_RUNTIME_STATS\n\tsize_t free_bytes;\n\tsize_t allocated_bytes;\n\tsize_t max_allocated_bytes;\n#endif\n#ifdef CONFIG_SYS_HEAP_CANARIES_RANDOM\n\tuint32_t canary_base;\n#endif\n\tstruct z_heap_bucket buckets[];\n};\n\n/* Determine if a heap of 'total_heap_bytes' size uses 32-bit chunk headers.\n * This function should be called during heap initialization to set the\n * is_big_heap property of the z_heap instance.\n */\nstatic inline bool heap_uses_big_headers(size_t total_heap_bytes)\n{\n\tif (IS_ENABLED(CONFIG_SYS_HEAP_SMALL_ONLY)) {\n\t\treturn false;\n\t}\n\tif (IS_ENABLED(CONFIG_SYS_HEAP_BIG_ONLY) || sizeof(void *) > 4U) {\n\t\treturn true;\n\t}\n\treturn total_heap_bytes / CHUNK_UNIT > 0x7fffU;\n}\n\n/* Get the size of a chunk header for this heap instance.\n * Depends on the 'is_big_heap' flag set during initialization.\n */\nstatic inline size_t chunk_header_bytes(struct z_heap *h)\n{\n\treturn h->is_big_heap ? 8 : 4;\n}\n>>>>>>>> REPLACE\n\nlib/heap/heap.h\n<<<<<<<< SEARCH\n\tchunksz_t chunks = (bytes / CHUNK_UNIT) + (extra / CHUNK_UNIT);\n\tsize_t oddments = ((bytes % CHUNK_UNIT) + (extra % CHUNK_UNIT) +\n\t\t\t   chunk_header_bytes(h) + CHUNK_UNIT - 1U) / CHUNK_UNIT;\n\n\treturn (chunksz_t)min(chunks + oddments + CHUNK_TRAILER_SIZE, h->end_chunk);\n}\n========\n\tchunksz_t chunks = (bytes / CHUNK_UNIT) + (extra / CHUNK_UNIT);\n\tsize_t oddments = ((bytes % CHUNK_UNIT) + (extra % CHUNK_UNIT) +\n\t\t\t   chunk_header_bytes(h) + CHUNK_UNIT - 1U) / CHUNK_UNIT;\n\n\t/* Clamp the calculated chunk size to prevent overflow for chunksz_t,\n\t * and also ensure it does not exceed the total heap capacity (h->end_chunk).\n\t */\n\tchunksz_t max_chunksz_val = (sizeof(chunksz_t) == 2U) ? 0xffffU : 0xffffffffU;\n\treturn (chunksz_t)min(chunks + oddments + CHUNK_TRAILER_SIZE, min(max_chunksz_val, h->end_chunk));\n}\n>>>>>>>> REPLACE\n\nlib/heap/heap.c\n<<<<<<<< SEARCH\n\t__ASSERT(bytes > heap_footer_bytes(bytes), \"heap size is too small\");\n#ifdef CONFIG_SYS_HEAP_SANITIZER_HOOKS\n\tconst size_t orig_bytes = bytes; /* preserve for heap_sanitizer_on_init */\n#endif\n\n\tstruct z_heap *h = (struct z_heap *)mem;\n\n\th->end_chunk = bytes_to_chunksz(h, bytes, 0);\n\n\t/* Initialize first chunk, which is the entire heap. */\n\tset_chunk_size(h, 0, h->end_chunk);\n\tset_left_chunk_size(h, right_chunk(h, 0), h->end_chunk);\n\tset_chunk_used(h, 0);\n\n\t/* We're using chunk zero as the \"sentinel\" for the start of the heap.\n\t * It's always marked as \"used\" and never merged. Its right_chunk()\n\t * (which is chunk ID 1, assuming it's the minimal size necessary to\n\t * hold the header) is the first actual \"user\" chunk.\n\t */\n\n\t/* The total number of buckets depends on the max chunk size, which is\n\t * h->end_chunk. The max bucket index is 31 - CLZ(h->end_chunk -\n\t * min_chunk_size() + 1), and we need one for every index up to that.\n\t */\n\tint num_buckets = bucket_idx(h, h->end_chunk) + 1;\n\tCHECK(num_buckets <= Z_HEAP_BUCKET_MAX);\n\n\tmemset(h->buckets, 0, num_buckets * sizeof(struct z_heap_bucket));\n\n\tchunkid_t free_chunk_start = right_chunk(h, 0);\n\tchunksz_t free_chunk_size = chunk_size(h, free_chunk_start);\n\n\tif (free_chunk_size > min_chunk_size(h)) {\n\t\tfree_list_add(h, free_chunk_start);\n\t}\n\n#ifdef CONFIG_SYS_HEAP_RUNTIME_STATS\n\th->free_bytes = chunk_usable_bytes(h, free_chunk_start);\n#endif\n#ifdef CONFIG_SYS_HEAP_CANARIES_RANDOM\n\th->canary_base = sys_rand32_get();\n#endif\n#ifdef CONFIG_SYS_HEAP_SANITIZER_HOOKS\n\theap_sanitizer_on_init(heap, mem, orig_bytes);\n#endif\n}\n========\n\t/* Determine if this heap instance will use 32-bit chunk headers.\n\t * This must be done first, as it affects the size of chunk headers\n\t * and thus other calculations like bucket_idx and min_chunk_size.\n\t */\n\tstruct z_heap *h = (struct z_heap *)mem;\n\th->is_big_heap = heap_uses_big_headers(bytes);\n\n\t/* Calculate the total number of chunks that can fit in the raw memory buffer.\n\t * This value serves as the sentinel chunk ID (h->end_chunk itself)\n\t * and defines the maximum boundary for chunk IDs.\n\t */\n\th->end_chunk = bytes / CHUNK_UNIT;\n\n\t/* Calculate the number of buckets needed. This depends on the largest possible\n\t * chunk size, which is effectively h->end_chunk (total chunks).\n\t * `bucket_idx` depends on `min_chunk_size` which now depends on `h->is_big_heap`.\n\t */\n\tint num_buckets = bucket_idx(h, h->end_chunk) + 1;\n\tCHECK(num_buckets <= Z_HEAP_BUCKET_MAX);\n\n\t/* Calculate the total size of the heap metadata (struct z_heap + buckets) in bytes and chunks. */\n\tsize_t heap_metadata_bytes = sizeof(struct z_heap) + (num_buckets * sizeof(struct z_heap_bucket));\n\tchunksz_t heap_metadata_chunks = (heap_metadata_bytes + CHUNK_UNIT - 1U) / CHUNK_UNIT;\n\n\t/* Assert that the provided memory is large enough to hold at least the heap metadata\n\t * plus one minimal allocatable chunk (header + 1 byte payload + optional trailer).\n\t */\n\t__ASSERT(bytes >= heap_metadata_bytes + min_chunk_size(h) * CHUNK_UNIT,\n\t\t \"heap size is too small\");\n\n#ifdef CONFIG_SYS_HEAP_SANITIZER_HOOKS\n\tconst size_t orig_bytes = bytes; /* preserve for heap_sanitizer_on_init */\n#endif\n\n\t/* Clear the entire heap memory, including headers and buckets, to ensure a clean state. */\n\tmemset(mem, 0, bytes);\n\n\t/* Chunk 0 (at the start of 'mem') represents the heap metadata itself.\n\t * Mark it as used and set its size.\n\t */\n\tset_chunk_size(h, 0, heap_metadata_chunks);\n\tset_chunk_used(h, 0);\n\n\t/* The first actual allocatable chunk starts immediately after the heap metadata. */\n\tchunkid_t free_chunk_start = heap_metadata_chunks;\n\tchunksz_t free_chunk_size = h->end_chunk - free_chunk_start;\n\n\t/* Initialize the free chunk and add it to the free list if it's large enough. */\n\tif (free_chunk_size > min_chunk_size(h)) {\n\t\tset_chunk_size(h, free_chunk_start, free_chunk_size);\n\t\t/* The right_chunk of the last chunk is the sentinel (h->end_chunk).\n\t\t * The 'left_chunk_size' field for the sentinel chunk is not stored\n\t\t * within the chunk header itself (and for big heaps, not in z_heap struct).\n\t\t * So, only update if the chunk after 'free_chunk_start' is a real chunk.\n\t\t */\n\t\tif (free_chunk_start + free_chunk_size < h->end_chunk) {\n\t\t\tset_left_chunk_size(h, right_chunk(h, free_chunk_start), free_chunk_size);\n\t\t}\n\t\tfree_list_add(h, free_chunk_start);\n\t} else {\n\t\t/* If the remaining space is too small for a valid chunk, mark it as used\n\t\t * to prevent it from being freed or merged, thereby preventing small, unusable\n\t\t * gaps from being added to the free list.\n\t\t */\n\t\tif (free_chunk_size > 0U) {\n\t\t\tset_chunk_size(h, free_chunk_start, free_chunk_size);\n\t\t\tset_chunk_used(h, free_chunk_start);\n\t\t}\n\t}\n\n#ifdef CONFIG_SYS_HEAP_RUNTIME_STATS\n\t/* Update runtime stats based on the newly available free chunk. */\n\th->free_bytes = chunk_usable_bytes(h, free_chunk_start);\n#endif\n#ifdef CONFIG_SYS_HEAP_CANARIES_RANDOM\n\th->canary_base = sys_rand32_get();\n#endif\n#ifdef CONFIG_SYS_HEAP_SANITIZER_HOOKS\n\theap_sanitizer_on_init(heap, mem, orig_bytes);\n#endif\n}\n>>>>>>>> REPLACE\n```",
+          "applied_files": [],
+          "apply_error": "SearchMatchFailed: No exactly matching SEARCH block was found in 'lib/heap/heap.h'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).\nSearchMatchFailed: No exactly matching SEARCH block was found in 'lib/heap/heap.h'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).\nSearchMatchFailed: No exactly matching SEARCH block was found in 'lib/heap/heap.c'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": null
+        }
+      },
+      {
+        "iteration": 3,
+        "compiled": true,
+        "resolved": true,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "agentless_repair_3",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 4342,
+            "output_tokens": 5557
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "success",
+          "patch": "lib/heap/heap.c\n<<<<<<<< SEARCH\n\tCHECK(bi < bucket_idx(h, h->end_chunk));\n========\n\tCHECK(bi <= bucket_idx(h, h->end_chunk));\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "lib/heap/heap.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "Zephyr OS successfully booted.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[Runtime Log Tail]\nSTART - test_fragmentation\nTesting maximally fragmented (2048 byte) heap\nExiting due to fatal error\nASSERTION FAIL [bi < bucket_idx(h, h->end_chunk)] @ WEST_TOPDIR/zephyr/lib/heap/heap.c:380\n@ WEST_TOPDIR/zephyr/lib/os/assert.c:43\n[00:00:00.000,000] <err> os: >>> ZEPHYR FATAL ERROR 4: Kernel panic on CPU 0\n[00:00:00.000,000] <err> os: Current thread: 0x80beb60 (test_fragmentation)\n[00:00:00.000,000] <err> os: Halting system\nFAILED: zephyr/CMakeFiles/run_native /tmp/build/zephyr/CMakeFiles/run_native\ncd /tmp/build && /tmp/build/zephyr/zephyr.exe\nninja: build stopped: subcommand failed.\nFATAL ERROR: command exited with status 1: /usr/bin/cmake --build /tmp/build --target run",
+    "protected_file_count": 4,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r3_main/agentless/v3new_runtime_heap_34f8f2d",
+    "agentless": {
+      "directories": [
+        "lib/heap",
+        "tests/lib",
+        "kernel",
+        "subsys/mem_mgmt",
+        "boards"
+      ],
+      "candidate_file_count": 922,
+      "files": [
+        "lib/heap/heap.c",
+        "tests/lib/heap/src/main.c",
+        "lib/heap/heap.h",
+        "tests/lib/heap/prj.conf",
+        "lib/heap/Kconfig"
+      ],
+      "locations": {
+        "lib/heap/heap.c": [
+          [
+            380,
+            380
+          ],
+          [
+            370,
+            428
+          ],
+          [
+            772,
+            772
+          ],
+          [
+            239,
+            239
+          ],
+          [
+            133,
+            133
+          ]
+        ],
+        "lib/heap/heap.h": [
+          [
+            308,
+            308
+          ],
+          [
+            93,
+            107
+          ],
+          [
+            265,
+            265
+          ]
+        ],
+        "tests/lib/heap/src/main.c": [
+          [
+            187,
+            187
+          ],
+          [
+            40,
+            40
+          ]
+        ]
+      },
+      "context_chars": 10215,
+      "n_candidates": 4,
+      "duplicates_skipped": 0
+    },
+    "api_events": [],
+    "started_at": "2026-10-22T16:42:54+00:00",
+    "run_meta": {
+      "code_commit": "d25d466fe57768da835d7bf870b5f7674c2d8f28",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": true,
+      "proposed_hybrid_rag": true,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

@@ -30,25 +30,37 @@ from the start rather than retrofitted:
 import argparse
 import json
 import logging
+import hashlib
 import os
 import re
 import shutil
 import subprocess
 import sys
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
 from core.state import create_initial_state, ZephyrAgentState
+from core.trajectory import clip_text
+from core.proposed_opt import B3_GATE, PROPOSED_OPT
+from graph_rag.case_graph import GRAPH_RAG
+from agents.knowledge_expert import HYBRID_RAG
+from tools.devops_analyzer import FAILED_UNIT_HINT, extract_failed_units, failed_units_note
+from core.protected_files import register as register_protected_files, unregister as unregister_protected_files
+from core import llm_retry
+from core.llm_retry import LLMHangError, is_daily_quota, is_transient, pop_events, set_strict_fallbacks
 from core.workflow import build_zephyr_graph, build_devops_docker_cmd
 from core.baseline_pipelines import run_b1, run_b2, run_b3
-from core.llm_provider import set_provider, get_provider
+from core.llm_provider import PATCH_LLM_TIMEOUT, set_provider, get_provider, set_single_model, is_single_model, get_model_name
+from graph_rag.hybrid_retriever import EMBEDDING_MODEL
 from tools.fault_injector import MUTATE_SCRIPT_HOST_PATH, MUTATE_SCRIPT_CONTAINER_PATH
 from tools.qemu_oracle import QemuOracle
 from tools.log_filter import LogFilter
 
-PIPELINE_CHOICES = ("proposed", "b1", "b2", "b3")
+PIPELINE_CHOICES = ("proposed", "b1", "b2", "b3", "openhands", "agentless")
 MODEL_PROVIDER_CHOICES = ("gemini", "anthropic", "openai")
 
 load_dotenv()
@@ -84,6 +96,53 @@ def _escape_operator(operator: str) -> str:
     return _ESCAPE_OPERATOR_RE.sub(r"\\\1", operator)
 
 
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_INJECTION_ASSETS_MARKER = os.path.join("dataset", "scripts", "injection_assets")
+
+
+def _resolve_extra_file_host_path(host_path: str) -> str:
+    """資料集裡 extra_files 的 host 路徑是當初在舊 OneDrive 位置
+    (~/Library/CloudStorage/OneDrive-TUM/zephyr-llm-repair/...) 建構資料集
+    時寫死的絕對路徑；repo 已搬到本地路徑 (見 memory 的搬遷記錄)，這些
+    絕對路徑本身沒有一併更新，該舊路徑早已不存在。若照原樣直接
+    bind-mount，Docker 對不存在的 host 來源會自動建立一個空目錄去掛載，
+    容器內收到的就是空目錄而非檔案，cp 会因此失敗 (症狀：
+    "cp: -r not specified; omitting directory")。這裡在真正使用前，把任何
+    不存在的路徑改成以目前 repo 根目錄重新定位 (兩者的
+    dataset/scripts/injection_assets/ 之後的相對路徑是一致的，資產檔案本身
+    有跟著 git 搬過來)。
+    Dataset extra_files host paths were hardcoded absolute paths pointing at
+    the dataset's original OneDrive-synced location; the repo has since
+    moved to a local path (see memory's relocation note) without those
+    absolute paths being updated, and the old location no longer exists.
+    Bind-mounting a nonexistent host source makes Docker silently create an
+    empty directory there to mount instead, so the container gets an empty
+    directory rather than the asset file, and cp fails (symptom: "cp: -r
+    not specified; omitting directory"). Re-root any path that doesn't exist
+    on disk under the current repo root instead — the portion after
+    dataset/scripts/injection_assets/ is identical either way, since the
+    asset files themselves moved with the git history.
+
+    使用 isfile() 而非 exists()：先前對舊路徑的失敗嘗試，Docker 已經在
+    該路徑自動生出空目錄 (bind-mount 不存在來源的副作用)——exists() 對
+    目錄也會回傳 True，會誤判空目錄為「檔案存在」，必須用 isfile() 排除。
+    isfile() rather than exists(): earlier failed attempts against the old
+    path already left Docker-created empty directories there (a side effect
+    of bind-mounting a nonexistent source) — exists() returns True for a
+    directory too and would misidentify that empty directory as "the file
+    is there", so isfile() is required to rule that out."""
+    if os.path.isfile(host_path):
+        return host_path
+    marker_idx = host_path.find(_INJECTION_ASSETS_MARKER)
+    if marker_idx != -1:
+        candidate = os.path.join(_REPO_ROOT, host_path[marker_idx:])
+        if os.path.isfile(candidate):
+            return candidate
+    raise FileNotFoundError(
+        f"extra_files host path not found (checked original and repo-relative): {host_path}"
+    )
+
+
 def _normalize_injections(case: Dict[str, Any]) -> List[Dict[str, str]]:
     if "injections" in case:
         return case["injections"]
@@ -95,25 +154,42 @@ def load_dataset(dataset_path: str) -> List[Dict[str, Any]]:
         return json.load(f)
 
 
-def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
+def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str, originals: Optional[Dict[str, str]] = None) -> str:
     """
     在一個拋棄式容器內對 case['broken_commit'] 做
-    checkout -> west update --narrow -> 套用 mutation，完全比照
-    tools/fault_injector.py._run() 已經拿來驗證過整個資料集的流程 (同一棵
-    /zephyrproject/zephyr 樹、同一種 operator 跳脫方式)，再把容器內產生的
-    /zephyrproject/zephyr 複製到 host 上的 dest_dir，移除 .git，回傳
-    dest_dir 的絕對路徑。
+    checkout -> 套用 mutation，比照 tools/fault_injector.py._run() 已經拿來
+    驗證過整個資料集的流程 (同一棵 /zephyrproject/zephyr 樹、同一種
+    operator 跳脫方式)，再把容器內產生的 /zephyrproject/zephyr 複製到 host
+    上的 dest_dir，移除 .git，回傳 dest_dir 的絕對路徑。
+
+    跟 fault_injector 不同，這裡不跑 `west update --narrow`：它只更新
+    /zephyrproject/modules 等 zephyr/ 以外的專案，而這裡只 docker cp
+    zephyr/ 出來；建置與 StaticCheck 也只把 workspace 掛到
+    /zephyrproject/zephyr，模組一律用 zephyr-sandbox image 自帶的快照
+    (2026-08-30 main)。2026-09-26 以同一案例 (inject_c_hello_world_brace)
+    分別產生兩種 workspace 做完整比對：64234 個檔案內容、權限、路徑完全
+    相同，準備時間則從 909 秒降到 112 秒。
 
     只有這個函式讀取 case['broken_commit']/['injection']/['injections']；
     回傳值只是一個檔案系統路徑，這幾個欄位的內容不會出現在回傳值、
     workspace 內容，或任何寫出的檔案裡。
 
-    Runs checkout -> west update --narrow -> mutation-apply inside a
-    disposable container, mirroring tools/fault_injector.py._run() exactly
-    (same /zephyrproject/zephyr tree, same operator-escaping scheme) — the
-    process this dataset was originally verified with. Copies the
-    container's resulting /zephyrproject/zephyr out to dest_dir on the
-    host, strips .git, and returns dest_dir's absolute path.
+    Runs checkout -> mutation-apply inside a disposable container,
+    mirroring tools/fault_injector.py._run() (same /zephyrproject/zephyr
+    tree, same operator-escaping scheme) — the process this dataset was
+    originally verified with. Copies the container's resulting
+    /zephyrproject/zephyr out to dest_dir on the host, strips .git, and
+    returns dest_dir's absolute path.
+
+    Unlike fault_injector, this does not run `west update --narrow`: it
+    only updates projects outside zephyr/ (e.g. /zephyrproject/modules),
+    while only zephyr/ is docker cp'd out here; builds and StaticCheck
+    also mount the workspace at /zephyrproject/zephyr only, so modules
+    always come from the zephyr-sandbox image's own snapshot (2026-08-30
+    main). Verified 2026-09-26 by preparing the same case
+    (inject_c_hello_world_brace) both ways and diffing in full: all 64234
+    files identical in content, mode and path, while prep time dropped
+    from 909s to 112s.
 
     Only this function ever reads case['broken_commit']/['injection']/
     ['injections']; the return value is just a filesystem path — none of
@@ -123,7 +199,9 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
     case_id = case["id"]
     injections = _normalize_injections(case)
     broken_commit = case["broken_commit"]
-    container_name = f"evalprep_{case_id}_{int(time.time() * 1000)}"
+    # 加隨機後綴：多條 pipeline 並行跑同一案例時，只用毫秒時間戳會撞名。
+    # Random suffix: a millisecond timestamp alone collides when pipelines run the same case in parallel.
+    container_name = f"evalprep_{case_id}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
 
     mutate_cmds = [
         f"python3 {MUTATE_SCRIPT_CONTAINER_PATH} /zephyrproject/zephyr/{inj['target_file']} "
@@ -131,35 +209,65 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
         for inj in injections
     ]
 
+    # extra_files 支援「把既有測試移植到新板子」這類需要新增/覆寫 mutation
+    # 目標檔以外之檔案的案例 (例如新增一個原本沒有的 boards/<board>.overlay)。
+    # 跟 tools/fault_injector.py._run() 用同一套機制：host 路徑各自 bind-mount
+    # 到一個獨立的 staging 路徑 (不能直接掛到最終路徑——如果那個路徑是既有
+    # git 追蹤檔案，唯讀 mount 會讓 git checkout 覆寫時得到 Permission
+    # denied，整條 checkout 失敗)，等 checkout 做完、目標
+    # 路徑回到一般檔案狀態後，再用 cp 複製過去，且必須發生在 mutation 指令
+    # 之前 (mutation 目標檔本身可能就是這裡新增的檔案，如本案例)。
+    # extra_files supports "port an existing test to a new board" cases that
+    # need files beyond the single mutation target_file (e.g. adding a
+    # boards/<board>.overlay the test didn't originally have). Same mechanism
+    # as tools/fault_injector.py._run(): each host path is bind-mounted at an
+    # independent staging path (not directly at its final path — if that path
+    # is an existing git-tracked file, a read-only mount would make git
+    # checkout's overwrite fail with Permission denied), then cp'd into place
+    # once checkout has finished, before the mutation commands
+    # run (the mutation's own target_file may be one of these newly-added
+    # files, as in this case).
+    extra_files = case.get("extra_files") or injections[0].get("extra_files")
+    extra_mounts = []
+    copy_steps = []
+    if extra_files:
+        for idx, (container_rel_path, host_path) in enumerate(extra_files.items()):
+            resolved_host_path = _resolve_extra_file_host_path(host_path)
+            staging_path = f"/tmp/extra_files/{idx}"
+            extra_mounts += ["-v", f"{resolved_host_path}:{staging_path}:ro"]
+            dest = f"/zephyrproject/zephyr/{container_rel_path}"
+            copy_steps.append(f"mkdir -p $(dirname {dest}) && cp {staging_path} {dest}")
+
+    # image 裡本來就有資料集用到的 broken commit 時跳過 git fetch：2026-09-28
+    # 網路中斷時，每筆都在 fetch 這步失敗。產生的 workspace 完全相同，只是
+    # 不再依賴 GitHub。
+    # Skip git fetch when the image already has the broken commit: during the
+    # 2026-09-28 network outage every case failed at this fetch. The resulting
+    # workspace is identical; it just no longer depends on GitHub.
     inner_script = (
         "cd /zephyrproject/zephyr && "
-        f"git fetch origin {broken_commit} && "
+        f"(git cat-file -e {broken_commit}^{{commit}} 2>/dev/null || git fetch origin {broken_commit}) && "
         f"git checkout {broken_commit} && "
-        "west update --narrow && "
-        + " && ".join(mutate_cmds)
+        + " && ".join(copy_steps + mutate_cmds)
     )
 
     docker_run_cmd = [
         "docker", "run", "-i", "--name", container_name,
         "--cpus=2", "--memory=2400m",
         "-v", f"{MUTATE_SCRIPT_HOST_PATH}:{MUTATE_SCRIPT_CONTAINER_PATH}:ro",
+        *extra_mounts,
         "zephyr-sandbox", "bash", "-c", inner_script,
     ]
 
-    logger.info(f"[{case_id}] 準備 broken workspace (checkout {broken_commit[:12]} + 套用 mutation)...")
+    logger.info(f"[{case_id}] Preparing the broken workspace (checkout {broken_commit[:12]} + applying the mutation)...")
     try:
-        # 實測 (2026-09-01)：光是 west update --narrow 這一步 (逐一從十幾個
-        # 不同的 GitHub repo 抓各家 HAL module) 就可能吃到 15 分鐘，加上
-        # 前面的 fetch/checkout 跟後面的 mutation，整體逼近甚至超過原本
-        # 900 秒的上限——這不是新案例才會遇到的問題，是這個步驟本身在
-        # 網路較慢時的真實耗時，調高到 1800 秒留出實際需要的緩衝。
-        # Measured (2026-09-01): west update --narrow alone (fetching each
-        # HAL module from a dozen-plus separate GitHub repos one by one)
-        # can take up to 15 minutes; combined with the fetch/checkout before
-        # it and the mutation after, the total routinely approaches or
-        # exceeds the previous 900s cap — not something specific to any one
-        # case, just this step's real duration when the network is slower.
-        # Raised to 1800s to give the headroom this step actually needs.
+        # 1800 秒上限原本是為了 west update --narrow (2026-09-01 實測可達
+        # 15 分鐘) 調高的；拿掉 west update 後準備階段實測約 2 分鐘
+        # (2026-09-26)，上限保留 1800 秒，給網路較慢時的 git fetch 留緩衝。
+        # The 1800s cap was originally raised for west update --narrow
+        # (measured up to 15 minutes on 2026-09-01); with west update
+        # dropped, prep measured ~2 minutes (2026-09-26). The cap is kept at
+        # 1800s as headroom for git fetch on a slow network.
         result = subprocess.run(docker_run_cmd, capture_output=True, text=True, timeout=1800)
         if result.returncode != 0:
             raise RuntimeError(
@@ -172,7 +280,7 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
             shutil.rmtree(dest_dir)
         os.makedirs(os.path.dirname(os.path.abspath(dest_dir)), exist_ok=True)
 
-        logger.info(f"[{case_id}] 從容器複製 /zephyrproject/zephyr -> {dest_dir} ...")
+        logger.info(f"[{case_id}] Copying /zephyrproject/zephyr from the container -> {dest_dir} ...")
         cp_result = subprocess.run(
             ["docker", "cp", f"{container_name}:/zephyrproject/zephyr", dest_dir],
             capture_output=True, text=True, timeout=300,
@@ -215,10 +323,19 @@ def prepare_broken_workspace(case: Dict[str, Any], dest_dir: str) -> str:
     # which Kconfig.orig happens to match. Same severity as the .git leak
     # — must be stripped here, not left for each downstream "looks
     # relevant, include it" heuristic to independently step on.
+    # originals 有給時，刪之前先把被注入檔的原始內容讀出來 (評測端的規格檢查用，存在 workspace 外的
+    # 記憶體裡，agent 看不到)。When originals is given, read the injected files' original content
+    # before deleting (for the evaluator-side spec check; kept in memory outside the workspace).
+    injected_paths = {os.path.normpath(inj["target_file"]) for inj in injections}
     for root, _dirs, files in os.walk(dest_dir):
         for filename in files:
             if filename.endswith(".orig"):
-                os.remove(os.path.join(root, filename))
+                orig_path = os.path.join(root, filename)
+                rel = os.path.normpath(os.path.relpath(orig_path[: -len(".orig")], dest_dir))
+                if originals is not None and rel in injected_paths:
+                    with open(orig_path, encoding="utf-8", errors="ignore") as f:
+                        originals[rel] = f.read()
+                os.remove(orig_path)
 
     _assert_no_orig_residue(dest_dir, case_id)
 
@@ -336,10 +453,12 @@ def verify_reproduces_initial_failure(case: Dict[str, Any], workspace_path: str)
     case is still broken, it isn't grading a repair attempt.
     """
     category = case.get("category", "")
-    wait_for_completion = category in ("runtime_crash", "compound")
-    docker_cmd = build_devops_docker_cmd(workspace_path, case.get("board", "qemu_x86"), case.get("target_app", "."))
+    # real_bug (v3 真實 bug 對照集) 都是執行期才失敗，要等測試跑完；不等的話看到開機訊號就判 success。
+    # real_bug cases (v3 real-bug control set) all fail at run time; without waiting, the boot banner reads as success.
+    wait_for_completion = category in ("runtime_crash", "compound", "real_bug")
+    docker_cmd, container_name = build_devops_docker_cmd(workspace_path, case.get("board", "qemu_x86"), case.get("target_app", "."))
     oracle = QemuOracle(timeout=600)
-    result = oracle.evaluate(docker_cmd, wait_for_completion=wait_for_completion)
+    result = oracle.evaluate(docker_cmd, container_name=container_name, wait_for_completion=wait_for_completion)
     return result
 
 
@@ -348,7 +467,29 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
     case_id = case["id"]
     dest_dir = os.path.join(runs_dir, case_id)
 
-    workspace_path = prepare_broken_workspace(case, dest_dir)
+    originals: Dict[str, str] = {}
+    workspace_path = prepare_broken_workspace(case, dest_dir, originals)
+    # 評測端的受保護檔案：target_app 底下除了被注入的檔案以外都快照起來，每次
+    # 建置前還原 (見 core/protected_files.py)。快照放在 workspace 外面。
+    # Evaluator-side protected files: snapshot everything under target_app except
+    # the injected files, restored before every build (see core/protected_files.py).
+    # The snapshot lives outside the workspace.
+    protected_count = register_protected_files(
+        workspace_path, case.get("target_app", "."),
+        [inj["target_file"] for inj in _normalize_injections(case)],
+        dest_dir.rstrip(os.sep) + ".protected",
+        originals,
+    )
+    logger.info(f"[{case_id}] Snapshotted {protected_count} protected test-app files")
+    try:
+        return _run_case_in_workspace(case, workspace_path, max_iters, skip_repro_check, pipeline, protected_count)
+    finally:
+        unregister_protected_files(workspace_path)
+
+
+def _run_case_in_workspace(case: Dict[str, Any], workspace_path: str, max_iters: int, skip_repro_check: bool,
+                           pipeline: str, protected_count: int) -> Dict[str, Any]:
+    case_id = case["id"]
 
     # repro-check 真的重新 build 一次時順便拿到的即時日誌，優先於資料集
     # 凍結的 initial_error_log 交給 agent 做第一次診斷——見
@@ -363,19 +504,23 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
     if not skip_repro_check:
         repro_result = verify_reproduces_initial_failure(case, workspace_path)
         logger.info(
-            f"[{case_id}] 初始重現檢查: status={repro_result['status']} "
-            f"(資料集記錄的預期 error_type={case.get('error_type')})"
+            f"[{case_id}] Initial reproduction check: status={repro_result['status']} "
+            f"(expected error_type recorded in the dataset={case.get('error_type')})"
         )
         if repro_result["status"] == "success":
             raise RuntimeError(
-                f"[{case_id}] workspace 準備完成後直接建置成功，沒有重現預期的失敗——"
-                "案例可能已經因環境漂移失效，拒絕交給 agent 修復一個其實沒壞的專案。"
+                f"[{case_id}] The build succeeded right after the workspace was prepared, so the expected failure was not reproduced. "
+                "The case may have been invalidated by environment drift; refusing to hand the agent a project that is not actually broken."
             )
         initial_log_override = LogFilter().compress_log(repro_result["log"])
+        # Proposed 的 DevOps Expert：初始 log 也附上出錯的編譯單元 (2026-10-18)；其他 pipeline 不變。
+        # Proposed's DevOps Expert also adds the failing compilation units to the initial log (2026-10-18).
+        if pipeline == "proposed" and FAILED_UNIT_HINT:
+            initial_log_override = failed_units_note(extract_failed_units(repro_result["log"])) + initial_log_override
 
     state = build_agent_initial_state(case, workspace_path, max_iters, initial_log_override)
 
-    logger.info(f"[{case_id}] 開始 {pipeline} pipeline 修復...")
+    logger.info(f"[{case_id}] Starting {pipeline} pipeline repair...")
     # TTR (Time-to-Repair，見 analyze_results.py)：從這裡開始的牆鐘時間，
     # 到修復迴圈真正結束為止——workspace 準備/repro-check 的時間不算在
     # 內，那是評測環境的固定成本，不是 agent 修復本身的效率。
@@ -424,6 +569,20 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
         final_status, total_iterations = result["final_status"], result["iterations"]
         iteration_log = result.get("iteration_log", [])
         first_retrieval_files = result.get("first_retrieval_files")
+    elif pipeline == "agentless":
+        # Agentless baseline (2026-10-18)：見 core/agentless_pipeline.py。Agentless baseline; see that module.
+        from core.agentless_pipeline import run_agentless
+        result = run_agentless(state)
+        final_status, total_iterations = result["final_status"], result["iterations"]
+        iteration_log = result.get("iteration_log", [])
+        first_retrieval_files = None
+    elif pipeline == "openhands":
+        # OpenHands baseline (2026-10-18)：見 core/openhands_pipeline.py。OpenHands baseline; see that module.
+        from core.openhands_pipeline import run_openhands
+        result = run_openhands(state)
+        final_status, total_iterations = result["final_status"], result["iterations"]
+        iteration_log = result.get("iteration_log", [])
+        first_retrieval_files = None
     else:
         raise ValueError(f"unknown --pipeline '{pipeline}', expected one of {PIPELINE_CHOICES}")
 
@@ -434,13 +593,114 @@ def run_case(case: Dict[str, Any], runs_dir: str, max_iters: int, skip_repro_che
         "category": case.get("category"),
         "pipeline": pipeline,
         "model_provider": get_provider(),
+        "single_model": is_single_model(),
         "final_status": final_status,
         "iterations": total_iterations,
         "ttr_seconds": ttr_seconds,
         "iteration_log": iteration_log,
         "first_retrieval_files": first_retrieval_files,
+        # agent 第一次診斷實際拿到的 log (repro-check 過濾後的即時 log，或
+        # 資料集記錄的 initial_error_log)，給錯誤訊號品質分析用。
+        # The log the agent's first diagnosis actually received (the
+        # repro-check's filtered live log, or the dataset's recorded
+        # initial_error_log), for the error-signal-quality analysis.
+        "initial_error_log": clip_text(state["current_error_log"]),
+        "protected_file_count": protected_count,
         "workspace_path": workspace_path,
+        **({"openhands": result["openhands"]} if pipeline == "openhands" else {}),
+        **({"agentless": result["agentless"]} if pipeline == "agentless" else {}),
     }
+
+
+def _command_output(cmd: List[str]) -> Optional[str]:
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def collect_run_meta() -> Dict[str, Any]:
+    """
+    這次 evaluate.py 執行的環境指紋，逐筆寫進 results.json 的 run_meta：
+    程式碼 commit (以及有沒有未提交的修改)、實際用到的模型 ID、Docker
+    image ID、主要 SDK 版本。跨批次合併結果時，靠它確認每一筆都是同一個
+    凍結版本跑出來的。
+    Fingerprint of this evaluate.py run, written into each results.json
+    record's run_meta: code commit (and whether tracked files had
+    uncommitted changes), the model IDs actually used, the Docker image ID,
+    and key SDK versions. When merging results across batches, this is how
+    to confirm every record came from the same frozen version.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    def _version(package: str) -> Optional[str]:
+        try:
+            return version(package)
+        except PackageNotFoundError:
+            return None
+
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
+    # eval_runs/ 底下是結果檔 (封存、搬移時也會被 git 視為已追蹤檔案的變動)，
+    # 不算程式碼，排除在外；實際不乾淨的路徑另外記在 code_dirty_paths。
+    # eval_runs/ holds result files (archiving/moving them also shows up as
+    # tracked-file changes); they are not code, so they are excluded. The
+    # actual dirty paths are recorded in code_dirty_paths.
+    dirty = _command_output(["git", "-C", repo_dir, "status", "--porcelain", "--untracked-files=no",
+                             "--", ".", ":(exclude)eval_runs"])
+    return {
+        "code_commit": _command_output(["git", "-C", repo_dir, "rev-parse", "HEAD"]),
+        "code_dirty": None if dirty is None else bool(dirty),
+        "code_dirty_paths": None if dirty is None else [line.split(None, 1)[1] for line in dirty.splitlines()],
+        "model_provider": get_provider(),
+        "single_model": is_single_model(),
+        "models": {"fast": get_model_name("fast"), "pro": get_model_name("pro"), "embedding": EMBEDDING_MODEL},
+        # `docker image inspect zephyr-sandbox` 在這台 Docker (29.5.3) 上會回報
+        # No such image，`docker images` 卻查得到，所以用後者。
+        # `docker image inspect zephyr-sandbox` reports "No such image" on this
+        # Docker (29.5.3) while `docker images` finds it, so use the latter.
+        "docker_image_id": _command_output(["docker", "images", "zephyr-sandbox", "--no-trunc", "--format", "{{.ID}}"]),
+        "strict_fallbacks": True,
+        "patch_llm_timeout": PATCH_LLM_TIMEOUT,
+        "free_tier_retry_policy": llm_retry.FREE_TIER,
+        "proposed_failed_unit_hint": FAILED_UNIT_HINT,
+        # Proposed 的 Graph RAG (每筆案例現場建圖，graph_rag/case_graph.py)。Proposed's per-case Graph RAG.
+        "proposed_graph_rag": GRAPH_RAG,
+        "proposed_hybrid_rag": HYBRID_RAG,
+        # Proposed 的架構優化 (core/proposed_opt.py)。Proposed's architecture optimizations.
+        "proposed_opt": PROPOSED_OPT,
+        # B3 的套用閘門 (core/baseline_pipelines.run_b3)。B3's apply gate.
+        "b3_gate": B3_GATE,
+        # Agentless baseline 的候選 patch 數 (core/agentless_pipeline.py)。Agentless candidate count.
+        "agentless_n": int(os.environ.get("ZEPHYR_AGENTLESS_N", "4")),
+        # OpenHands baseline 的設定 (只在 --pipeline openhands 時有意義)。OpenHands settings (used only by that pipeline).
+        "openhands": {"image": os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z2"),
+                      "image_id": _command_output(["docker", "images", os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z2"),
+                                                   "--no-trunc", "--format", "{{.ID}}"]),
+                      "max_steps": int(os.environ.get("ZEPHYR_OH_MAX_STEPS", "50")),
+                      "timeout_min": float(os.environ.get("ZEPHYR_OH_TIMEOUT_MIN", "40"))},
+        # 用了哪把 Gemini 金鑰 (只記 SHA-256 前 8 碼，不記金鑰本身)；額度用完會換金鑰
+        # (tools/run_with_key_rotation.sh)。Which Gemini key was used (first 8 hex of its
+        # SHA-256 only, never the key); keys rotate when a daily quota runs out.
+        "gemini_key_fingerprint": (hashlib.sha256(os.environ["GEMINI_API_KEY"].encode()).hexdigest()[:8]
+                                   if os.environ.get("GEMINI_API_KEY") else None),
+        # embedding 用的金鑰 (GEMINI_EMBEDDING_API_KEY，未設定時就是 GEMINI_API_KEY)。
+        # Key used for embeddings (GEMINI_EMBEDDING_API_KEY, else GEMINI_API_KEY).
+        "embedding_key_fingerprint": (lambda k: hashlib.sha256(k.encode()).hexdigest()[:8] if k else None)(
+            os.environ.get("GEMINI_EMBEDDING_API_KEY") or os.environ.get("GEMINI_API_KEY")),
+        "sdk_versions": {p: _version(p) for p in ("langchain-core", "langgraph", "langchain-google-genai",
+                                                   "google-genai", "langchain-anthropic", "langchain-openai")},
+    }
+
+
+def _error_kind(exc: BaseException) -> str:
+    if isinstance(exc, LLMHangError) or isinstance(exc.__cause__, LLMHangError):
+        return "llm_hang"
+    if is_daily_quota(exc):
+        return "daily_quota"
+    if is_transient(exc):
+        return "transient_api"
+    return "other"
 
 
 def select_cases(dataset: List[Dict[str, Any]], args: argparse.Namespace) -> List[Dict[str, Any]]:
@@ -455,8 +715,6 @@ def select_cases(dataset: List[Dict[str, Any]], args: argparse.Namespace) -> Lis
     if args.all:
         return dataset
     raise SystemExit(
-        "拒絕預設跑全部案例：請指定 --case-id <id>、--limit N (先跑一小批)，"
-        "或明確加上 --all (真的要跑全部 143 筆時)。\n"
         "Refusing to default to running every case: pass --case-id <id>, "
         "--limit N (pilot a small batch first), or explicitly pass --all."
     )
@@ -472,6 +730,10 @@ def main():
                          help="Which LLM provider backs every generative call in this run (RQ4 cross-model "
                               "comparison, see core/llm_provider.py). The Hybrid RAG semantic layer's "
                               "embedding model is unaffected — Anthropic has no embeddings API of its own.")
+    parser.add_argument("--single-model", action="store_true",
+                         help="Use the provider's 'pro' model for every role, including the Analyzer and the "
+                              "Supervisor's compression (which normally use the cheaper 'fast' model). Gives a "
+                              "one-model-per-provider setup for cross-provider comparison (see core/llm_provider.py).")
     parser.add_argument("--case-id", help="Run exactly one case by its 'id' field.")
     parser.add_argument("--limit", type=int, help="Run only N cases starting at --offset (default offset 0), for piloting or batching.")
     parser.add_argument("--offset", type=int, default=0, help="Skip the first N cases before applying --limit (for slicing the dataset into batches).")
@@ -485,19 +747,51 @@ def main():
     parser.add_argument("--results-out", help="Where to write the JSON results summary (default: <runs-dir>/results.json).")
     args = parser.parse_args()
     set_provider(args.model_provider)
+    if args.single_model:
+        set_single_model(True)
+    set_strict_fallbacks(True)
+    run_meta = collect_run_meta()
+    logger.info(f"Run meta: {json.dumps(run_meta, ensure_ascii=False)}")
+    if run_meta["code_dirty"]:
+        logger.warning("Tracked files have uncommitted changes; run_meta.code_commit does not fully describe the code being run.")
 
     dataset = load_dataset(args.dataset)
     cases = select_cases(dataset, args)
-    logger.info(f"選定 {len(cases)} / {len(dataset)} 筆案例，workspace 將準備於 {args.runs_dir}，LLM 供應商={get_provider()}")
+    logger.info(f"Selected {len(cases)} / {len(dataset)} cases; workspaces will be prepared under {args.runs_dir}; LLM provider={get_provider()}, single-model={is_single_model()}")
 
     results = []
     for case in cases:
+        # api_events：這個案例期間 LLM/embedding API 的暫時性錯誤重試與降級
+        # 紀錄 (見 core/llm_retry.py)。error_kind 不是 "other" 的 error
+        # (transient_api = 重試用完；daily_quota = 每日配額用完；Hybrid 檢索
+        # 在評測模式下失敗也歸在這兩類或 other) 都代表該案例應單筆重跑，不能
+        # 當成結果。
+        # api_events: this case's LLM/embedding API transient-error retries
+        # and degradations (see core/llm_retry.py). An error whose error_kind
+        # isn't "other" (transient_api = retries ran out; daily_quota = daily
+        # quota exhausted) means rerun the case alone, don't count it as a result.
+        pop_events()
+        started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            results.append(run_case(case, args.runs_dir, args.max_retries, args.skip_repro_check, args.pipeline))
+            result = run_case(case, args.runs_dir, args.max_retries, args.skip_repro_check, args.pipeline)
+            result["api_events"] = pop_events()
         except Exception as e:
-            logger.error(f"[{case['id']}] 執行失敗: {e}")
-            results.append({"case_id": case["id"], "category": case.get("category"), "pipeline": args.pipeline,
-                             "model_provider": get_provider(), "final_status": "error", "error": str(e)})
+            logger.error(f"[{case['id']}] Run failed: {e}")
+            result = {"case_id": case["id"], "category": case.get("category"), "pipeline": args.pipeline,
+                      "model_provider": get_provider(), "single_model": is_single_model(),
+                      "final_status": "error", "error": str(e), "error_kind": _error_kind(e),
+                      "api_events": pop_events()}
+        result["started_at"] = started_at
+        result["run_meta"] = run_meta
+        results.append(result)
+        # 每日配額用完後，接下來的案例只會在同一個地方失敗 (而且每筆都先
+        # 花掉準備 workspace + repro build 的時間)，直接停下整批。
+        # Once the daily quota is exhausted, every following case would just
+        # fail the same way (each after spending workspace prep + a repro
+        # build first), so stop the whole batch.
+        if result.get("error_kind") == "daily_quota":
+            logger.error("Daily API quota exhausted; stopping the batch. Rerun the remaining cases after the quota resets.")
+            break
 
     results_out = args.results_out or os.path.join(args.runs_dir, "results.json")
     os.makedirs(os.path.dirname(results_out) or ".", exist_ok=True)
@@ -505,7 +799,7 @@ def main():
         json.dump(results, f, indent=2, ensure_ascii=False)
 
     resolved = sum(1 for r in results if r.get("final_status") == "resolved")
-    logger.info(f"完成：{resolved}/{len(results)} 案例修復成功。結果寫入 {results_out}")
+    logger.info(f"Done: {resolved}/{len(results)} cases repaired successfully. Results written to {results_out}")
 
 
 if __name__ == "__main__":

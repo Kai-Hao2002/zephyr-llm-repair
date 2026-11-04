@@ -1,0 +1,72 @@
+[
+  {
+    "case_id": "inject_dts_gpio_latch_offbyone",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 105.18167805671692,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-pro",
+            "input_tokens": 613,
+            "output_tokens": 6152
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/drivers/gpio/gpio_mmio_latch/src/main.c",
+            "content": "/*\n * Copyright (c) 2023 Google LLC\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <zephyr/device.h>\n#include <zephyr/drivers/gpio.h>\n#include <zephyr/ztest.h>\n#include <zephyr/sys/util.h>\n\n#define TEST_NODE DT_NODELABEL(gpio_mmio_latch)\n#define TEST_DEV DEVICE_DT_GET(TEST_NODE)\n#define TEST_REG_ADDR DT_REG_ADDR(TEST_NODE)\n#define TEST_NGPIOS DT_PROP(TEST_NODE, ngpios)\n\n/* An arbitrary initial value for the output register */\n#define TEST_INITIAL_OUTPUT 0xdeadbeef\n\nstatic const struct device *const test_dev = TEST_DEV;\nstatic const uint32_t test_ngpios = TEST_NGPIOS;\n\nstatic void test_callback_edge_rising(const struct device *dev, struct gpio_callback *cb,\n\t\t\t\t      uint32_t pins)\n{\n\t/* Do nothing */\n}\n\nstatic void test_callback_edge_falling(const struct device *dev, struct gpio_callback *cb,\n\t\t\t\t\tuint32_t pins)\n{\n\t/* Do nothing */\n}\n\nstatic void *gpio_mmio_latch_setup(void)\n{\n\tzassert_true(device_is_ready(test_dev), \"test device not ready\");\n\tzassert_true(test_ngpios > 0, \"test device has no gpios\");\n\tzassert_true(test_ngpios <= 32, \"test device has too many gpios\");\n\n\t/*\n\t * The test device is just a pointer to memory. This test writes an initial value to\n\t * that memory and then verifies that it can be read back. This ensures that the\n\t * memory is writable and that the test has exclusive access to it.\n\t */\n\tsys_write32(TEST_INITIAL_OUTPUT, TEST_REG_ADDR);\n\tzassert_equal(sys_read32(TEST_REG_ADDR), TEST_INITIAL_OUTPUT,\n\t\t      \"sys_read32(TEST_REG_ADDR) not equal to TEST_INITIAL_OUTPUT\");\n\n\treturn NULL;\n}\n\nZTEST(gpio_mmio_latch, test_config_in)\n{\n\tfor (uint32_t i = 0; i < test_ngpios; i++) {\n\t\tzassert_ok(gpio_pin_configure(test_dev, i, GPIO_INPUT), \"gpio_pin_configure()_\");\n\t}\n}\n\nZTEST(gpio_mmio_latch, test_config_out)\n{\n\tfor (uint32_t i = 0; i < test_ngpios; i++) {\n\t\tzassert_ok(gpio_pin_configure(test_dev, i, GPIO_OUTPUT), \"gpio_pin_configure()\");\n\t}\n}\n\nZTEST(gpio_mmio_latch, test_config_out_init_low)\n{\n\tfor (uint32_t i = 0; i < test_ngpios; i++) {\n\t\tzassert_ok(gpio_pin_configure(test_dev, i, GPIO_OUTPUT_LOW),\n\t\t\t   \"gpio_pin_configure()\");\n\t}\n}\n\nZTEST(gpio_mmio_latch, test_config_out_init_high)\n{\n\tfor (uint32_t i = 0; i < test_ngpios; i++) {\n\t\tzassert_ok(gpio_pin_configure(test_dev, i, GPIO_OUTPUT_HIGH),\n\t\t\t   \"gpio_pin_configure()\");\n\t}\n}\n\nZTEST(gpio_mmio_latch, test_set_and_get)\n{\n\tuint32_t out_val;\n\n\t/* Set all pins to output low */\n\tzassert_ok(gpio_port_set_masked_raw(test_dev, MASK(test_ngpios), 0),\n\t\t   \"gpio_port_set_masked_raw()\");\n\n\t/* Get the raw port value */\n\tzassert_ok(gpio_port_get_raw(test_dev, &out_val), \"gpio_port_get_raw()\");\n\tzassert_equal(out_val, 0, \"out_val not equal to 0\");\n\n\t/* Set all pins to output high */\n\tzassert_ok(gpio_port_set_masked_raw(test_dev, MASK(test_ngpios), MASK(test_ngpios)),\n\t\t   \"gpio_port_set_masked_raw()\");\n\n\t/* Get the raw port value */\n\tzassert_ok(gpio_port_get_raw(test_dev, &out_val), \"gpio_port_get_raw()\");\n\tzassert_equal(out_val, MASK(test_ngpios), \"out_val not equal to MASK(test_ngpios)\");\n}\n\nZTEST(gpio_mmio_latch, test_interrupts)\n{\n\tint ret;\n\tstruct gpio_callback cb_edge_rising;\n\tstruct gpio_callback cb_edge_falling;\n\n\tgpio_init_callback(&cb_edge_rising, test_callback_edge_rising, BIT(0));\n\tgpio_init_callback(&cb_edge_falling, test_callback_edge_falling, BIT(1));\n\n\tret = gpio_add_callback(test_dev, &cb_edge_rising);\n\tzassert_equal(ret, -ENOTSUP, \"gpio_add_callback() did not return -ENOTSUP\");\n\n\tret = gpio_add_callback(test_dev, &cb_edge_falling);\n\tzassert_equal(ret, -ENOTSUP, \"gpio_add_callback() did not return -ENOTSUP\");\n\n\tret = gpio_pin_interrupt_configure(test_dev, 0, GPIO_INT_EDGE_RISING);\n\tzassert_equal(ret, -ENOTSUP, \"gpio_pin_interrupt_configure() did not return -ENOTSUP\");\n\n\tret = gpio_pin_interrupt_configure(test_dev, 1, GPIO_INT_EDGE_FALLING);\n\tzassert_equal(ret, -ENOTSUP, \"gpio_pin_interrupt_configure() did not return -ENOTSUP\");\n\n\tret = gpio_remove_callback(test_dev, &cb_edge_rising);\n\tzassert_equal(ret, -ENOTSUP, \"gpio_remove_callback() did not return -ENOTSUP\");\n\n\tret = gpio_remove_callback(test_dev, &cb_edge_falling);\n\tzassert_equal(ret, -ENOTSUP, \"gpio_remove_callback() did not return -ENOTSUP\");\n}\n\nZTEST_SUITE(gpio_mmio_latch, NULL, gpio_mmio_latch_setup, NULL, NULL, NULL);\n"
+          },
+          "applied_files": [
+            "tests/drivers/gpio/gpio_mmio_latch/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/device.h:96:41: error: '__device_dts_ord_DT_N_NODELABEL_gpio_mmio_latch_ORD' undeclared here (not in a function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/devicetree.h:197:36: error: 'DT_N_NODELABEL_gpio_mmio_latch_P_ngpios' undeclared here (not in a function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/devicetree.h:197:36: error: 'DT_N_NODELABEL_gpio_mmio_latch_REG_IDX_0_VAL_ADDRESSU' undeclared (first use in this function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/drivers/gpio/gpio_mmio_latch/src/main.c:89:55: error: implicit declaration of function 'MASK' [-Wimplicit-function-declaration]\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[136/145] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[137/145] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[138/145] Linking C static library zephyr/kernel/libkernel.a\n[139/145] Linking C executable zephyr/zephyr_pre0.elf\n[140/145] Generating linker.cmd\n[141/145] Generating isr_tables.c, isr_tables_vt.ld, isr_tables_swi.ld\n[142/145] Building C object zephyr/CMakeFiles/zephyr_final.dir/misc/empty_file.c.obj\n[143/145] Building C object zephyr/CMakeFiles/zephyr_final.dir/isr_tables.c.obj\n[144/145] Linking C executable zephyr/zephyr.elf\nMemory region         Used Size  Region Size  %age Used\nFLASH:       29424 B       256 KB     11.22%\nRAM:        5816 B      65280 B      8.91%\nIDT_LIST:           0 B        32 KB      0.00%\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: qemu_cortex_m3/ti_lm3s6965\n[144/145] To exit from QEMU enter: 'CTRL+a, x'[QEMU] CPU: cortex-m3\nqemu-system-arm: warning: nic stellaris_enet.0 has no peer\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE gpio_mmio_latch\n===================================================================\nAssertion failed at WEST_TOPDIR/zephyr/tests/drivers/gpio/gpio_mmio_latch/src/main.c:58: gpio_mmio_latch_setup: sys_read32(TEST_REG_ADDR) not equal to TEST_INITIAL_OUTPUT",
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/b1/inject_dts_gpio_latch_offbyone",
+    "api_events": [],
+    "started_at": "2026-09-26T04:15:15+00:00",
+    "run_meta": {
+      "code_commit": "538b7706719863a3dea78dc56e2c9df57e2888c9",
+      "code_dirty": false,
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-pro",
+        "pro": "gemini-2.5-pro",
+        "embedding": "models/gemini-embedding-001"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

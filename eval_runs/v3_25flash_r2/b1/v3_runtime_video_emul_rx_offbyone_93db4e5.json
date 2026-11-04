@@ -1,0 +1,78 @@
+[
+  {
+    "case_id": "v3_runtime_video_emul_rx_offbyone_93db4e5",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 135.5564227104187,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 1072,
+            "output_tokens": 13616
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "drivers/video/video_emul_rx.c",
+            "content": "#include <zephyr/drivers/video.h>\n#include <zephyr/drivers/video/video_emul.h>\n#include <zephyr/kernel.h>\n#include <zephyr/logging/log.h>\n#include <string.h> /* For memcpy, memset */\n\nLOG_MODULE_REGISTER(video_emul_rx, CONFIG_VIDEO_EMUL_RX_LOG_LEVEL);\n\nstruct video_emul_rx_config {\n\t/* Placeholder for any configuration, e.g., link to imager */\n};\n\nstruct video_emul_rx_data {\n\tstruct k_fifo queue;\n\tstruct k_work worker;\n\tstruct video_format current_mode;\n\tbool streaming;\n};\n\nstatic size_t video_format_to_bytes_per_pixel(enum video_pixel_format format)\n{\n\tswitch (format) {\n\tcase VIDEO_PIXEL_FORMAT_RGB565:\n\tcase VIDEO_PIXEL_FORMAT_YUYV:\n\t\treturn 2;\n\tcase VIDEO_PIXEL_FORMAT_RGB888:\n\t\treturn 3;\n\tcase VIDEO_PIXEL_FORMAT_ARGB8888:\n\t\treturn 4;\n\tcase VIDEO_PIXEL_FORMAT_MONO01:\n\t\treturn 1;\n\tcase VIDEO_PIXEL_FORMAT_P420: /* YUV 4:2:0 planar, 1.5 bytes per pixel */\n\t\treturn 0; /* Special handling needed for frame size calculation */\n\tdefault:\n\t\treturn 0; /* Unknown format */\n\t}\n}\n\nstatic size_t video_format_to_frame_size(const struct video_format *fmt)\n{\n\tsize_t bpp = video_format_to_bytes_per_pixel(fmt->pixelformat);\n\n\tif (bpp > 0) {\n\t\treturn fmt->width * fmt->height * bpp;\n\t} else if (fmt->pixelformat == VIDEO_PIXEL_FORMAT_P420) {\n\t\t/* YUV 4:2:0 planar: Y plane (W*H), U plane (W/2 * H/2), V plane (W/2 * H/2) */\n\t\t/* Total = W*H + W*H/4 + W*H/4 = W*H * 1.5 */\n\t\treturn (fmt->width * fmt->height * 3) / 2;\n\t} else {\n\t\treturn 0; /* Unknown or unsupported format */\n\t}\n}\n\nstatic void emul_rx_worker(struct k_work *work)\n{\n\tstruct video_emul_rx_data *data = CONTAINER_OF(work, struct video_emul_rx_data, worker);\n\tstruct video_buf *vbuf;\n\n\twhile ((vbuf = k_fifo_get(&data->queue, K_NO_WAIT)) != NULL) {\n\t\tif (!data->streaming) {\n\t\t\tLOG_DBG(\"Not streaming, dropping frame.\");\n\t\t\tvideo_buf_finish(vbuf, -ENODEV); /* Mark buffer as failed */\n\t\t\tcontinue;\n\t\t}\n\n\t\t/* These checks should ideally be done in enqueue, but defensive checks here */\n\t\tif (vbuf->vaddr == NULL) {\n\t\t\tLOG_ERR(\"Received buffer with NULL vaddr in worker, dropping.\");\n\t\t\tvideo_buf_finish(vbuf, -EINVAL);\n\t\t\tcontinue;\n\t\t}\n\n\t\tsize_t expected_frame_size = video_format_to_frame_size(&data->current_mode);\n\n\t\tif (expected_frame_size == 0) {\n\t\t\tLOG_ERR(\"Invalid or unknown current video format, dropping buffer.\");\n\t\t\tvideo_buf_finish(vbuf, -EINVAL);\n\t\t\tcontinue;\n\t\t}\n\n\t\tif (vbuf->size < expected_frame_size) {\n\t\t\tLOG_ERR(\"Buffer %p too small (%zu bytes) for current mode (%zu bytes) in worker, dropping.\",\n\t\t\t\tvbuf->vaddr, vbuf->size, expected_frame_size);\n\t\t\tvideo_buf_finish(vbuf, -ENOMEM);\n\t\t\tcontinue;\n\t\t}\n\n\t\t/* Simulate filling the buffer with some data */\n\t\tmemset(vbuf->vaddr, 0xAA, expected_frame_size);\n\t\tvbuf->bytesused = expected_frame_size;\n\t\tvbuf->timestamp = k_uptime_get(); /* Simulate timestamp */\n\n\t\tLOG_DBG(\"Queueing a frame of %zu bytes in format %x %dx%d\",\n\t\t\tvbuf->bytesused, data->current_mode.pixelformat,\n\t\t\tdata->current_mode.width, data->current_mode.height);\n\t\tLOG_DBG(\"Inserting %zu bytes into buffer %p\", vbuf->bytesused, vbuf->vaddr);\n\n\t\tvideo_buf_finish(vbuf, 0); /* Mark buffer as successfully filled */\n\t}\n}\n\nstatic int video_emul_rx_set_format(const struct device *dev, enum video_endpoint_type type,\n\t\t\t\t\t\t\t\tstruct video_format *fmt)\n{\n\tstruct video_emul_rx_data *data = dev->data;\n\n\tif (type != VIDEO_EP_RX) {\n\t\treturn -EINVAL;\n\t}\n\n\tif (fmt == NULL) {\n\t\treturn -EINVAL;\n\t}\n\n\t/* Validate format parameters */\n\tif (fmt->width == 0 || fmt->height == 0 || video_format_to_frame_size(fmt) == 0) {\n\t\tLOG_ERR(\"Invalid video format: width, height or pixelformat is zero/unknown\");\n\t\treturn -EINVAL;\n\t}\n\n\tmemcpy(&data->current_mode, fmt, sizeof(*fmt));\n\tLOG_DBG(\"Applying mode %p at %d FPS\", fmt, data->current_mode.frame_rate);\n\n\treturn 0;\n}\n\nstatic int video_emul_rx_get_format(const struct device *dev, enum video_endpoint_type type,\n\t\t\t\t\t\t\t\tstruct video_format *fmt)\n{\n\tstruct video_emul_rx_data *data = dev->data;\n\n\tif (type != VIDEO_EP_RX) {\n\t\treturn -EINVAL;\n\t}\n\n\tif (fmt == NULL) {\n\t\treturn -EINVAL;\n\t}\n\n\tmemcpy(fmt, &data->current_mode, sizeof(*fmt));\n\treturn 0;\n}\n\nstatic int video_emul_rx_stream_start(const struct device *dev)\n{\n\tstruct video_emul_rx_data *data = dev->data;\n\n\tif (video_format_to_frame_size(&data->current_mode) == 0) {\n\t\tLOG_ERR(\"Cannot start streaming, format not set or invalid.\");\n\t\treturn -EINVAL;\n\t}\n\n\tdata->streaming = true;\n\tk_work_submit(&data->worker); /* Start worker if not already running */\n\treturn 0;\n}\n\nstatic int video_emul_rx_stream_stop(const struct device *dev)\n{\n\tstruct video_emul_rx_data *data = dev->data;\n\n\tdata->streaming = false;\n\t/* Optionally, drain the queue or cancel pending work */\n\treturn 0;\n}\n\nstatic int video_emul_rx_enqueue(const struct device *dev, struct video_buf *vbuf)\n{\n\tstruct video_emul_rx_data *data = dev->data;\n\n\tif (vbuf == NULL) {\n\t\tLOG_ERR(\"Attempted to enqueue NULL video buffer.\");\n\t\treturn -EINVAL;\n\t}\n\n\tif (vbuf->vaddr == NULL) {\n\t\tLOG_ERR(\"Attempted to enqueue video buffer with NULL vaddr.\");\n\t\treturn -EINVAL; /* This is likely the cause of (nil) buffer segfault */\n\t}\n\n\tsize_t expected_frame_size = video_format_to_frame_size(&data->current_mode);\n\n\tif (expected_frame_size == 0) {\n\t\tLOG_ERR(\"Video format not set or invalid, cannot enqueue buffer.\");\n\t\treturn -EINVAL;\n\t}\n\n\tif (vbuf->size < expected_frame_size) {\n\t\tLOG_ERR(\"Video buffer %p too small (%zu bytes) for current mode (%zu bytes).\",\n\t\t\t\tvbuf->vaddr, vbuf->size, expected_frame_size);\n\t\treturn -ENOMEM; /* This is the expected return for test_video_vbuf_too_small */\n\t}\n\n\tk_fifo_put(&data->queue, vbuf);\n\tk_work_submit(&data->worker);\n\treturn 0;\n}\n\nstatic int video_emul_rx_dequeue(const struct device *dev, enum video_endpoint_type type,\n\t\t\t\t\t\t\t\tstruct video_buf **vbuf, k_timeout_t timeout)\n{\n\t/* The emulator doesn't actively dequeue, it finishes buffers. */\n\t/* This function might be a placeholder or not fully implemented for the emulator. */\n\t/* If it's needed, it would typically wait for a finished buffer. */\n\t/* For now, let's return -ENOSYS or similar if not used. */\n\tLOG_WRN(\"video_emul_rx_dequeue not fully implemented/used for this emulator.\");\n\treturn -ENOSYS;\n}\n\nstatic int video_emul_rx_init(const struct device *dev)\n{\n\tstruct video_emul_rx_data *data = dev->data;\n\n\tk_fifo_init(&data->queue);\n\tk_work_init(&data->worker, emul_rx_worker);\n\n\t/* Initialize current_mode to a safe state */\n\tmemset(&data->current_mode, 0, sizeof(data->current_mode));\n\tdata->streaming = false;\n\n\treturn 0;\n}\n\nstatic const struct video_ops video_emul_rx_ops = {\n\t.set_format = video_emul_rx_set_format,\n\t.get_format = video_emul_rx_get_format,\n\t.stream_start = video_emul_rx_stream_start,\n\t.stream_stop = video_emul_rx_stream_stop,\n\t.enqueue = video_emul_rx_enqueue,\n\t.dequeue = video_emul_rx_dequeue,\n};\n\n#define VIDEO_EMUL_RX_INIT(n)                                                                      \\\n\tstatic struct video_emul_rx_data video_emul_rx_data_##n;                                       \\\n\tstatic const struct video_emul_rx_config video_emul_rx_config_##n = {                          \\\n\t\t.imager_cfg = NULL, /* Placeholder, if needed to link to imager */                         \\\n\t};                                                                                             \\\n\tDEVICE_DEFINE(video_emul_rx_##n, DT_INST_LABEL(n), video_emul_rx_init,                         \\\n\t\t\t\t  NULL, &video_emul_rx_data_##n, &video_emul_rx_config_##n, POST_KERNEL,           \\\n\t\t\t\t  CONFIG_VIDEO_INIT_PRIORITY, &video_emul_rx_ops);\n\nDT_INST_FOREACH_STATUS_OKAY(VIDEO_EMUL_RX_INIT)\n"
+          },
+          "applied_files": [
+            "drivers/video/video_emul_rx.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:2:10: fatal error: zephyr/drivers/video/video_emul.h: No such file or directory\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nPASS - test_video_frmival_nsec in 0.000 seconds\n===================================================================\nSTART - test_video_vbuf\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_set_mode: Applying mode 0x8062180 at 15 FPS\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000032 to 0x04\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000024 to 0x05\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000001 to 0x0a\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000001 to 0x01\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Queueing a frame of 153600 bytes in format 50424752 320x240\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Inserting 153600 bytes into buffer 0x8063558\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Queueing a frame of 153600 bytes in format 50424752 320x240\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Inserting 153600 bytes into buffer 0x8063558\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000000 to 0x01\nPASS - test_video_vbuf in 0.000 seconds\n===================================================================\nSTART - test_video_vbuf_too_small\nExpectation failed at WEST_TOPDIR/zephyr/tests/subsys/video/api/src/video_emul.c:227: video_common_test_video_vbuf_too_small: -ENOMEM not equal to video_enqueue(rx_dev, vbuf)\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Queueing a frame of 153600 bytes in format 50424752 320x240\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Inserting 153600 bytes into buffer (nil)\nSegmentation fault",
+    "protected_file_count": 7,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b1/v3_runtime_video_emul_rx_offbyone_93db4e5",
+    "api_events": [],
+    "started_at": "2026-10-13T19:21:27+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

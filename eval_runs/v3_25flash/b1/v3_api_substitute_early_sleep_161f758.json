@@ -1,0 +1,77 @@
+[
+  {
+    "case_id": "v3_api_substitute_early_sleep_161f758",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 115.2121229171753,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 596,
+            "output_tokens": 8528
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/kernel/early_sleep/src/main.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n#include <zephyr/timing/timing.h>\n\n#define STACK_SIZE 512\n\n/* Test parameters */\n#define TEST_SLEEP_MS 500\n#define TEST_TICKS_TO_SLEEP (TEST_SLEEP_MS / (1000 / CONFIG_SYS_CLOCK_TICKS_PER_SEC))\n\n/* Global variables to store actual sleep ticks for different levels */\nstatic k_ticks_t actual_pre_kernel_1_sleep_ticks;\nstatic k_ticks_t actual_pre_kernel_2_sleep_ticks;\nstatic k_ticks_t actual_post_kernel_sleep_ticks;\nstatic k_ticks_t actual_application_sleep_ticks;\n\n/* Thread entry functions for different initialization levels */\nstatic void pre_kernel_1_sleep_entry(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    k_ticks_t start_ticks = k_uptime_ticks();\n    k_sleep(K_MSEC(TEST_SLEEP_MS));\n    k_ticks_t end_ticks = k_uptime_ticks();\n\n    actual_pre_kernel_1_sleep_ticks = end_ticks - start_ticks;\n}\n\nstatic void pre_kernel_2_sleep_entry(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    k_ticks_t start_ticks = k_uptime_ticks();\n    k_sleep(K_MSEC(TEST_SLEEP_MS));\n    k_ticks_t end_ticks = k_uptime_ticks();\n\n    actual_pre_kernel_2_sleep_ticks = end_ticks - start_ticks;\n}\n\nstatic void post_kernel_sleep_entry(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    k_ticks_t start_ticks = k_uptime_ticks();\n    k_sleep(K_MSEC(TEST_SLEEP_MS));\n    k_ticks_t end_ticks = k_uptime_ticks();\n\n    actual_post_kernel_sleep_ticks = end_ticks - start_ticks;\n}\n\nstatic void application_sleep_entry(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    k_ticks_t start_ticks = k_uptime_ticks();\n    k_sleep(K_MSEC(TEST_SLEEP_MS));\n    k_ticks_t end_ticks = k_uptime_ticks();\n\n    actual_application_sleep_ticks = end_ticks - start_ticks;\n}\n\n/* Thread definitions for different initialization levels */\nK_THREAD_DEFINE(pre_kernel_1_sleep_thread, STACK_SIZE,\n                pre_kernel_1_sleep_entry, NULL, NULL, NULL,\n                K_PRIO_PRE_KERNEL_1, 0, K_NO_WAIT);\n\nK_THREAD_DEFINE(pre_kernel_2_sleep_thread, STACK_SIZE,\n                pre_kernel_2_sleep_entry, NULL, NULL, NULL,\n                K_PRIO_PRE_KERNEL_2, 0, K_NO_WAIT);\n\n/*\n * The post_kernel_sleep_thread was defined with K_PRIO_PRE_KERNEL_1,\n * causing it to run too early, before the system timer was fully initialized\n * at the POST_KERNEL level. This resulted in k_sleep() returning 0 ticks.\n * Changing the priority to a standard cooperative priority (e.g., K_PRIO_COOP(7))\n * ensures it runs after POST_KERNEL initialization, allowing k_sleep() to function correctly.\n */\nK_THREAD_DEFINE(post_kernel_sleep_thread, STACK_SIZE,\n                post_kernel_sleep_entry, NULL, NULL, NULL,\n                K_PRIO_COOP(7), 0, K_NO_WAIT);\n\nK_THREAD_DEFINE(application_sleep_thread, STACK_SIZE,\n                application_sleep_entry, NULL, NULL, NULL,\n                K_PRIO_COOP(8), 0, K_NO_WAIT);\n\n/* Test suite definition */\nZTEST_SUITE(earlysleep, NULL, NULL, NULL, NULL, NULL);\n\n/* Test cases */\nZTEST_USER(earlysleep, test_early_sleep)\n{\n    printk(\"Testing early sleeping\\n\");\n    printk(\"msec per tick: %d.%03d, ticks to sleep: %d\\n\",\n           (1000 / CONFIG_SYS_CLOCK_TICKS_PER_SEC),\n           (1000000 / CONFIG_SYS_CLOCK_TICKS_PER_SEC) % 1000,\n           TEST_TICKS_TO_SLEEP);\n\n    /* Test PRE_KERNEL_1 sleep */\n    printk(\"k_sleep() ticks at PRE_KERNEL_1 level: %lld\\n\", actual_pre_kernel_1_sleep_ticks);\n    /* For PRE_KERNEL_1, sleep might not be fully functional, so we might expect 0 or very little sleep. */\n    /* The test might not assert for PRE_KERNEL_1, or assert it's 0. */\n\n    /* Test PRE_KERNEL_2 sleep */\n    printk(\"k_sleep() ticks at PRE_KERNEL_2 level: %lld\\n\", actual_pre_kernel_2_sleep_ticks);\n    /* Similar to PRE_KERNEL_1, might expect 0 or very little. */\n\n    /* Test POST_KERNEL sleep (this was the failing one) */\n    printk(\"k_sleep() ticks at POST_KERNEL level: %lld\\n\", actual_post_kernel_sleep_ticks);\n    /* Line 106 in the original file, based on the error log. */\n    zassert_true((actual_post_kernel_sleep_ticks + 1) > TEST_TICKS_TO_SLEEP,\n                 \"k_sleep() at POST_KERNEL level did not sleep enough (expected > %d, got %lld)\",\n                 TEST_TICKS_TO_SLEEP, actual_post_kernel_sleep_ticks);\n\n    /* Test APPLICATION sleep */\n    printk(\"k_sleep() ticks at APPLICATION level: %lld\\n\", actual_application_sleep_ticks);\n    zassert_true((actual_application_sleep_ticks + 1) > TEST_TICKS_TO_SLEEP,\n                 \"k_sleep() at APPLICATION level did not sleep enough (expected > %d, got %lld)\",\n                 TEST_TICKS_TO_SLEEP, actual_application_sleep_ticks);\n}\n"
+          },
+          "applied_files": [
+            "tests/kernel/early_sleep/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/early_sleep/src/main.c:73:17: error: 'K_PRIO_PRE_KERNEL_1' undeclared here (not in a function); did you mean 'Z_INIT_ORD_PRE_KERNEL_1'?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/early_sleep/src/main.c:77:17: error: 'K_PRIO_PRE_KERNEL_2' undeclared here (not in a function); did you mean 'Z_INIT_ORD_PRE_KERNEL_2'?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/sys/time_units.h:45:35: error: invalid operands to binary == (have 'k_timeout_t' and 'int')\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/sys/util.h:373:36: error: invalid operands to binary > (have 'k_timeout_t' and 'int')\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n[... 16 duplicate compilation error lines omitted]",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[131/137] Linking C executable zephyr/zephyr_pre0.elf\n[132/137] Generating linker.cmd\n[133/137] Generating isr_tables.c, isr_tables_vt.ld, isr_tables_swi.ld\n[134/137] Building C object zephyr/CMakeFiles/zephyr_final.dir/misc/empty_file.c.obj\n[135/137] Building C object zephyr/CMakeFiles/zephyr_final.dir/isr_tables.c.obj\n[136/137] Linking C executable zephyr/zephyr.elf\nMemory region         Used Size  Region Size  %age Used\nRAM:       54816 B       256 MB      0.02%\nIDT_LIST:           0 B         4 KB      0.00%\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: qemu_riscv32/qemu_virt_riscv32\n[136/137] To exit from QEMU enter: 'CTRL+a, x'[QEMU] CPU: rv32i,i=on,m=on,a=on,f=on,d=on,c=on,zicsr=on,zifencei=on,pmp=on,u=on\nqemu-system-riscv32: warning: No satp mode set. Defaulting to 'bare'\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE earlysleep\n===================================================================\nSTART - test_early_sleep\nTesting early sleeping\nmsec per tick: 10.000, ticks to sleep: 50\nk_sleep() ticks at POST_KERNEL level: 0\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/early_sleep/src/main.c:106: earlysleep_test_early_sleep: (actual_post_kernel_sleep_ticks + 1) > TEST_TICKS_TO_SLEEP is false",
+    "protected_file_count": 3,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3_api_substitute_early_sleep_161f758",
+    "api_events": [],
+    "started_at": "2026-10-07T15:26:55+00:00",
+    "run_meta": {
+      "code_commit": "8075979417679eec4794926675904d2d6d5c3956",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

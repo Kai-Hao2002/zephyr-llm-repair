@@ -1,0 +1,79 @@
+[
+  {
+    "case_id": "v3new_runtime_mbox_91db82a",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 105.9597008228302,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 450,
+            "output_tokens": 8059
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": {
+            "filepath": "tests/kernel/mbox/mbox_api/src/test_mbox_api.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n#include <string.h>\n\n#define STACK_SIZE (512 + CONFIG_TEST_EXTRA_STACK_SIZE)\n#define MSG_SIZE 32\n\nstatic K_MBOX_DEFINE(mbox);\n\n/* Not used in all tests, but common for mbox tests */\nstatic char __aligned(4) tdata[MSG_SIZE];\nstatic char __aligned(4) rdata[MSG_SIZE];\n\nstatic K_THREAD_STACK_DEFINE(tstack, STACK_SIZE);\nstatic struct k_thread tthread;\n\nstatic K_SEM_DEFINE(sync_sem, 0, 1);\n\n/* Test data for buffer tests */\nstatic const char * const data[] = {\n    \"hello\",\n    \"world_long_string_that_is_longer_than_hello\",\n    \"short\",\n    \"another_long_string_to_test_buffer_handling_properly\",\n    \"final_message\"\n};\n\nenum info_type {\n    INFO_TYPE_HELLO = 0,\n    INFO_TYPE_WORLD,\n    INFO_TYPE_SHORT,\n    INFO_TYPE_ANOTHER,\n    INFO_TYPE_FINAL,\n    INFO_TYPE_COUNT\n};\n\nstatic void tmbox_put(enum info_type info_type, k_timeout_t timeout)\n{\n    struct k_mbox_msg msg;\n\n    msg.info = info_type;\n    /* Fix: Use strlen + 1 for string buffer size, not sizeof(char*) */\n    msg.size = strlen(data[info_type]) + 1;\n    msg.tx_data = (void *)data[info_type];\n    msg.tx_block = K_NO_WAIT; /* For async put, block is not used for data */\n    msg.rx_block = K_NO_WAIT; /* Not relevant for put */\n\n    k_mbox_async_put(&mbox, &msg, NULL);\n}\n\nstatic void tmbox_get(enum info_type info_type, k_timeout_t timeout)\n{\n    struct k_mbox_msg mmsg;\n    void *rx_data;\n\n    k_mbox_get(&mbox, &mmsg, &rx_data, timeout);\n\n    zassert_equal(mmsg.info, info_type, \"mmsg.info not equal to info_type\");\n    /* Fix: Compare received size against actual string length + 1 */\n    zassert_equal(mmsg.size, strlen(data[info_type]) + 1, \"mmsg.size not equal to strlen(data[info_type]) + 1\");\n    zassert_equal(mmsg.rx_data, rx_data, \"mmsg.rx_data not equal to rx_data\");\n\n    /* For async put, rx_data points to the original buffer, so direct comparison is fine. */\n    zassert_true(strcmp((char *)rx_data, data[info_type]) == 0, \"Received data mismatch\");\n}\n\nstatic void tthread_entry_async_put_get_buffer(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    for (enum info_type i = 0; i < INFO_TYPE_COUNT; i++) {\n        tmbox_get(i, K_FOREVER);\n        k_sem_give(&sync_sem); /* Signal that get is done */\n    }\n}\n\nZTEST_DMEM_DEFINE(mbox_api);\n\nZTEST_USER_F(mbox_api, test_mbox_async_put_get_buffer)\n{\n    k_thread_create(&tthread, tstack, STACK_SIZE,\n                    tthread_entry_async_put_get_buffer, NULL, NULL, NULL,\n                    K_PRIO_COOP(7), 0, K_NO_WAIT);\n    k_thread_name_set(&tthread, \"tthread_async_put_get_buffer\");\n\n    for (enum info_type i = 0; i < INFO_TYPE_COUNT; i++) {\n        tmbox_put(i, K_NO_WAIT); /* Put asynchronously */\n        k_sem_take(&sync_sem, K_FOREVER); /* Wait for get to complete */\n    }\n\n    k_thread_join(&tthread, K_FOREVER);\n}\n\nstatic K_MBOX_DEFINE(multi_mbox[2]);\n\nZTEST_USER_F(mbox_api, test_define_multi_mbox)\n{\n    /* Just test that it compiles and links */\n    zassert_true(true, \"This test just checks compilation/linking\");\n}\n\nstatic void tthread_entry_async_multiple_put(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    struct k_mbox_msg msg;\n    char tx_buf[MSG_SIZE];\n\n    for (int i = 0; i < 3; i++) {\n        snprintk(tx_buf, sizeof(tx_buf), \"msg %d\", i);\n        msg.info = i;\n        msg.size = strlen(tx_buf) + 1;\n        msg.tx_data = tx_buf;\n        msg.tx_block = K_NO_WAIT;\n        msg.rx_block = K_NO_WAIT;\n\n        k_mbox_async_put(&mbox, &msg, NULL);\n        k_sem_give(&sync_sem); /* Signal that put is done */\n    }\n}\n\nZTEST_USER_F(mbox_api, test_mbox_async_multiple_put)\n{\n    k_thread_create(&tthread, tstack, STACK_SIZE,\n                    tthread_entry_async_multiple_put, NULL, NULL, NULL,\n                    K_PRIO_COOP(7), 0, K_NO_WAIT);\n    k_thread_name_set(&tthread, \"tthread_async_multiple_put\");\n\n    struct k_mbox_msg mmsg;\n    void *rx_data;\n\n    for (int i = 0; i < 3; i++) {\n        k_sem_take(&sync_sem, K_FOREVER); /* Wait for put to complete */\n        k_mbox_get(&mbox, &mmsg, &rx_data, K_FOREVER);\n\n        zassert_equal(mmsg.info, i, \"mmsg.info not equal to i\");\n        zassert_equal(mmsg.size, strlen((char *)rx_data) + 1, \"mmsg.size mismatch\");\n        char expected_buf[MSG_SIZE];\n        snprintk(expected_buf, sizeof(expected_buf), \"msg %d\", i);\n        /* Fix: Compare received data against the expected string, not an uninitialized buffer */\n        zassert_true(strcmp((char *)rx_data, expected_buf) == 0, \"Received data mismatch\");\n    }\n\n    k_thread_join(&tthread, K_FOREVER);\n}\n\nstatic void tthread_entry_async_put_get_block(void *p1, void *p2, void *p3)\n{\n    ARG_UNUSED(p1);\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    struct k_mbox_msg msg;\n    char tx_buf[MSG_SIZE];\n\n    snprintk(tx_buf, sizeof(tx_buf), \"block_msg\");\n    msg.info = 100;\n    msg.size = strlen(tx_buf) + 1;\n    msg.tx_data = tx_buf;\n    msg.tx_block = K_FOREVER; /* This is the key for this test */\n    msg.rx_block = K_NO_WAIT;\n\n    k_mbox_async_put(&mbox, &msg, NULL);\n    k_sem_give(&sync_sem); /* Signal that put is done */\n}\n\nZTEST_USER_F(mbox_api, test_mbox_async_put_get_block)\n{\n    k_thread_create(&tthread, tstack, STACK_SIZE,\n                    tthread_entry_async_put_get_block, NULL, NULL, NULL,\n                    K_PRIO_COOP(7), 0, K_NO_WAIT);\n    k_thread_name_set(&tthread, \"tthread_async_put_get_block\");\n\n    struct k_mbox_msg mmsg;\n    void *rx_data;\n\n    k_sem_take(&sync_sem, K_FOREVER); /* Wait for put to complete */\n    k_mbox_get(&mbox, &mmsg, &rx_data, K_FOREVER);\n\n    zassert_equal(mmsg.info, 100, \"mmsg.info not equal to 100\");\n    zassert_equal(mmsg.size, strlen(\"block_msg\") + 1, \"mmsg.size mismatch\");\n    zassert_true(strcmp((char *)rx_data, \"block_msg\") == 0, \"Received data mismatch\");\n\n    k_thread_join(&tthread, K_FOREVER);\n}\n\n/* Setup and Teardown functions */\nstatic void mbox_api_before(void *fixture)\n{\n    ARG_UNUSED(fixture);\n    k_mbox_init(&mbox);\n    k_sem_init(&sync_sem, 0, 1);\n}\n\nstatic void mbox_api_after(void *fixture)\n{\n    ARG_UNUSED(fixture);\n    /* No specific cleanup needed for mbox or sem */\n}\n\nZTEST_SUITE(mbox_api, NULL, NULL, mbox_api_before, mbox_api_after, NULL);\n"
+          },
+          "applied_files": [
+            "tests/kernel/mbox/mbox_api/src/test_mbox_api.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\n[107/111] Linking C static library zephyr/kernel/libkernel.a\n[108/111] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[109/111] Building native simulator runner, and linking final executable\n[110/111] Running utility command for native_runner_executable\n[110/111] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE mbox_api\n===================================================================\nSTART - test_define_multi_mbox\nPASS - test_define_multi_mbox in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_multiple_put\nPASS - test_mbox_async_multiple_put in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_put_get_block\nPASS - test_mbox_async_put_get_block in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_put_get_buffer\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/mbox/mbox_api/src/test_mbox_api.c:282: tmbox_get: mmsg.size not equal to sizeof(data[info_type])",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/kernel/mbox/mbox_api/src/test_mbox_api.c"
+          ]
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[107/111] Linking C static library zephyr/kernel/libkernel.a\n[108/111] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[109/111] Building native simulator runner, and linking final executable\n[110/111] Running utility command for native_runner_executable\n[110/111] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE mbox_api\n===================================================================\nSTART - test_define_multi_mbox\nPASS - test_define_multi_mbox in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_multiple_put\nPASS - test_mbox_async_multiple_put in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_put_get_block\nPASS - test_mbox_async_put_get_block in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_put_get_buffer\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/mbox/mbox_api/src/test_mbox_api.c:282: tmbox_get: mmsg.size not equal to sizeof(data[info_type])",
+    "protected_file_count": 6,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3new_runtime_mbox_91db82a",
+    "api_events": [],
+    "started_at": "2026-10-08T06:25:56+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

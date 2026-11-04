@@ -1,0 +1,75 @@
+[
+  {
+    "case_id": "v3_runtime_bmi160_emul_reg_oob_577e42a_fx",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 255.83234906196594,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 784,
+            "output_tokens": 65050
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": {
+            "filepath": "drivers/sensor/bmi160/bmi160_emul.c",
+            "content": "#include <zephyr/drivers/sensor.h>\n#include <zephyr/drivers/spi.h>\n#include <zephyr/drivers/spi_emul.h>\n#include <zephyr/kernel.h>\n#include <zephyr/logging/log.h>\n#include \"bmi160.h\"\n\nLOG_MODULE_REGISTER(bmi160_emul, CONFIG_SENSOR_LOG_LEVEL);\n\n#define BMI160_REG_MAX_ADDR 0x80\n\nstruct bmi160_emul_data {\n\tstruct spi_emul_data emul_data;\n\tuint8_t regs[BMI160_REG_MAX_ADDR];\n};\n\nstatic int bmi160_emul_read_reg(const struct device *dev, uint8_t reg_addr, uint8_t *val)\n{\n\tstruct bmi160_emul_data *data = dev->data;\n\n\tif (reg_addr >= BMI160_REG_MAX_ADDR) {\n\t\tLOG_ERR(\"Invalid register address 0x%02x for read\", reg_addr);\n\t\treturn -EINVAL;\n\t}\n\n\t*val = data->regs[reg_addr];\n\treturn 0;\n}\n\nstatic int bmi160_emul_write_reg(const struct device *dev, uint8_t reg_addr, uint8_t val)\n{\n\tstruct bmi160_emul_data *data = dev->data;\n\n\tif (reg_addr >= BMI160_REG_MAX_ADDR) {\n\t\tLOG_ERR(\"Invalid register address 0x%02x for write\", reg_addr);\n\t\treturn -EINVAL;\n\t}\n\n\tdata->regs[reg_addr] = val;\n\treturn 0;\n}\n\nstatic int bmi160_emul_get_reg_value_range(const struct device *dev, uint8_t reg_addr,\n\t\t\t\t\t    uint8_t *val, uint8_t mask, uint8_t shift)\n{\n\tint ret;\n\tuint8_t reg_val;\n\n\tret = bmi160_emul_read_reg(dev, reg_addr, &reg_val);\n\tif (ret < 0) {\n\t\treturn ret;\n\t}\n\n\t*val = (reg_val & mask) >> shift;\n\treturn 0;\n}\n\nstatic int bmi160_emul_set_reg_value_range(const struct device *dev, uint8_t reg_addr,\n\t\t\t\t\t    uint8_t val, uint8_t mask, uint8_t shift)\n{\n\tint ret;\n\tuint8_t reg_val;\n\n\tret = bmi160_emul_read_reg(dev, reg_addr, &reg_val);\n\tif (ret < 0) {\n\t\treturn ret;\n\t}\n\n\treg_val = (reg_val & ~mask) | ((val << shift) & mask);\n\n\treturn bmi160_emul_write_reg(dev, reg_addr, reg_val);\n}\n\nstatic int bmi160_emul_transfer_spi(const struct spi_emul *emul, struct spi_message *msg,\n\t\t\t\t    bool write)\n{\n\tstruct bmi160_emul_data *data = emul->data;\n\tstruct spi_buf *tx_buf = &msg->spi_bufs[0].buf;\n\tstruct spi_buf *rx_buf = &msg->spi_bufs[0].buf;\n\tuint8_t reg_addr;\n\tint ret = 0;\n\n\tif (tx_buf->len < 1) {\n\t\treturn -EINVAL;\n\t}\n\n\treg_addr = ((uint8_t *)tx_buf->buf)[0];\n\n\tif (write) {\n\t\t/* Write operation: first byte is address, subsequent bytes are data */\n\t\tif (tx_buf->len < 2) {\n\t\t\treturn -EINVAL;\n\t\t}\n\t\tfor (size_t i = 1; i < tx_buf->len; i++) {\n\t\t\tret = bmi160_emul_write_reg(emul->dev, reg_addr + i - 1,\n\t\t\t\t\t\t((uint8_t *)tx_buf->buf)[i]);\n\t\t\tif (ret < 0) {\n\t\t\t\treturn ret;\n\t\t\t}\n\t\t}\n\t} else {\n\t\t/* Read operation: first byte is address (MSB set), subsequent bytes are data */\n\t\treg_addr &= ~BIT(7); /* Clear R/W bit */\n\n\t\tif (rx_buf->len < 2) {\n\t\t\treturn -EINVAL;\n\t\t}\n\n\t\t/* First byte is dummy read, actual data starts from second byte */\n\t\tfor (size_t i = 1; i < rx_buf->len; i++) {\n\t\t\tret = bmi160_emul_read_reg(emul->dev, reg_addr + i - 1,\n\t\t\t\t\t\t&((uint8_t *)rx_buf->buf)[i]);\n\t\t\tif (ret < 0) {\n\t\t\t\treturn ret;\n\t\t\t}\n\t\t}\n\t}\n\n\treturn ret;\n}\n\nstatic int bmi160_emul_init(const struct device *dev)\n{\n\tstruct bmi160_emul_data *data = dev->data;\n\n\t/* Initialize all registers to 0, then set known default values */\n\t(void)memset(data->regs, 0, sizeof(data->regs));\n\n\tdata->regs[BMI160_CHIP_ID_ADDR] = BMI160_CHIP_ID;\n\n\tspi_emul_init(&data->emul_data, dev, bmi160_emul_transfer_spi);\n\n\treturn 0;\n}\n\nconst struct bmi160_emul_api {\n\tint (*read_reg)(const struct device *dev, uint8_t reg_addr, uint8_t *val);\n\tint (*write_reg)(const struct device *dev, uint8_t reg_addr, uint8_t val);\n\tint (*get_reg_value_range)(const struct device *dev, uint8_t reg_addr,\n\t\t\t\t   uint8_t *val, uint8_t mask, uint8_t shift);\n\tint (*set_reg_value_range)(const struct device *dev, uint8_t reg_addr,\n\t\t\t\t   uint8_t val, uint8_t mask, uint8_t shift);\n} bmi160_emul_api_funcs = {\n\t.read_reg = bmi160_emul_read_reg,\n\t.write_reg = bmi160_emul_write_reg,\n\t.get_reg_value_range = bmi160_emul_get_reg_value_range,\n\t.set_reg_value_range = bmi160_emul_set_reg_value_range,\n};\n\n#define BMI160_EMUL_DEFINE(n) \\\n\tstatic struct bmi160_emul_data bmi160_emul_data_##n; \\\n\tDEVICE_DT_DEFINE(DT_NODELABEL(bmi160_emul_##n), \\\n\t\t\t bmi160_emul_init, NULL, \\\n\t\t\t &bmi160_emul_data_##n, NULL, POST_KERNEL, \\\n\t\t\t CONFIG_SENSOR_INIT_PRIORITY, \\\n\t\t\t &bmi160_emul_api_funcs);\n\nDT_FOREACH_STATUS_OKAY(bosch_bmi160_emul, BMI160_EMUL_DEFINE)\n"
+          },
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file 'drivers/sensor/bmi160/bmi160_emul.c' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[00:00:00.000,000] <inf> spi_emul_ctlr: Register emulator 'bmi@3' at cs 3\n\n[00:00:00.000,000] <inf> sensing: sensing init begin...\n[00:00:00.000,000] <inf> sensing: sensing init, sensor:base-accel-gyro, state:0\n[00:00:00.000,000] <inf> sensing: sensing init, sensor:lid-accel-gyro, state:0\n[00:00:00.000,000] <inf> sensing: init sensor, reporter:base-accel-gyro, client:hinge-angle, connection:0(0x80641e0)\n[00:00:00.000,000] <inf> sensing: init sensor, reporter:lid-accel-gyro, client:hinge-angle, connection:1(0x8064218)\n[00:00:00.000,000] <inf> sensing: sensing init, sensor:hinge-angle, state:0\n[00:00:00.000,000] <inf> sensing: sensing init, sensor:base-accel-gyro, state:0\n[00:00:00.000,000] <inf> sensing: sensing init, sensor:lid-accel-gyro, state:0\n[00:00:00.000,000] <inf> sensing: create sensing runtime thread ok\n[00:00:00.059,700] <inf> phy_3d_sensor: base-accel-gyro: Underlying device: bmi@68\n[00:00:00.119,400] <inf> phy_3d_sensor: lid-accel-gyro: Underlying device: bmi@3\n[00:00:00.119,400] <inf> hinge_angle: hinge-angle:Found reporter 0: base-accel-gyro\n[00:00:00.119,400] <inf> hinge_angle: hinge-angle:Found reporter 1: lid-accel-gyro\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE sensing_tests\n===================================================================\nSTART - test_bmi160_emul_get_reg_value_range\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/sensing/src/main.c:112: sensing_tests_test_bmi160_emul_get_reg_value_range: (ret not equal to -EINVAL)",
+    "protected_file_count": 7,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3_runtime_bmi160_emul_reg_oob_577e42a_fx",
+    "api_events": [],
+    "started_at": "2026-10-10T08:47:54+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

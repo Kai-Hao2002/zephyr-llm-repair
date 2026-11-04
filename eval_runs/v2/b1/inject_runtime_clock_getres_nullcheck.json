@@ -1,0 +1,70 @@
+[
+  {
+    "case_id": "inject_runtime_clock_getres_nullcheck",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 83.26330304145813,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-pro",
+            "input_tokens": 374,
+            "output_tokens": 13638
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": {
+            "filepath": "subsys/posix/time.c",
+            "content": "/*\n * Copyright (c) 2018 Foundries.io\n * Copyright (c) 2021, ATL Electronics\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <zephyr/posix/time.h>\n#include <zephyr/posix/signal.h>\n#include <zephyr/posix/errno.h>\n#include <zephyr/sys/util.h>\n#include <zephyr/sys/slist.h>\n#include <zephyr/init.h>\n\n#define NSEC_PER_SEC 1000000000LL\n\n#define TIMESPEC_VALID(ts) (((ts)->tv_nsec >= 0) && ((ts)->tv_nsec < NSEC_PER_SEC))\n\nstatic inline uint64_t timespec_to_ns(const struct timespec *ts, enum k_clock_rounding_mode mode)\n{\n\tuint64_t ns;\n\n\tif (unlikely(ts->tv_sec < 0 || !TIMESPEC_VALID(ts))) {\n\t\treturn 0;\n\t}\n\n\tif (u64_mul_overflow(ts->tv_sec, NSEC_PER_SEC, &ns)) {\n\t\treturn UINT64_MAX;\n\t}\n\n\tif (u64_add_overflow(ns, ts->tv_nsec, &ns)) {\n\t\treturn UINT64_MAX;\n\t}\n\n\treturn ns;\n}\n\n#ifdef CONFIG_POSIX_CLOCK\nstatic void posix_timer_expiry_fn(struct k_timer *timer);\n\n/*\n * We need to keep a list of timer objects created by the application.\n * This is required to map the timer object to the underlying kernel\n * timer object.\n */\nstatic sys_slist_t posix_timer_list;\n\nstatic struct k_spinlock lock;\n\nstruct posix_timer {\n\tsys_slist_node_t list_node;\n\tstruct k_timer ktimer;\n\ttimer_t timerid;\n\tstruct sigevent sev;\n\tuint32_t reload_ticks;\n\tbool in_use;\n};\n\n/* FIXME: timerid should be unique system wide. */\nstatic struct posix_timer timers[CONFIG_MAX_TIMER_COUNT];\n\nstatic int posix_timer_init(void)\n{\n\tsys_slist_init(&posix_timer_list);\n\treturn 0;\n}\n\nSYS_INIT(posix_timer_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);\n\nstatic struct posix_timer *get_posix_timer(timer_t timerid)\n{\n\tstruct posix_timer *ptimer;\n\n\tSYS_SLIST_FOR_EACH_CONTAINER(&posix_timer_list, ptimer, list_node) {\n\t\tif (ptimer->timerid == timerid) {\n\t\t\treturn ptimer;\n\t\t}\n\t}\n\n\treturn NULL;\n}\n\nstatic void posix_timer_expiry_fn(struct k_timer *timer)\n{\n\tstruct posix_timer *ptimer;\n\n\tptimer = CONTAINER_OF(timer, struct posix_timer, ktimer);\n\n\tif (ptimer->reload_ticks > 0) {\n\t\tk_timer_start(&ptimer->ktimer, K_TICKS(ptimer->reload_ticks),\n\t\t\t      K_TICKS(ptimer->reload_ticks));\n\t}\n\n\tif (ptimer->sev.sigev_notify == SIGEV_SIGNAL) {\n\t\tk_thread_kill((k_tid_t)ptimer->sev.sigev_notify_thread_id,\n\t\t\t      ptimer->sev.sigev_signo);\n\t} else if (ptimer->sev.sigev_notify == SIGEV_THREAD) {\n\t\tk_thread_create(ptimer->sev.sigev_notify_attributes,\n\t\t\t\tptimer->sev.sigev_notify_stack,\n\t\t\t\tK_THREAD_STACK_SIZEOF(\n\t\t\t\t\tptimer->sev.sigev_notify_stack),\n\t\t\t\t(k_thread_entry_t)ptimer->sev.sigev_notify_function,\n\t\t\t\tptimer->sev.sigev_value.sival_ptr, NULL, NULL,\n\t\t\t\tK_PRIO_COOP(1), 0, K_NO_WAIT);\n\t}\n}\n\nint timer_create(clockid_t clockid, struct sigevent *sevp, timer_t *timerid)\n{\n\tint i;\n\tk_spinlock_key_t key;\n\tstruct posix_timer *ptimer = NULL;\n\n\tif (clockid != CLOCK_MONOTONIC) {\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\tif (sevp == NULL || timerid == NULL) {\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\tkey = k_spin_lock(&lock);\n\n\tfor (i = 0; i < CONFIG_MAX_TIMER_COUNT; i++) {\n\t\tif (timers[i].in_use == false) {\n\t\t\tptimer = &timers[i];\n\t\t\tptimer->in_use = true;\n\t\t\tbreak;\n\t\t}\n\t}\n\n\tk_spin_unlock(&lock, key);\n\n\tif (ptimer == NULL) {\n\t\terrno = EAGAIN;\n\t\treturn -1;\n\t}\n\n\tptimer->timerid = (timer_t)ptimer;\n\t*timerid = ptimer->timerid;\n\tptimer->sev = *sevp;\n\n\tk_timer_init(&ptimer->ktimer, posix_timer_expiry_fn, NULL);\n\tsys_slist_append(&posix_timer_list, &ptimer->list_node);\n\n\treturn 0;\n}\n\nint timer_delete(timer_t timerid)\n{\n\tstruct posix_timer *ptimer;\n\n\tptimer = get_posix_timer(timerid);\n\tif (ptimer == NULL) {\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\tk_timer_stop(&ptimer->ktimer);\n\tsys_slist_find_and_remove(&posix_timer_list, &ptimer->list_node);\n\tptimer->in_use = false;\n\n\treturn 0;\n}\n\nint timer_gettime(timer_t timerid, struct itimerspec *its)\n{\n\tuint64_t remaining_ns;\n\tuint64_t reload_ns;\n\tstruct posix_timer *ptimer;\n\n\tptimer = get_posix_timer(timerid);\n\tif (ptimer == NULL || its == NULL) {\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\tremaining_ns = k_timer_remaining_get(&ptimer->ktimer);\n\tif (remaining_ns == 0U) {\n\t\t/* Timer is not running */\n\t\tits->it_value.tv_sec = 0;\n\t\tits->it_value.tv_nsec = 0;\n\t} else {\n\t\tremaining_ns = k_ticks_to_ns_floor64(remaining_ns);\n\t\tits->it_value.tv_sec = remaining_ns / NSEC_PER_SEC;\n\t\tits->it_value.tv_nsec = remaining_ns % NSEC_PER_SEC;\n\t}\n\n\treload_ns = k_ticks_to_ns_floor64(ptimer->reload_ticks);\n\tits->it_interval.tv_sec = reload_ns / NSEC_PER_SEC;\n\tits->it_interval.tv_nsec = reload_ns % NSEC_PER_SEC;\n\n\treturn 0;\n}\n\nint timer_settime(timer_t timerid, int flags, const struct itimerspec *its,\n\t\t  struct itimerspec *oits)\n{\n\tk_timeout_t duration, period;\n\tstruct posix_timer *ptimer;\n\n\tptimer = get_posix_timer(timerid);\n\tif (ptimer == NULL) {\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\tif (oits != NULL) {\n\t\t(void)timer_gettime(timerid, oits);\n\t}\n\n\tif (its == NULL || (its->it_value.tv_sec == 0 && its->it_value.tv_nsec == 0)) {\n\t\tk_timer_stop(&ptimer->ktimer);\n\t\treturn 0;\n\t}\n\n\tif (!TIMESPEC_VALID(its->it_value) || !TIMESPEC_VALID(its->it_interval)) {\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\tduration = K_NSEC(timespec_to_ns(&its->it_value, K_CLOCK_ROUND_TO_NEAREST));\n\tperiod = K_NSEC(timespec_to_ns(&its->it_interval, K_CLOCK_ROUND_TO_NEAREST));\n\n\tptimer->reload_ticks = period.ticks;\n\n\tif (flags & TIMER_ABSTIME) {\n\t\tstruct timespec now;\n\t\tk_timeout_t remaining;\n\t\tuint64_t now_ns, its_ns;\n\n\t\t(void)clock_gettime(CLOCK_MONOTONIC, &now);\n\t\tnow_ns = timespec_to_ns(&now, K_CLOCK_ROUND_DOWN);\n\t\tits_ns = timespec_to_ns(&its->it_value, K_CLOCK_ROUND_TO_NEAREST);\n\n\t\tif (its_ns > now_ns) {\n\t\t\tremaining = K_NSEC(its_ns - now_ns);\n\t\t} else {\n\t\t\t/* expire immediately */\n\t\t\tremaining = K_NO_WAIT;\n\t\t}\n\t\tduration = remaining;\n\t}\n\n\tk_timer_start(&ptimer->ktimer, duration, period);\n\n\treturn 0;\n}\n#endif /* CONFIG_POSIX_CLOCK */\n\nint clock_getres(clockid_t clock_id, struct timespec *res)\n{\n\tuint64_t period_ns;\n\n\tif (res == NULL) {\n\t\terrno = EFAULT;\n\t\treturn -1;\n\t}\n\n\tswitch (clock_id) {\n\tcase CLOCK_MONOTONIC:\n\t\tperiod_ns = k_ticks_to_ns_floor64(1);\n\t\tbreak;\n#ifdef CONFIG_POSIX_CLOCK_REALTIME\n\tcase CLOCK_REALTIME:\n\t\tperiod_ns = k_ticks_to_ns_floor64(1);\n\t\tbreak;\n#endif\n\tdefault:\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\tres->tv_sec = period_ns / NSEC_PER_SEC;\n\tres->tv_nsec = period_ns % NSEC_PER_SEC;\n\n\treturn 0;\n}\n\nint clock_gettime(clockid_t clock_id, struct timespec *ts)\n{\n\tuint64_t ticks;\n\tuint64_t nsecs;\n\n\tif (ts == NULL) {\n\t\terrno = EFAULT;\n\t\treturn -1;\n\t}\n\n\tswitch (clock_id) {\n\tcase CLOCK_MONOTONIC:\n\t\tticks = k_uptime_ticks();\n\t\tnsecs = k_ticks_to_ns_floor64(ticks);\n\t\tts->tv_sec = nsecs / NSEC_PER_SEC;\n\t\tts->tv_nsec = nsecs % NSEC_PER_SEC;\n\t\tbreak;\n#ifdef CONFIG_POSIX_CLOCK_REALTIME\n\tcase CLOCK_REALTIME:\n\t\t(void)posix_clock_realtime_get(ts);\n\t\tbreak;\n#endif\n\tdefault:\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\treturn 0;\n}\n\nint clock_settime(clockid_t clock_id, const struct timespec *ts)\n{\n\tif (ts == NULL) {\n\t\terrno = EFAULT;\n\t\treturn -1;\n\t}\n\n\tif (!TIMESPEC_VALID(ts)) {\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\tswitch (clock_id) {\n#ifdef CONFIG_POSIX_CLOCK_REALTIME\n\tcase CLOCK_REALTIME:\n\t\treturn posix_clock_realtime_set(ts);\n#endif\n\tcase CLOCK_MONOTONIC:\n\tdefault:\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n}\n\nint clock_nanosleep(clockid_t clock_id, int flags,\n\t\t    const struct timespec *rqtp, struct timespec *rmtp)\n{\n\tuint64_t ns;\n\tk_timeout_t t;\n\n\tif (rqtp == NULL) {\n\t\terrno = EFAULT;\n\t\treturn -1;\n\t}\n\n\tif (rqtp->tv_sec < 0 || !TIMESPEC_VALID(rqtp)) {\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\tif (clock_id != CLOCK_MONOTONIC) {\n\t\terrno = ENOTSUP;\n\t\treturn -1;\n\t}\n\n\tns = timespec_to_ns(rqtp, K_CLOCK_ROUND_TO_NEAREST);\n\tt = K_NSEC(ns);\n\n\tif (flags == 0) {\n\t\tk_sleep(t);\n\t} else if (flags == TIMER_ABSTIME) {\n\t\tuint64_t ticks = k_uptime_ticks();\n\t\tuint64_t current_ns = k_ticks_to_ns_floor64(ticks);\n\n\t\tif (ns > current_ns) {\n\t\t\tk_sleep(K_NSEC(ns - current_ns));\n\t\t}\n\t} else {\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\tif (rmtp != NULL) {\n\t\trmtp->tv_sec = 0;\n\t\trmtp->tv_nsec = 0;\n\t}\n\n\treturn 0;\n}\n"
+          },
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file 'subsys/posix/time.c' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_CLOCK_MONOTONIC__SIGEV_THREAD\nPASS - test_CLOCK_MONOTONIC__SIGEV_THREAD in 2.120 seconds\n===================================================================\nSTART - test_CLOCK_REALTIME__SIGEV_SIGNAL\nPASS - test_CLOCK_REALTIME__SIGEV_SIGNAL in 2.120 seconds\n===================================================================\nSTART - test_CLOCK_REALTIME__SIGEV_THREAD\nPASS - test_CLOCK_REALTIME__SIGEV_THREAD in 2.120 seconds\n===================================================================\nSTART - test_TIMER_ABSTIME_no_uint32_truncation\nPASS - test_TIMER_ABSTIME_no_uint32_truncation in 0.420 seconds\n===================================================================\nSTART - test_TIMER_ABSTIME_reference_clock\nPASS - test_TIMER_ABSTIME_reference_clock in 0.420 seconds\n===================================================================\nSTART - test_clock_getcpuclockid\nPASS - test_clock_getcpuclockid in 0.000 seconds\n===================================================================\nSTART - test_clock_getres\nSegmentation fault",
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/b1/inject_runtime_clock_getres_nullcheck",
+    "api_events": [],
+    "started_at": "2026-09-26T07:44:02+00:00",
+    "run_meta": {
+      "code_commit": "538b7706719863a3dea78dc56e2c9df57e2888c9",
+      "code_dirty": false,
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-pro",
+        "pro": "gemini-2.5-pro",
+        "embedding": "models/gemini-embedding-001"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

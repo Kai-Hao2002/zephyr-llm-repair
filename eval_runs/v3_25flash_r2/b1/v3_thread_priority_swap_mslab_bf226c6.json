@@ -1,0 +1,86 @@
+[
+  {
+    "case_id": "v3_thread_priority_swap_mslab_bf226c6",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 250.12461709976196,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 622,
+            "output_tokens": 9729
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/kernel/mem_slab/mslab_concept/src/test_mslab_alloc_wait.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n\n#define STACK_SIZE (512 + K_THREAD_STACK_SIZEOF(k_mem_slab_t))\n#define NUM_BLOCKS 2\n#define BLOCK_SIZE 64\n\nK_MEM_SLAB_DEFINE(mslab1, BLOCK_SIZE, NUM_BLOCKS, 4);\nstatic void *blocks[NUM_BLOCKS]; /* To hold allocated blocks */\n\n/*\n * This function tests the k_mem_slab_alloc timeout behavior.\n * It is expected to fill the slab, then attempt an allocation with a timeout,\n * expecting it to fail with -EAGAIN.\n */\nstatic void tmslab_alloc_wait_timeout(void) {\n    void *block;\n    int ret;\n\n    /* 1. Allocate all blocks from mslab1 to make it full. */\n    for (int i = 0; i < NUM_BLOCKS; i++) { /* Ensure loop iterates NUM_BLOCKS times */\n        ret = k_mem_slab_alloc(&mslab1, &blocks[i], K_NO_WAIT);\n        zassert_equal(ret, 0, \"Failed to allocate block %d initially\", i);\n    }\n\n    /* At this point, mslab1 should be full. */\n    /* 2. Attempt to allocate another block with a timeout. */\n    /* This call should fail with -EAGAIN because the slab is full and the timeout expires. */\n    ret = k_mem_slab_alloc(&mslab1, &block, K_MSEC(100)); /* TIMEOUT is K_MSEC(100) */\n    zassert_equal(ret, -EAGAIN, \"k_mem_slab_alloc(&mslab1, &block, TIMEOUT) == -EAGAIN is false\");\n\n    /* Clean up: free the blocks */\n    for (int i = 0; i < NUM_BLOCKS; i++) {\n        k_mem_slab_free(&mslab1, blocks[i]);\n    }\n}\n\n/* Test thread for priority waiting scenario */\nK_THREAD_STACK_DEFINE(tstack, STACK_SIZE);\nstruct k_thread tdata;\nstatic K_SEM_DEFINE(thread_sem, 0, 1);\n\nvoid high_prio_thread_entry(void *p1, void *p2, void *p3) {\n    ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);\n\n    /* Wait for the low-priority thread to start waiting */\n    k_sem_take(&thread_sem, K_FOREVER);\n\n    /* Free a block, allowing the waiting thread to proceed */\n    k_mem_slab_free(&mslab1, blocks[0]); /* Free one of the blocks allocated by main thread */\n}\n\n/*\n * This function tests a scenario where a low-priority thread waits for a block,\n * and a high-priority thread frees it.\n */\nstatic void test_mslab_alloc_wait_prio_impl(void) {\n    int ret;\n    void *block;\n\n    /* 1. Allocate all blocks except one from mslab1 */\n    for (int i = 0; i < NUM_BLOCKS - 1; i++) {\n        ret = k_mem_slab_alloc(&mslab1, &blocks[i], K_NO_WAIT);\n        zassert_equal(ret, 0, \"Failed to allocate block %d initially\", i);\n    }\n\n    /* 2. Create a high-priority thread that will free a block */\n    k_thread_create(&tdata, tstack, STACK_SIZE,\n                    high_prio_thread_entry, NULL, NULL, NULL,\n                    K_PRIO_PREEMPT(0), 0, K_NO_WAIT);\n    k_thread_name_set(&tdata, \"high_prio_thread\");\n\n    /* 3. Attempt to allocate the last block with a timeout from the current (lower priority) thread. */\n    /* This thread will wait. */\n    k_sem_give(&thread_sem); /* Signal high-priority thread to free a block */\n\n    ret = k_mem_slab_alloc(&mslab1, &block, K_MSEC(500)); /* Wait for a block */\n    zassert_equal(ret, 0, \"Allocation in low-priority thread failed\");\n\n    /* Clean up */\n    k_mem_slab_free(&mslab1, block);\n    for (int i = 1; i < NUM_BLOCKS - 1; i++) { /* blocks[0] was freed by high_prio_thread_entry */\n        k_mem_slab_free(&mslab1, blocks[i]);\n    }\n    k_thread_abort(&tdata); /* Ensure thread is cleaned up */\n}\n\n/* Test setup and teardown */\nstatic void mslab_concept_setup(void) {\n    /* No specific setup needed beyond K_MEM_SLAB_DEFINE */\n}\n\nstatic void mslab_concept_teardown(void) {\n    /* No specific teardown needed if tests clean up after themselves */\n}\n\nZTEST_SUITE(mslab_concept, NULL, mslab_concept_setup, NULL, mslab_concept_teardown, NULL);\n\nZTEST(mslab_concept, test_mslab_alloc_wait_prio) {\n    /* The error log points to tmslab_alloc_wait_timeout as the source of the assertion failure. */\n    /* This test likely combines the timeout behavior with priority waiting. */\n    tmslab_alloc_wait_timeout();\n    test_mslab_alloc_wait_prio_impl();\n}\n"
+          },
+          "applied_files": [
+            "tests/kernel/mem_slab/mslab_concept/src/test_mslab_alloc_wait.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/mem_slab/mslab_concept/src/test_mslab_alloc_wait.c:4:49: error: 'k_mem_slab_t' undeclared here (not in a function); did you mean 'k_mem_slab'?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:294:26: error: initialization of 'void * (*)(void)' from incompatible pointer type 'void (*)(void)' [-Wincompatible-pointer-types]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:296:26: error: initialization of 'void (*)(void *)' from incompatible pointer type 'void (*)(void)' [-Wincompatible-pointer-types]\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[139/147] Generating irq_int_vector_map.o\n[140/147] Generating irq_vectors_alloc.o\n[141/147] Generating gdt.bin\n[142/147] Generating gdt.o\n[143/147] Generating pagetables.bin\n[144/147] Generating pagetables.o\n[145/147] Building C object zephyr/CMakeFiles/zephyr_final.dir/misc/empty_file.c.obj\n[146/147] Linking C executable zephyr/zephyr.elf\nMemory region         Used Size  Region Size  %age Used\nRAM:      192616 B        31 MB      0.59%\nIDT_LIST:           0 B         2 KB      0.00%\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: qemu_x86/atom\n[146/147] To exit from QEMU enter: 'CTRL+a, x'[QEMU] CPU: qemu32,+nx,+pae\nSeaBIOS (version zephyr-v1.16.3-2-0-gf8da0cc-zephyr)\nBooting from ROM..\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE mslab_concept\n===================================================================\nSTART - test_mslab_alloc_wait_prio\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/mem_slab/mslab_concept/src/test_mslab_alloc_wait.c:25: tmslab_alloc_wait_timeout: k_mem_slab_alloc(&mslab1, &block, TIMEOUT) == -EAGAIN is false",
+    "protected_file_count": 5,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b1/v3_thread_priority_swap_mslab_bf226c6",
+    "api_events": [
+      {
+        "kind": "retry",
+        "what": "b1_zero_shot",
+        "attempt": 1,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 112
+      }
+    ],
+    "started_at": "2026-10-13T19:48:33+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

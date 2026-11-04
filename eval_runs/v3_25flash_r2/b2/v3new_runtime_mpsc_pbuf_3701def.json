@@ -1,0 +1,97 @@
+[
+  {
+    "case_id": "v3new_runtime_mpsc_pbuf_3701def",
+    "category": "runtime_crash",
+    "pipeline": "b2",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 183.18417596817017,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b2_single_agent_rag",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 27001,
+            "output_tokens": 21123
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "```\ntests/lib/mpsc_pbuf/src/main.c\n<<<<<<<< SEARCH\n\texp_dropped_data[0] = 0;\n\texp_dropped_len[0] = w;\n\texp_drop_cnt = 1;\n\n\tfor (uintptr_t i = 0; i < repeat; i++) {\n\t\ttest_ext_item.data.data = i;\n\t\tmpsc_pbuf_put_word_ext(&buffer, test_ext_item.item, (void *)i);\n\t}\n\n\tzassert_equal(drop_cnt, exp_drop_cnt,\n\t\t\t\"Unexpected number of dropped messages: %d (exp: %d)\",\n\t\t\tdrop_cnt, exp_drop_cnt);\n========\n\texp_dropped_data[0] = 0;\n\texp_dropped_len[0] = w;\n\t/* For buffer.size = 8, w = 2, repeat = 5. Expected drops = 5 - (8-1)/2 = 5 - 3 = 2.\n\t * So we need to prepare for a second drop.\n\t */\n\texp_dropped_data[1] = 1; /* Expected ext_data for the second dropped packet (i=1) */\n\texp_dropped_len[1] = w;\n\texp_drop_cnt = repeat - (buffer.size - 1) / w;\n\n\tfor (uintptr_t i = 0; i < repeat; i++) {\n\t\t/* The 'data' field in test_ext_item.data is not used by mpsc_pbuf_put_word_ext.\n\t\t * The actual data is passed as the 'ext_data' argument.\n\t\t */\n\t\tmpsc_pbuf_put_word_ext(&buffer, test_ext_item.item, (void *)i);\n\t}\n\n\tzassert_equal(drop_cnt, exp_drop_cnt,\n\t\t\t\"Unexpected number of dropped messages: %d (exp: %d)\",\n\t\t\tdrop_cnt, exp_drop_cnt);\n>>>>>>>> REPLACE\n```\n```\ntests/lib/mpsc_pbuf/src/main.c\n<<<<<<<< SEARCH\n\tsize_t w = (sizeof(uint32_t) + sizeof(void *)) / sizeof(uint32_t);\n\tint repeat = 1 + buffer.size / w;\n\tstatic const int len = sizeof(struct test_data_ext) / sizeof(uint32_t);\n\tstruct test_data_ext item = {\n\t\t.hdr = {\n\t\t\t.valid = 1,\n\t\t\t.len = len\n\t\t}\n\t};\n\n\texp_dropped_data[0] = 0;\n\texp_dropped_len[0] = w;\n\texp_drop_cnt = 1;\n========\n\tstatic const int len = sizeof(struct test_data_ext) / sizeof(uint32_t);\n\t/* Calculate repeat based on the actual item length 'len' */\n\tint repeat = 1 + (buffer.size - 1) / len;\n\tstruct test_data_ext item = {\n\t\t.hdr = {\n\t\t\t.valid = 1,\n\t\t\t.len = len\n\t\t}\n\t};\n\n\texp_dropped_data[0] = 0;\n\texp_dropped_len[0] = len; /* Use actual item length for expected dropped length */\n\texp_drop_cnt = 1;\n>>>>>>>> REPLACE\n```\n```\ntests/lib/mpsc_pbuf/src/main.c\n<<<<<<<< SEARCH\n\tfor (int i = 0; i < exp_dropped_len[drop_cnt] - 1; i++) {\n\t\tint err = memcmp(packet->data, &exp_dropped_data[drop_cnt],\n\t\t\t\t sizeof(uint32_t));\n\n\n\t\tzassert_equal(err, 0);\n\t}\n========\n\t/* The 'data' field in the header is the base for the data array content.\n\t * This validation is only applicable for test_data_var packets.\n\t * For test_data_ext and mpsc_pbuf_put_word_ext packets, the 'data'\n\t * field is a single void pointer or the second word of the packet.\n\t */\n\tif (hdr_packet->len == 1) {\n\t\t/* 1-word packet, no additional data to check */\n\t} else if (hdr_packet->len == PUT_EXT_LEN) {\n\t\t/* This is a 2-word packet from mpsc_pbuf_put_word_ext.\n\t\t * The second word is the 'ext_data' passed to the function.\n\t\t * The test currently sets exp_dropped_data[drop_cnt] to the\n\t\t * expected value of this 'ext_data'.\n\t\t */\n\t\tconst uint32_t *words = (const uint32_t *)item;\n\t\tzassert_equal(words[1], exp_dropped_data[drop_cnt],\n\t\t\t      \"(%d) Ext data mismatch. Got:%08x, Expected: %08x\",\n\t\t\t      drop_cnt, words[1], (uint32_t)exp_dropped_data[drop_cnt]);\n\t} else if (hdr_packet->len == (sizeof(struct test_data_ext) / sizeof(uint32_t))) {\n\t\t/* This is a 3-word test_data_ext packet from mpsc_pbuf_put_data.\n\t\t * The third word is the 'void *data' field of test_data_ext.\n\t\t * The test currently sets exp_dropped_data[drop_cnt] to the\n\t\t * expected value of this 'void *data' field.\n\t\t */\n\t\tstruct test_data_ext *ext_packet = (struct test_data_ext *)item;\n\t\tzassert_equal((uint32_t)ext_packet->data, exp_dropped_data[drop_cnt],\n\t\t\t      \"(%d) Ext data mismatch. Got:%08x, Expected: %08x\",\n\t\t\t      drop_cnt, (uint32_t)ext_packet->data, (uint32_t)exp_dropped_data[drop_cnt]);\n\t} else {\n\t\t/* This is a variable-length test_data_var packet.\n\t\t * The 'data' array content is expected to be 'hdr.data + index'.\n\t\t */\n\t\tstruct test_data_var *var_packet = (struct test_data_var *)item;\n\t\tfor (int i = 0; i < var_packet->hdr.len - 1; i++) {\n\t\t\tzassert_equal(var_packet->data[i], var_packet->hdr.data + i,\n\t\t\t\t      \"(%d) Data mismatch at index %d. Got:%08x, Expected: %08x\",\n\t\t\t\t      drop_cnt, i, var_packet->data[i], var_packet->hdr.data + i);\n\t\t}\n\t}\n>>>>>>>> REPLACE\n```",
+          "applied_files": [
+            "tests/lib/mpsc_pbuf/src/main.c",
+            "tests/lib/mpsc_pbuf/src/main.c",
+            "tests/lib/mpsc_pbuf/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nSTART - test_item_put_word_ext_overwrite\nPASS - test_item_put_word_ext_overwrite in 0.000 seconds\n===================================================================\nSTART - test_overwrite\nPASS - test_overwrite in 0.000 seconds\n===================================================================\nSTART - test_overwrite_consistency\nPASS - test_overwrite_consistency in 0.000 seconds\n===================================================================\nSTART - test_overwrite_while_claimed2\nPASS - test_overwrite_while_claimed2 in 0.000 seconds\n===================================================================\nSTART - test_overwrite_while_claimed\nPASS - test_overwrite_while_claimed in 0.000 seconds\n===================================================================\nSTART - test_pending_alloc\nPASS - test_pending_alloc in 0.040 seconds\n===================================================================\nSTART - test_put_data_overwrite\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/mpsc_pbuf/src/main.c:63: drop: drop_cnt < exp_drop_cnt is false",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": [
+            "tests/bsim/bluetooth/ll/conn/src/test_connect2.c",
+            "tests/kernel/mp/src/main.c",
+            "tests/bsim/net/sockets/echo_test/src/echo_test.c",
+            "tests/bsim/bluetooth/samples/central_hr_peripheral_hr/src/sample_test.c",
+            "tests/drivers/counter/counter_seconds/src/main.c",
+            "tests/bsim/bluetooth/audio_samples/bap_unicast_client/src/unicast_client_sample_test.c",
+            "tests/bsim/bluetooth/audio_samples/bap_broadcast_sink/src/broadcast_sink_test.c",
+            "tests/bsim/bluetooth/audio_samples/cap/acceptor/src/cap_acceptor_sample_test.c"
+          ],
+          "restored_files": [
+            "tests/lib/mpsc_pbuf/src/main.c"
+          ]
+        }
+      }
+    ],
+    "first_retrieval_files": [
+      "tests/bsim/bluetooth/ll/conn/src/test_connect2.c",
+      "tests/kernel/mp/src/main.c",
+      "tests/bsim/net/sockets/echo_test/src/echo_test.c",
+      "tests/bsim/bluetooth/samples/central_hr_peripheral_hr/src/sample_test.c",
+      "tests/drivers/counter/counter_seconds/src/main.c",
+      "tests/bsim/bluetooth/audio_samples/bap_unicast_client/src/unicast_client_sample_test.c",
+      "tests/bsim/bluetooth/audio_samples/bap_broadcast_sink/src/broadcast_sink_test.c",
+      "tests/bsim/bluetooth/audio_samples/cap/acceptor/src/cap_acceptor_sample_test.c"
+    ],
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_item_put_word_ext_overwrite\nPASS - test_item_put_word_ext_overwrite in 0.000 seconds\n===================================================================\nSTART - test_overwrite\nPASS - test_overwrite in 0.000 seconds\n===================================================================\nSTART - test_overwrite_consistency\nPASS - test_overwrite_consistency in 0.000 seconds\n===================================================================\nSTART - test_overwrite_while_claimed2\nPASS - test_overwrite_while_claimed2 in 0.000 seconds\n===================================================================\nSTART - test_overwrite_while_claimed\nPASS - test_overwrite_while_claimed in 0.000 seconds\n===================================================================\nSTART - test_pending_alloc\nPASS - test_pending_alloc in 0.040 seconds\n===================================================================\nSTART - test_put_data_overwrite\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/mpsc_pbuf/src/main.c:63: drop: drop_cnt < exp_drop_cnt is false",
+    "protected_file_count": 5,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b2/v3new_runtime_mpsc_pbuf_3701def",
+    "api_events": [],
+    "started_at": "2026-10-14T14:37:06+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

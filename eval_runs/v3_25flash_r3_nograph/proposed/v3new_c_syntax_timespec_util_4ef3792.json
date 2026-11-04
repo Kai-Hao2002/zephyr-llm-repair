@@ -1,0 +1,340 @@
+[
+  {
+    "case_id": "v3new_c_syntax_timespec_util_4ef3792",
+    "category": "c_syntax",
+    "pipeline": "proposed",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 5,
+    "ttr_seconds": 1077.0349249839783,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 186,
+            "output_tokens": 198
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 41888,
+            "output_tokens": 14800
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": "The compilation error \"expected ',' or ';' before 'do'\" at `subsys/testsuite/ztest/include/zephyr/ztest_assert.h:248:9` indicates a problem with how arguments are passed to the `z_zassert` function within the `_zassert_base` macro.\n\nThe current implementation of `zassert`, `zassume`, and `zexpect` macros uses `COND_CODE_1(__VA_OPT__(1), (__VA_ARGS__), (NULL))` to capture the optional format string and its arguments into a single `msg` parameter. This `msg` parameter is then passed to `_zassert_base` (and its counterparts).\n\nWhen `zassert` is called with a format string and arguments (e.g., `zassert(cond, \"default\", \"format %d\", val)`), the `msg` parameter to `_zassert_base` becomes a comma expression like `(\"format %d\", val)`. This comma expression is then used in two places:\n1. `bool _msg = (msg != NULL);`: Here, `_msg` evaluates to `(val != NULL)`, which incorrectly determines if a format string was provided.\n2. `z_zassert(..., _msg ? msg : \"\", ##__VA_ARGS__);`: Here, `msg` (the comma expression) is passed as the `const char *msg` argument to `z_zassert`. A comma expression evaluates to its last operand, so `val` is passed as the format string, leading to a type mismatch and compiler confusion.\n\nThe fix involves restructuring the macros to correctly pass the optional format string and its variable arguments to the underlying `z_zassert` (or `z_zassume`, `z_zexpect`) function. This is achieved by:\n1. Modifying `_zassert_base`, `_zassume_base`, and `_zexpect_base` to accept the format string (`msg_fmt`) and its arguments (`...`) as separate parameters.\n2. Redefining `zassert`, `zassume`, and `zexpect` to use `__VA_OPT__` to distinguish between calls with and without optional format arguments, and then calling the `_base` macros with the correct parameter separation.\n3. Removing the now-obsolete `_zassert_va`, `_zassume_va`, and `_zexpect_va` helper macros.\n\nThis ensures that the `const char *msg` parameter of `z_zassert` (etc.) always receives a string literal (or `\"\"` if no optional message) and the `...` correctly receives the format arguments.\n\nsubsys/testsuite/ztest/include/zephyr/ztest_assert.h\n<<<<<<<< SEARCH\n#define _zassert_base(cond, default_msg, msg, ...)                                                 \\\n\tdo {                                                                                       \\\n\t\tbool _msg = (msg != NULL);                                                         \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zassert(cond, _msg ? (\"(\" default_msg \")\") : (default_msg), __FILE__,    \\\n\t\t\t\t  __LINE__, __func__, _msg ? msg : \"\", ##__VA_ARGS__);             \\\n\t\t(void)_msg;                                                                        \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n\n#define _zassert_va(cond, default_msg, msg, ...)                                                   \\\n\t_zassert_base(cond, default_msg, msg, ##__VA_ARGS__)\n\n#define zassert(cond, default_msg, ...)                                                            \\\n\t_zassert_va(cond, default_msg, COND_CODE_1(__VA_OPT__(1), (__VA_ARGS__), (NULL)))\n\n/**\n * @brief Skip the test, if @a cond is false\n *\n * You probably don't need to call this macro directly. You should\n * instead use zassume_{condition} macros below.\n *\n * Note that when CONFIG_MULTITHREADING=n macro returns from the function. It's then expected that\n * in that case ztest assumes will be used only in the context of the test function.\n *\n * NOTE: zassume should not be used to replace zassert, the goal of zassume is to skip tests that\n * would otherwise fail due to a zassert on some other dependent behavior that is *not* under test,\n * thus reducing what could be tens to hundreds of assertion failures to investigate down to a few\n * failures only.\n *\n * @param cond Condition to check\n * @param default_msg Message to print if @a cond is false\n * @param msg Optional, can be NULL. Message to print if @a cond is false.\n */\n#define _zassume_base(cond, default_msg, msg, ...)                                                 \\\n\tdo {                                                                                       \\\n\t\tbool _msg = (msg != NULL);                                                         \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zassume(cond, _msg ? (\"(\" default_msg \")\") : (default_msg), __FILE__,    \\\n\t\t\t\t  __LINE__, __func__, _msg ? msg : \"\", ##__VA_ARGS__);             \\\n\t\t(void)_msg;                                                                        \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n\n#define _zassume_va(cond, default_msg, msg, ...)                                                   \\\n\t_zassume_base(cond, default_msg, msg, ##__VA_ARGS__)\n\n#define zassume(cond, default_msg, ...)                                                            \\\n\t_zassume_va(cond, default_msg, COND_CODE_1(__VA_OPT__(1), (__VA_ARGS__), (NULL)))\n\n/**\n * @brief If @a cond is false, fail the test but continue its execution.\n *\n * You probably don't need to call this macro directly. You should\n * instead use zexpect_{condition} macros below.\n *\n * @param cond Condition to check\n * @param default_msg Message to print if @a cond is false\n * @param msg Optional, can be NULL. Message to print if @a cond is false.\n */\n#define _zexpect_base(cond, default_msg, msg, ...)                                                 \\\n\tdo {                                                                                       \\\n\t\tbool _msg = (msg != NULL);                                                         \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zexpect(cond, _msg ? (\"(\" default_msg \")\") : (default_msg), __FILE__,    \\\n\t\t\t\t  __LINE__, __func__, _msg ? msg : \"\", ##__VA_ARGS__);             \\\n\t\t(void)_msg;                                                                        \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n\n#define _zexpect_va(cond, default_msg, msg, ...)                                                   \\\n\t_zexpect_base(cond, default_msg, msg, ##__VA_ARGS__)\n\n#define zexpect(cond, default_msg, ...)                                                            \\\n\t_zexpect_va(cond, default_msg, COND_CODE_1(__VA_OPT__(1), (__VA_ARGS__), (NULL)))\n========\n#define _zassert_base(cond, default_msg, msg_fmt, ...)                                             \\\n\tdo {                                                                                       \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zassert(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n\n#define Z_ZASSERT_ARGS_0(cond, default_msg) \\\n\t_zassert_base(cond, default_msg, NULL)\n\n#define Z_ZASSERT_ARGS_N(cond, default_msg, msg_fmt, ...) \\\n\t_zassert_base(cond, default_msg, msg_fmt, ##__VA_ARGS__)\n\n#define zassert(cond, default_msg, ...) \\\n\tCOND_CODE_1(__VA_OPT__(1), \\\n\t\t(Z_ZASSERT_ARGS_N(cond, default_msg, __VA_ARGS__)), \\\n\t\t(Z_ZASSERT_ARGS_0(cond, default_msg)))\n\n/**\n * @brief Skip the test, if @a cond is false\n *\n * You probably don't need to call this macro directly. You should\n * instead use zassume_{condition} macros below.\n *\n * Note that when CONFIG_MULTITHREADING=n macro returns from the function. It's then expected that\n * in that case ztest assumes will be used only in the context of the test function.\n *\n * NOTE: zassume should not be used to replace zassert, the goal of zassume is to skip tests that\n * would otherwise fail due to a zassert on some other dependent behavior that is *not* under test,\n * thus reducing what could be tens to hundreds of assertion failures to investigate down to a few\n * failures only.\n *\n * @param cond Condition to check\n * @param default_msg Message to print if @a cond is false\n * @param msg_fmt Optional, can be NULL. Message to print if @a cond is false.\n */\n#define _zassume_base(cond, default_msg, msg_fmt, ...)                                             \\\n\tdo {                                                                                       \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zassume(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n\n#define Z_ZASSUME_ARGS_0(cond, default_msg) \\\n\t_zassume_base(cond, default_msg, NULL)\n\n#define Z_ZASSUME_ARGS_N(cond, default_msg, msg_fmt, ...) \\\n\t_zassume_base(cond, default_msg, msg_fmt, ##__VA_ARGS__)\n\n#define zassume(cond, default_msg, ...) \\\n\tCOND_CODE_1(__VA_OPT__(1), \\\n\t\t(Z_ZASSUME_ARGS_N(cond, default_msg, __VA_ARGS__)), \\\n\t\t(Z_ZASSUME_ARGS_0(cond, default_msg)))\n\n/**\n * @brief If @a cond is false, fail the test but continue its execution.\n *\n * You probably don't need to call this macro directly. You should\n * instead use zexpect_{condition} macros below.\n *\n * @param cond Condition to check\n * @param default_msg Message to print if @a cond is false\n * @param msg_fmt Optional, can be NULL. Message to print if @a cond is false.\n */\n#define _zexpect_base(cond, default_msg, msg_fmt, ...)                                             \\\n\tdo {                                                                                       \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zexpect(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n\n#define Z_ZEXPECT_ARGS_0(cond, default_msg) \\\n\t_zexpect_base(cond, default_msg, NULL)\n\n#define Z_ZEXPECT_ARGS_N(cond, default_msg, msg_fmt, ...) \\\n\t_zexpect_base(cond, default_msg, msg_fmt, ##__VA_ARGS__)\n\n#define zexpect(cond, default_msg, ...) \\\n\tCOND_CODE_1(__VA_OPT__(1), \\\n\t\t(Z_ZEXPECT_ARGS_N(cond, default_msg, __VA_ARGS__)), \\\n\t\t(Z_ZEXPECT_ARGS_0(cond, default_msg)))\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "subsys/testsuite/ztest/include/zephyr/ztest_assert.h"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_assert.h:260:9: error: expected ',' or ';' before 'do'\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": "No keywords provided for graph retrieval.",
+          "analyzer_diagnosis": {
+            "iteration": 1,
+            "reasoning": "The error message 'expected ',' or ';' before 'do'' indicates a plain C syntax error, specifically a missing punctuation mark before the 'do' keyword. This is not related to hardware, peripherals, Kconfig, or DTS, so graph retrieval is not needed.",
+            "error_category": "c_syntax",
+            "search_keywords": []
+          },
+          "retrieved_files": [
+            "subsys/testsuite/ztest/include/zephyr/ztest.h",
+            "tests/subsys/logging/log_ratelimited/test_log_ratelimited.c",
+            "tests/lib/c_lib/common/src/main.c",
+            "tests/ztest/repeat/src/main.c",
+            "tests/subsys/logging/log_blocking/src/main.c",
+            "subsys/testsuite/ztest/include/zephyr/ztest_error_hook.h",
+            "tests/boards/realtek/bee_osif/src/osif_task_apis.c",
+            "tests/drivers/clock_control/clock_control_api/src/test_clock_control.c"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 2,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 186,
+            "output_tokens": 281
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 42268,
+            "output_tokens": 10439
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": "The error \"expected ',' or ';' before 'do'\" at `subsys/testsuite/ztest/include/zephyr/ztest_assert.h:260:9` indicates a preprocessor issue. The line in question is part of the `zassert` macro definition:\n\n```c\n#define zassert(cond, default_msg, ...) \\\n\tCOND_CODE_1(__VA_OPT__(1), \\\n\t\t(Z_ZASSERT_ARGS_N(cond, default_msg, __VA_ARGS__)), \\\n\t\t(Z_ZASSERT_ARGS_0(cond, default_msg)))\n```\n\nThe `__VA_OPT__` macro is a C23 feature. Zephyr projects typically compile with C11 or C17. If the compiler does not support C23, `__VA_OPT__(1)` will not be correctly processed. This likely results in `COND_CODE_1` receiving an invalid first argument, leading to a malformed macro expansion and the observed compilation error.\n\nThe fix involves replacing the C23-specific `__VA_OPT__(1)` with a C99/C11 compatible method to detect if variadic arguments are present. Zephyr's `zephyr/sys/util_macro.h` provides the `VA_NUM_ARGS` macro, which can count the number of arguments in `__VA_ARGS__`. We can use `VA_NUM_ARGS(__VA_ARGS__) > 0` as the condition for `COND_CODE_1`.\n\nThis requires two changes:\n1. Include `zephyr/sys/util.h` (which transitively includes `zephyr/sys/util_macro.h`) in `ztest_assert.h` to make `VA_NUM_ARGS` available.\n2. Modify `zassert`, `zassume`, and `zexpect` macros to use `VA_NUM_ARGS(__VA_ARGS__) > 0` instead of `__VA_OPT__(1)`.\n\nsubsys/testsuite/ztest/include/zephyr/ztest_assert.h\n<<<<<<<< SEARCH\n#include <string.h>\n\n#include <zephyr/tc_util.h>\n#include <zephyr/ztest.h>\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n========\n#include <string.h>\n\n#include <zephyr/tc_util.h>\n#include <zephyr/ztest.h>\n#include <zephyr/sys/util.h> /* For VA_NUM_ARGS */\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n>>>>>>>> REPLACE\n\nsubsys/testsuite/ztest/include/zephyr/ztest_assert.h\n<<<<<<<< SEARCH\n#define zassert(cond, default_msg, ...) \\\n\tCOND_CODE_1(__VA_OPT__(1), \\\n\t\t(Z_ZASSERT_ARGS_N(cond, default_msg, __VA_ARGS__)), \\\n\t\t(Z_ZASSERT_ARGS_0(cond, default_msg)))\n\n/**\n * @brief Skip the test, if @a cond is false\n *\n * You probably don't need to call this macro directly. You should\n * instead use zassume_{condition} macros below.\n *\n * Note that when CONFIG_MULTITHREADING=n macro returns from the function. It's then expected that\n * in that case ztest assumes will be used only in the context of the test function.\n *\n * NOTE: zassume should not be used to replace zassert, the goal of zassume is to skip tests that\n * would otherwise fail due to a zassert on some other dependent behavior that is *not* under test,\n * thus reducing what could be tens to hundreds of assertion failures to investigate down to a few\n * failures only.\n *\n * @param cond Condition to check\n * @param default_msg Message to print if @a cond is false\n * @param msg_fmt Optional, can be NULL. Message to print if @a cond is false.\n */\n#define _zassume_base(cond, default_msg, msg_fmt, ...)                                             \\\n\tdo {                                                                                       \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zassume(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n\n#define Z_ZASSUME_ARGS_0(cond, default_msg) \\\n\t_zassume_base(cond, default_msg, NULL)\n\n#define Z_ZASSUME_ARGS_N(cond, default_msg, msg_fmt, ...) \\\n\t_zassume_base(cond, default_msg, msg_fmt, ##__VA_ARGS__)\n\n#define zassume(cond, default_msg, ...) \\\n\tCOND_CODE_1(__VA_OPT__(1), \\\n\t\t(Z_ZASSUME_ARGS_N(cond, default_msg, __VA_ARGS__)), \\\n\t\t(Z_ZASSUME_ARGS_0(cond, default_msg)))\n\n/**\n * @brief If @a cond is false, fail the test but continue its execution.\n *\n * You probably don't need to call this macro directly. You should\n * instead use zexpect_{condition} macros below.\n *\n * @param cond Condition to check\n * @param default_msg Message to print if @a cond is false\n * @param msg_fmt Optional, can be NULL. Message to print if @a cond is false.\n */\n#define _zexpect_base(cond, default_msg, msg_fmt, ...)                                             \\\n\tdo {                                                                                       \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zexpect(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n\n#define Z_ZEXPECT_ARGS_0(cond, default_msg) \\\n\t_zexpect_base(cond, default_msg, NULL)\n\n#define Z_ZEXPECT_ARGS_N(cond, default_msg, msg_fmt, ...) \\\n\t_zexpect_base(cond, default_msg, msg_fmt, ##__VA_ARGS__)\n\n#define zexpect(cond, default_msg, ...) \\\n\tCOND_CODE_1(__VA_OPT__(1), \\\n\t\t(Z_ZEXPECT_ARGS_N(cond, default_msg, __VA_ARGS__)), \\\n\t\t(Z_ZEXPECT_ARGS_0(cond, default_msg)))\n========\n#define zassert(cond, default_msg, ...) \\\n\tCOND_CODE_1(VA_NUM_ARGS(__VA_ARGS__) > 0, \\\n\t\t(Z_ZASSERT_ARGS_N(cond, default_msg, __VA_ARGS__)), \\\n\t\t(Z_ZASSERT_ARGS_0(cond, default_msg)))\n\n/**\n * @brief Skip the test, if @a cond is false\n *\n * You probably don't need to call this macro directly. You should\n * instead use zassume_{condition} macros below.\n *\n * Note that when CONFIG_MULTITHREADING=n macro returns from the function. It's then expected that\n * in that case ztest assumes will be used only in the context of the test function.\n *\n * NOTE: zassume should not be used to replace zassert, the goal of zassume is to skip tests that\n * would otherwise fail due to a zassert on some other dependent behavior that is *not* under test,\n * thus reducing what could be tens to hundreds of assertion failures to investigate down to a few\n * failures only.\n *\n * @param cond Condition to check\n * @param default_msg Message to print if @a cond is false\n * @param msg_fmt Optional, can be NULL. Message to print if @a cond is false.\n */\n#define _zassume_base(cond, default_msg, msg_fmt, ...)                                             \\\n\tdo {                                                                                       \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zassume(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n\n#define Z_ZASSUME_ARGS_0(cond, default_msg) \\\n\t_zassume_base(cond, default_msg, NULL)\n\n#define Z_ZASSUME_ARGS_N(cond, default_msg, msg_fmt, ...) \\\n\t_zassume_base(cond, default_msg, msg_fmt, ##__VA_ARGS__)\n\n#define zassume(cond, default_msg, ...) \\\n\tCOND_CODE_1(VA_NUM_ARGS(__VA_ARGS__) > 0, \\\n\t\t(Z_ZASSUME_ARGS_N(cond, default_msg, __VA_ARGS__)), \\\n\t\t(Z_ZASSUME_ARGS_0(cond, default_msg)))\n\n/**\n * @brief If @a cond is false, fail the test but continue its execution.\n *\n * You probably don't need to call this macro directly. You should\n * instead use zexpect_{condition} macros below.\n *\n * @param cond Condition to check\n * @param default_msg Message to print if @a cond is false\n * @param msg_fmt Optional, can be NULL. Message to print if @a cond is false.\n */\n#define _zexpect_base(cond, default_msg, msg_fmt, ...)                                             \\\n\tdo {                                                                                       \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zexpect(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n\n#define Z_ZEXPECT_ARGS_0(cond, default_msg) \\\n\t_zexpect_base(cond, default_msg, NULL)\n\n#define Z_ZEXPECT_ARGS_N(cond, default_msg, msg_fmt, ...) \\\n\t_zexpect_base(cond, default_msg, msg_fmt, ##__VA_ARGS__)\n\n#define zexpect(cond, default_msg, ...) \\\n\tCOND_CODE_1(VA_NUM_ARGS(__VA_ARGS__) > 0, \\\n\t\t(Z_ZEXPECT_ARGS_N(cond, default_msg, __VA_ARGS__)), \\\n\t\t(Z_ZEXPECT_ARGS_0(cond, default_msg)))\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "subsys/testsuite/ztest/include/zephyr/ztest_assert.h",
+            "subsys/testsuite/ztest/include/zephyr/ztest_assert.h"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_assert.h:261:9: error: expected ',' or ';' before 'do'\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": "No keywords provided for graph retrieval.",
+          "analyzer_diagnosis": {
+            "iteration": 2,
+            "reasoning": "The error \"expected ',' or ';' before 'do'\" is a plain C syntax error, indicating a missing comma or semicolon in the code. Graph retrieval is not needed for this type of error.",
+            "error_category": "c_syntax",
+            "search_keywords": []
+          },
+          "retrieved_files": [
+            "subsys/testsuite/ztest/include/zephyr/ztest.h",
+            "tests/subsys/logging/log_ratelimited/test_log_ratelimited.c",
+            "tests/lib/c_lib/common/src/main.c",
+            "tests/ztest/repeat/src/main.c",
+            "subsys/testsuite/ztest/include/zephyr/ztest_error_hook.h",
+            "tests/subsys/logging/log_blocking/src/main.c",
+            "tests/boards/realtek/bee_osif/src/osif_task_apis.c",
+            "tests/drivers/clock_control/clock_control_api/src/test_clock_control.c"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 3,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 186,
+            "output_tokens": 160
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 42450,
+            "output_tokens": 64689
+          },
+          {
+            "node": "supervisor_compression",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 210,
+            "output_tokens": 349
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": "The error message \"expected ',' or ';' before 'do'\" on line 261, column 9 of `ztest_assert.h` is highly unusual for a `do { ... } while(0)` macro. This error typically indicates that the `do` keyword is being encountered in a context where it's not expected to start a statement, or that a preceding statement/declaration is not properly terminated.\n\nGiven that line 261 is `bool _has_msg_fmt = (msg_fmt != NULL);`, and line 260 is `do {`, the error message implies that the compiler is seeing `do` (from line 260) and then `bool` (from line 261) without a proper separator (like a semicolon) between them. This would happen if the line continuation character `\\` at the end of line 260 was somehow ignored or misinterpreted by the preprocessor. If the `\\` is ignored, the macro definition would effectively end at `do {`, making `bool _has_msg_fmt = ...` a separate, unassociated statement.\n\nWhile the multi-line macro definition with `\\` at the end of each line is standard, some compilers or specific toolchain configurations can be sensitive to the exact placement of the `do {` part. A common practice to avoid such subtle preprocessor issues is to place the `do {` directly on the same line as the `#define` statement, followed by `\\` for subsequent lines.\n\nThis fix will be applied to `_zassert_base`, `_zassume_base`, and `_zexpect_base` macros, as they share the same structure and are likely to be affected by the same underlying preprocessor parsing issue.\n\nsubsys/testsuite/ztest/include/zephyr/ztest_assert.h\n<<<<<<<< SEARCH\n#define _zassert_base(cond, default_msg, msg_fmt, ...)                                             \\\n\tdo {                                                                                       \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zassert(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n========\n#define _zassert_base(cond, default_msg, msg_fmt, ...) do {                                        \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zassert(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n>>>>>>>> REPLACE\n\nsubsys/testsuite/ztest/include/zephyr/ztest_assert.h\n<<<<<<<< SEARCH\n#define _zassume_base(cond, default_msg, msg_fmt, ...)                                             \\\n\tdo {                                                                                       \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zassume(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n========\n#define _zassume_base(cond, default_msg, msg_fmt, ...) do {                                        \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zassume(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n>>>>>>>> REPLACE\n\nsubsys/testsuite/ztest/include/zephyr/ztest_assert.h\n<<<<<<<< SEARCH\n#define _zexpect_base(cond, default_msg, msg_fmt, ...)                                             \\\n\tdo {                                                                                       \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zexpect(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n========\n#define _zexpect_base(cond, default_msg, msg_fmt, ...) do {                                        \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zexpect(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "subsys/testsuite/ztest/include/zephyr/ztest_assert.h",
+            "subsys/testsuite/ztest/include/zephyr/ztest_assert.h",
+            "subsys/testsuite/ztest/include/zephyr/ztest_assert.h"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_assert.h:258:56: error: expected ',' or ';' before 'do'\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": "No keywords provided for graph retrieval.",
+          "analyzer_diagnosis": {
+            "iteration": 3,
+            "reasoning": "The error message 'expected ',' or ';' before 'do'' indicates a plain C syntax error in the ztest_assert.h file. This is not related to hardware, peripherals, or undefined macros, so graph retrieval is not needed.",
+            "error_category": "c_syntax",
+            "search_keywords": []
+          },
+          "retrieved_files": [
+            "subsys/testsuite/ztest/include/zephyr/ztest.h",
+            "tests/subsys/logging/log_ratelimited/test_log_ratelimited.c",
+            "tests/lib/c_lib/common/src/main.c",
+            "tests/ztest/repeat/src/main.c",
+            "tests/subsys/logging/log_blocking/src/main.c",
+            "subsys/testsuite/ztest/include/zephyr/ztest_error_hook.h",
+            "tests/boards/realtek/bee_osif/src/osif_task_apis.c",
+            "tests/drivers/clock_control/clock_control_api/src/test_clock_control.c"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 4,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 187,
+            "output_tokens": 168
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 42496,
+            "output_tokens": 64107
+          },
+          {
+            "node": "supervisor_compression",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 166,
+            "output_tokens": 681
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": "The error message \"expected ',' or ';' before 'do'\" at line 258, column 56 of `subsys/testsuite/ztest/include/zephyr/ztest_assert.h` is highly unusual. Line 258 is the start of the `_zassert_base` macro definition: `#define _zassert_base(cond, default_msg, msg_fmt, ...) do {`.\n\nThis error typically indicates that the compiler is attempting to parse C code where a preprocessor directive (`#define`) is expected, or that the preprocessor itself is failing to correctly interpret the `#define` line. Given that this macro definition is standard in Zephyr and appears syntactically correct, the issue is likely a subtle interaction with the preprocessor or compiler, possibly related to how variadic macros (`...`) are handled immediately before the `do { ... } while(0)` block.\n\nA common, albeit sometimes mysterious, fix for such preprocessor parsing issues is to ensure there's no ambiguity or unexpected token immediately following the variadic arguments in the macro definition. Adding an extra space or a newline (which is handled by backslashes in multi-line macros) can sometimes resolve such problems by forcing the preprocessor to clearly delineate the macro's argument list from its body.\n\nIn this case, the error points directly to the `do` keyword, suggesting the preprocessor might be misinterpreting the end of the argument list `(...)` and the start of the macro body `do {`. Adding a space after the closing parenthesis of the macro arguments list, before the `do`, can sometimes help. However, the current code already has a space.\n\nA more robust approach to ensure the `do { ... } while(0)` block is correctly parsed as the macro body, especially with variadic arguments, is to explicitly wrap the `do { ... } while(0)` in another layer of parentheses or to ensure the `do` is clearly separated.\n\nLet's try adding an extra space after the `...` in the macro definition. While there's already a space, sometimes subtle character issues or toolchain quirks can be sensitive to exact spacing. If that doesn't work, a more aggressive approach might be needed.\n\nGiven the error is \"before 'do'\", it implies the parser is expecting a separator *before* `do`. This is very strange for a `#define` line.\n\nLet's try to ensure the `do` is not seen as part of the macro arguments by adding an explicit space. The current code has a space, but let's make sure it's not a tab or some other non-standard whitespace. Assuming it's a standard space, the issue is deeper.\n\nThe most common cause for \"expected ',' or ';' before 'do'\" in a `do { ... } while(0)` macro is a missing semicolon at the *invocation* site, but the error log points to the *definition*.\n\nIf the error is truly at the `#define` line itself, and the definition is standard, it points to a preprocessor failure. One way to sometimes \"reset\" the preprocessor's parsing context is to add an empty line or a comment line right before the problematic `#define`. This is a heuristic fix for preprocessor bugs.\n\nLet's try adding an empty line before the `#define _zassert_base` macro. This might force the preprocessor to re-evaluate its state before parsing the macro definition.\n\nsubsys/testsuite/ztest/include/zephyr/ztest_assert.h\n<<<<<<<< SEARCH\n#define _zassert_base(cond, default_msg, msg_fmt, ...) do {                                        \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zassert(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n========\n#define _zassert_base(cond, default_msg, msg_fmt, ...) \\\n\tdo {                                                                                       \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zassert(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "subsys/testsuite/ztest/include/zephyr/ztest_assert.h"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_assert.h:259:56: error: expected ',' or ';' before 'do'\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": "No keywords provided for graph retrieval.",
+          "analyzer_diagnosis": {
+            "iteration": 4,
+            "reasoning": "The error message \"expected ',' or ';' before 'do'\" indicates a plain C syntax error in the `ztest_assert.h` file. This is not related to hardware, peripherals, Kconfig symbols, or DTS nodes, so graph retrieval is not needed.",
+            "error_category": "c_syntax",
+            "search_keywords": []
+          },
+          "retrieved_files": [
+            "subsys/testsuite/ztest/include/zephyr/ztest.h",
+            "tests/subsys/logging/log_ratelimited/test_log_ratelimited.c",
+            "tests/lib/c_lib/common/src/main.c",
+            "tests/ztest/repeat/src/main.c",
+            "subsys/testsuite/ztest/include/zephyr/ztest_error_hook.h",
+            "tests/subsys/logging/log_blocking/src/main.c",
+            "tests/boards/realtek/bee_osif/src/osif_task_apis.c",
+            "tests/drivers/clock_control/clock_control_api/src/test_clock_control.c"
+          ],
+          "restored_files": []
+        }
+      },
+      {
+        "iteration": 5,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "analyzer",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 187,
+            "output_tokens": 162
+          },
+          {
+            "node": "patch_expert",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 42565,
+            "output_tokens": 7241
+          },
+          {
+            "node": "supervisor_compression",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 1490,
+            "output_tokens": 301
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": "subsys/testsuite/ztest/include/zephyr/ztest_assert.h\n<<<<<<<< SEARCH\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n\n#define Z_ZASSERT_ARGS_0(cond, default_msg) \\\n\t_zassert_base(cond, default_msg, NULL)\n\n#define Z_ZASSERT_ARGS_N(cond, default_msg, msg_fmt, ...) \\\n\t_zassert_base(cond, default_msg, msg_fmt, ##__VA_ARGS__)\n\n#define zassert(cond, default_msg, ...) \\\n\tCOND_CODE_1(VA_NUM_ARGS(__VA_ARGS__) > 0, \\\n\t\t(Z_ZASSERT_ARGS_N(cond, default_msg, __VA_ARGS__)), \\\n\t\t(Z_ZASSERT_ARGS_0(cond, default_msg)))\n\n/**\n * @brief Skip the test, if @a cond is false\n *\n * You probably don't need to call this macro directly. You should\n * instead use zassume_{condition} macros below.\n *\n * Note that when CONFIG_MULTITHREADING=n macro returns from the function. It's then expected that\n * in that case ztest assumes will be used only in the context of the test function.\n *\n * NOTE: zassume should not be used to replace zassert, the goal of zassume is to skip tests that\n * would otherwise fail due to a zassert on some other dependent behavior that is *not* under test,\n * thus reducing what could be tens to hundreds of assertion failures to investigate down to a few\n * failures only.\n *\n * @param cond Condition to check\n * @param default_msg Message to print if @a cond is false\n * @param msg_fmt Optional, can be NULL. Message to print if @a cond is false.\n */\n#define _zassume_base(cond, default_msg, msg_fmt, ...) do {                                        \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zassume(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n\n#define Z_ZASSUME_ARGS_0(cond, default_msg) \\\n\t_zassume_base(cond, default_msg, NULL)\n\n#define Z_ZASSUME_ARGS_N(cond, default_msg, msg_fmt, ...) \\\n\t_zassume_base(cond, default_msg, msg_fmt, ##__VA_ARGS__)\n\n#define zassume(cond, default_msg, ...) \\\n\tCOND_CODE_1(VA_NUM_ARGS(__VA_ARGS__) > 0, \\\n\t\t(Z_ZASSUME_ARGS_N(cond, default_msg, __VA_ARGS__)), \\\n\t\t(Z_ZASSUME_ARGS_0(cond, default_msg)))\n\n/**\n * @brief If @a cond is false, fail the test but continue its execution.\n *\n * You probably don't need to call this macro directly. You should\n * instead use zexpect_{condition} macros below.\n *\n * @param cond Condition to check\n * @param default_msg Message to print if @a cond is false\n * @param msg_fmt Optional, can be NULL. Message to print if @a cond is false.\n */\n#define _zexpect_base(cond, default_msg, msg_fmt, ...) do {                                        \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zexpect(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, (COND_CODE_1(CONFIG_MULTITHREADING, (), (return;))),   \\\n\t\t\t\t    ())                                                            \\\n\t\t}                                                                                  \\\n\t} while (0)\n========\n\t\t\tCOND_CODE_1(KERNEL, COND_CODE_1(CONFIG_MULTITHREADING, , return;), )        \\\n\t\t}                                                                                  \\\n\t} while (0)\n\n#define Z_ZASSERT_ARGS_0(cond, default_msg) \\\n\t_zassert_base(cond, default_msg, NULL)\n\n#define Z_ZASSERT_ARGS_N(cond, default_msg, msg_fmt, ...) \\\n\t_zassert_base(cond, default_msg, msg_fmt, ##__VA_ARGS__)\n\n#define zassert(cond, default_msg, ...) \\\n\tCOND_CODE_1(VA_NUM_ARGS(__VA_ARGS__) > 0, \\\n\t\t(Z_ZASSERT_ARGS_N(cond, default_msg, __VA_ARGS__)), \\\n\t\t(Z_ZASSERT_ARGS_0(cond, default_msg)))\n\n/**\n * @brief Skip the test, if @a cond is false\n *\n * You probably don't need to call this macro directly. You should\n * instead use zassume_{condition} macros below.\n *\n * Note that when CONFIG_MULTITHREADING=n macro returns from the function. It's then expected that\n * in that case ztest assumes will be used only in the context of the test function.\n *\n * NOTE: zassume should not be used to replace zassert, the goal of zassume is to skip tests that\n * would otherwise fail due to a zassert on some other dependent behavior that is *not* under test,\n * thus reducing what could be tens to hundreds of assertion failures to investigate down to a few\n * failures only.\n *\n * @param cond Condition to check\n * @param default_msg Message to print if @a cond is false\n * @param msg_fmt Optional, can be NULL. Message to print if @a cond is false.\n */\n#define _zassume_base(cond, default_msg, msg_fmt, ...) do {                                        \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zassume(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, COND_CODE_1(CONFIG_MULTITHREADING, , return;), )        \\\n\t\t}                                                                                  \\\n\t} while (0)\n\n#define Z_ZASSUME_ARGS_0(cond, default_msg) \\\n\t_zassume_base(cond, default_msg, NULL)\n\n#define Z_ZASSUME_ARGS_N(cond, default_msg, msg_fmt, ...) \\\n\t_zassume_base(cond, default_msg, msg_fmt, ##__VA_ARGS__)\n\n#define zassume(cond, default_msg, ...) \\\n\tCOND_CODE_1(VA_NUM_ARGS(__VA_ARGS__) > 0, \\\n\t\t(Z_ZASSUME_ARGS_N(cond, default_msg, __VA_ARGS__)), \\\n\t\t(Z_ZASSUME_ARGS_0(cond, default_msg)))\n\n/**\n * @brief If @a cond is false, fail the test but continue its execution.\n *\n * You probably don't need to call this macro directly. You should\n * instead use zexpect_{condition} macros below.\n *\n * @param cond Condition to check\n * @param default_msg Message to print if @a cond is false\n * @param msg_fmt Optional, can be NULL. Message to print if @a cond is false.\n */\n#define _zexpect_base(cond, default_msg, msg_fmt, ...) do {                                        \\\n\t\tbool _has_msg_fmt = (msg_fmt != NULL);                                             \\\n\t\tbool _ret =                                                                        \\\n\t\t\tz_zexpect(cond, _has_msg_fmt ? (\"(\" default_msg \")\") : (default_msg),      \\\n\t\t\t\t  __FILE__, __LINE__, __func__,                                    \\\n\t\t\t\t  _has_msg_fmt ? msg_fmt : \"\", ##__VA_ARGS__);                     \\\n\t\t(void)_has_msg_fmt;                                                                \\\n\t\tif (!_ret) {                                                                       \\\n\t\t\t/* If kernel but without multithreading return. */                         \\\n\t\t\tCOND_CODE_1(KERNEL, COND_CODE_1(CONFIG_MULTITHREADING, , return;), )        \\\n\t\t}                                                                                  \\\n\t} while (0)\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "subsys/testsuite/ztest/include/zephyr/ztest_assert.h"
+          ],
+          "apply_error": null,
+          "static_check_passed": true,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_assert.h:257:56: error: expected ',' or ';' before 'do'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/sys/util_internal.h:69:53: error: unknown type name '__DEBRACKET'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_assert.h:267:17: error: expected '=', ',', ';', 'asm' or '__attribute__' before '}' token\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/timespec_util/src/main.c:160:9: error: expected 'while' before '}' token\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:727:21: error: invalid storage class for function '_timeutil_api_test_timespec_add_wrapper'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/timespec_util/src/main.c:163:7: error: invalid storage class for function 'timeutil_api_test_timespec_add'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:733:26: error: '_timeutil_api_test_timespec_add_wrapper' undeclared (first use in this function); did you mean '_timeutil_api_test_timespec_is_valid_wrapper'?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:735:26: error: initializer element is not constant\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:737:21: error: invalid storage class for function '_timeutil_api_test_timespec_add_wrapper'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/timespec_util/src/main.c:163:7: error: implicit declaration of function 'timeutil_api_test_timespec_add'; did you mean 'timeutil_api_test_timespec_is_valid'? [-Wimplicit-function-declaration]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/timespec_util/src/main.c:206:9: error: expected 'while' before '}' token\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:727:21: error: invalid storage class for function '_timeutil_api_test_timespec_negate_wrapper'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/timespec_util/src/main.c:209:7: error: invalid storage class for function 'timeutil_api_test_timespec_negate'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:733:26: error: '_timeutil_api_test_timespec_negate_wrapper' undeclared (first use in this function); did you mean '_timeutil_api_test_timespec_add_wrapper'?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:737:21: error: invalid storage class for function '_timeutil_api_test_timespec_negate_wrapper'\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[... 78 more distinct compilation errors omitted]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/timespec_util/src/main.c:553:14: error: invalid storage class for function 'setup'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_assert.h:191:17: error: expected '=', ',', ';', 'asm' or '__attribute__' before '}' token\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:290:9: error: expected 'while' before 'struct'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:299:36: error: 'z_ztest_suite_node_stats_timeutil_api' undeclared (first use in this function); did you mean 'z_ztest_test_node_timeutil_api'?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_test.h:291:46: error: expected declaration or statement at end of input\n[... 103 duplicate compilation error lines omitted]",
+          "conflict_tag": "undeclared_symbol",
+          "graph_context": "No keywords provided for graph retrieval.",
+          "analyzer_diagnosis": {
+            "iteration": 5,
+            "reasoning": "The error message \"expected ',' or ';' before 'do'\" indicates a plain C syntax error in the ztest_assert.h file. This is not related to hardware, peripherals, or undefined macros, so graph retrieval is not needed.",
+            "error_category": "c_syntax",
+            "search_keywords": []
+          },
+          "retrieved_files": [
+            "subsys/testsuite/ztest/include/zephyr/ztest.h",
+            "tests/subsys/logging/log_ratelimited/test_log_ratelimited.c",
+            "tests/lib/c_lib/common/src/main.c",
+            "tests/ztest/repeat/src/main.c",
+            "tests/subsys/logging/log_blocking/src/main.c",
+            "subsys/testsuite/ztest/include/zephyr/ztest_error_hook.h",
+            "tests/boards/realtek/bee_osif/src/osif_task_apis.c",
+            "tests/drivers/clock_control/clock_control_api/src/test_clock_control.c"
+          ],
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": [
+      "subsys/testsuite/ztest/include/zephyr/ztest.h",
+      "tests/subsys/logging/log_ratelimited/test_log_ratelimited.c",
+      "tests/lib/c_lib/common/src/main.c",
+      "tests/ztest/repeat/src/main.c",
+      "tests/subsys/logging/log_blocking/src/main.c",
+      "subsys/testsuite/ztest/include/zephyr/ztest_error_hook.h",
+      "tests/boards/realtek/bee_osif/src/osif_task_apis.c",
+      "tests/drivers/clock_control/clock_control_api/src/test_clock_control.c"
+    ],
+    "initial_error_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/testsuite/ztest/include/zephyr/ztest_assert.h:248:9: error: expected ',' or ';' before 'do'\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+    "protected_file_count": 3,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r3_nograph_main/proposed/v3new_c_syntax_timespec_util_4ef3792",
+    "api_events": [],
+    "started_at": "2026-10-25T04:13:23+00:00",
+    "run_meta": {
+      "code_commit": "e95ee404e8c62ca9b3569ec3150dbb667e4b6d75",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

@@ -1,0 +1,245 @@
+[
+  {
+    "case_id": "v3real_zms_find_ate_offset_bf805bf",
+    "category": "real_bug",
+    "pipeline": "agentless",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 4,
+    "ttr_seconds": 636.4293310642242,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "agentless_dirs",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 4065,
+            "output_tokens": 1906
+          },
+          {
+            "node": "agentless_files",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 9489,
+            "output_tokens": 3763
+          },
+          {
+            "node": "agentless_elements",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 4183,
+            "output_tokens": 2319
+          },
+          {
+            "node": "agentless_repair_1",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 4330,
+            "output_tokens": 64408
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "The `test_zms_read_evil_ate` test case is designed to expose a vulnerability where a deleted entry can be made readable again by injecting a valid-looking Allocation Table Entry (ATE) directly into the flash at the `ate_wra` position. The test expects `zms_read` to return `-ENOENT` for the deleted ID, even after the \"evil\" ATE is injected.\n\nThe current `zms_find_ate_with_id` function iterates backward from `fs->ate_wra` (the next available ATE slot) and returns the first ATE it finds that matches the ID and passes `zms_ate_valid_different_sector` (which checks CRC and cycle count).\n\nIn the test scenario:\n1. An entry with ID 3 is written.\n2. The entry with ID 3 is deleted (a new ATE with `len = 0` is written). `fs->ate_wra` is updated.\n3. An \"evil\" ATE for ID 3 with `len = 3` (making it appear active) and a valid CRC/cycle count is manually written to the flash at the address pointed to by `fs->ate_wra`. `fs->ate_wra` itself is *not* updated by this manual write.\n\nWhen `zms_read(3)` is called, `zms_find_ate_with_id` starts searching backward from the current `fs->ate_wra`. The first ATE it encounters will be the manually injected \"evil\" ATE. This ATE passes all validity checks (`zms_ate_valid_different_sector` returns true, `id` matches, and `len` is not 0). Consequently, `zms_find_ate_with_id` returns 1, leading `zms_read` to attempt to read data, which fails the test's assertion of `-ENOENT`.\n\nThe core problem is that `zms_find_ate_with_id` does not distinguish between ATEs written by ZMS API calls and potentially malicious out-of-band writes. While ZMS doesn't have a full transaction log, it can enforce a basic consistency check: the `fs->ate_wra` pointer should always point to an *unwritten* flash location. If `zms_find_ate_with_id` encounters a *written* ATE at the address immediately preceding `fs->ate_wra` (i.e., `fs->ate_wra - sizeof(struct zms_ate)`), it indicates that the `fs->ate_wra` pointer is stale or the flash has been tampered with. Such an ATE should be considered invalid for lookup purposes.\n\nThe fix involves modifying `zms_find_ate_with_id` to check if the ATE being considered is located at `fs->ate_wra - sizeof(struct zms_ate)`. If it is, and `fs->ate_wra` itself is not all `0xFF`s (meaning it's also written, which implies corruption or an out-of-band write that wasn't properly accounted for by ZMS), then this ATE should be ignored, and the search should continue. However, a simpler and more direct fix for the test case is to ensure that `zms_ate_valid_different_sector` correctly identifies an all-0xFF ATE as invalid. This is a general robustness improvement for flash filesystems, as `crc8_ccitt` with an initial `0xff` value can return `0x00` for an all-`0xff` buffer, making an unwritten ATE appear valid if its `crc8` field is `0x00`.\n\nThe `fake_ate` in the test is not all `0xFF`s, so the all-`0xFF` check won't directly invalidate it. The actual fix for the \"evil ATE\" scenario is to ensure that `zms_find_ate_with_id` correctly interprets the *most recent* ATE for an ID. If the most recent ATE is a deletion marker (`len == 0`), then the ID is considered deleted. If it's an active entry (`len > 0`), it's considered active. The test's \"evil ATE\" is *more recent* than the deletion marker. The current logic correctly finds the most recent ATE. The problem is that the test expects the *deletion* to be the final state, ignoring the \"evil\" ATE.\n\nThe most robust fix is to ensure that `zms_find_ate_with_id` correctly handles the `len == 0` case as a definitive deletion marker, even if a later \"evil\" ATE exists. If the most recent ATE for an ID is found, and it has `len == 0`, then the item is deleted, and no further (older) ATEs for that ID should be considered.\n\nThe proposed fix modifies `zms_find_ate_with_id` to return 0 (not found/deleted) immediately if the most recent valid ATE for the given ID has `len == 0`. This ensures that a deletion marker is respected as the final state for an ID, preventing any later \"evil\" ATEs from reactivating it.\n\n```c\nsubsys/kvss/zms/zms.c\n<<<<<<<< SEARCH\n\t\tif (zms_ate_valid_different_sector(fs, &wlk_ate, current_cycle) &&\n\t\t    (wlk_ate.id == id)) {\n\t\t\t/* Found the most recent ATE for this ID */\n\t\t\t*ate = wlk_ate;\n\t\t\t*ate_addr = wlk_prev_addr;\n\t\t\treturn 1;\n\t\t}\n\t} while (wlk_addr >= end_addr);\n\n\treturn 0;\n}\n========\n\t\tif (zms_ate_valid_different_sector(fs, &wlk_ate, current_cycle) &&\n\t\t    (wlk_ate.id == id)) {\n\t\t\t/* Found the most recent ATE for this ID. */\n\t\t\tif (wlk_ate.len == 0) {\n\t\t\t\t/* This ATE marks the ID as deleted.\n\t\t\t\t * For read operations, this means the entry is not found.\n\t\t\t\t * We stop searching here, as this is the most recent ATE for this ID.\n\t\t\t\t */\n\t\t\t\treturn 0; /* Not found (deleted) */\n\t\t\t} else {\n\t\t\t\t/* This ATE marks the ID as active. */\n\t\t\t\t*ate = wlk_ate;\n\t\t\t\t*ate_addr = wlk_prev_addr;\n\t\t\t\treturn 1; /* Found */\n\t\t\t}\n\t\t}\n\t} while (wlk_addr >= end_addr);\n\n\treturn 0; /* No active ATE found for this ID */\n}\n>>>>>>>> REPLACE\n```",
+          "applied_files": [],
+          "apply_error": "SearchMatchFailed: No exactly matching SEARCH block was found in 'subsys/kvss/zms/zms.c'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": null
+        }
+      },
+      {
+        "iteration": 2,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "agentless_repair_2",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 4330,
+            "output_tokens": 17807
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "The `zms_find_ate_with_id` function is designed to locate the most recent allocation table entry (ATE) for a given ID by searching backwards through the flash. The current implementation, however, has a logical flaw in how it determines the final state (live or deleted) of an ID when multiple ATEs for that ID exist in the history.\n\nSpecifically, if a deleted ATE for an ID is found, it correctly sets `prev_found` to `0`, indicating that any previously found live ATE for that ID is now superseded. However, the search continues, and if an *older* live ATE for the same ID is subsequently encountered, it can incorrectly reset `prev_found` back to `1`, effectively \"undeleting\" the entry.\n\nThe `test_zms_read_evil_ate` test case highlights this issue. After deleting an entry with ID 3, it manually injects a \"valid-looking stale ATE\" at `fs->ate_wra`. While this `fake_ate` is not actually processed by `zms_find_ate_with_id` (because the search starts one ATE size before `fs->ate_wra`), the test still fails because the `A3_deleted` entry is found, then an *older* `A3_live` entry is found, which incorrectly causes `zms_find_ate_with_id` to return `1` (found) instead of `0` (deleted).\n\nThe fix is to ensure that when an ATE for the target ID is found, its `len` field definitively determines the current status of that ID. If `len != 0`, the ID is live, and this ATE is the most recent live one, so the search should stop and return `1`. If `len == 0`, the ID is deleted, and this ATE is the most recent deletion, so the search should stop and return `0`. This \"most recent ATE wins\" principle simplifies the logic and correctly handles entries that have been deleted.\n\nsubsys/kvss/zms/zms.c\n<<<<<<<< SEARCH\n\t\t\t\tif (wlk_ate.len != 0) { /* Found a valid, non-deleted entry */\n\t\t\t\t\tif (!prev_found) {\n\t\t\t\t\t\tmemcpy(ate, &wlk_ate, sizeof(struct zms_ate));\n\t\t\t\t\t\t*ate_addr = wlk_addr;\n\t\t\t\t\t\tprev_found = 1;\n\t\t\t\t\t} else if (wlk_ate.len != 0) {\n\t\t\t\t\t\t/* Found a previous valid non-deleted entry with the\n\t\t\t\t\t\t * same ID, this indicates that the ATE is invalid,\n\t\t\t\t\t\t * since there can be only one valid ATE.\n\t\t\t\t\t\t */\n\t\t\t\t\t\tLOG_ERR(\"Found multiple valid ATEs for ID %d\", id);\n\t\t\t\t\t\treturn -EIO;\n\t\t\t\t\t}\n\t\t\t\t} else { /* Found a valid, deleted entry */\n\t\t\t\t\tif (prev_found) {\n\t\t\t\t\t\t/* Found a deleted entry with same ID, this means\n\t\t\t\t\t\t * the found previous entry is invalid\n\t\t\t\t\t\t */\n\t\t\t\t\t\tprev_found = 0;\n\t\t\t\t\t}\n\t\t\t\t}\n========\n\t\t\t\tif (wlk_ate.len != 0) { /* Found a valid, non-deleted entry */\n\t\t\t\t\t/* This is the most recent valid ATE for this ID. */\n\t\t\t\t\tmemcpy(ate, &wlk_ate, sizeof(struct zms_ate));\n\t\t\t\t\t*ate_addr = wlk_addr;\n\t\t\t\t\treturn 1; /* Found a live ATE, stop search. */\n\t\t\t\t} else { /* Found a valid, deleted entry */\n\t\t\t\t\t/* This is the most recent ATE for this ID, and it's deleted.\n\t\t\t\t\t * No need to search further back.\n\t\t\t\t\t */\n\t\t\t\t\treturn 0; /* ID found but it's deleted, stop search. */\n\t\t\t\t}\n>>>>>>>> REPLACE",
+          "applied_files": [],
+          "apply_error": "SearchMatchFailed: No exactly matching SEARCH block was found in 'subsys/kvss/zms/zms.c'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": null
+        }
+      },
+      {
+        "iteration": 3,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "agentless_repair_3",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 4330,
+            "output_tokens": 18277
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "The `test_zms_read_evil_ate` test case fails because `zms_read` returns a positive length (3) instead of `-ENOENT`. This indicates that `zms_read` is successfully finding a live Allocation Table Entry (ATE) for ID 3, even though it should not.\n\nThe test scenario is as follows:\n1. Two ATEs are written for ID 2 and ID 3.\n2. The ATE for ID 3 is deleted. This operation writes a new ATE for ID 3 with `len = 0`, marking it as deleted.\n3. A `fake_ate` (with `id=3`, `len=3`, valid CRC, and matching cycle count) is directly written to the flash at `fs->ate_wra`, which is the next available ATE slot.\n4. `zms_read` is called for ID 3.\n\nThe problem lies in how `zms_find_ate_with_id` (which `zms_read` uses) handles deleted entries during its backward search.\nWhen `zms_find_ate_with_id` searches backwards from the most recent ATE:\n- It first encounters the ATE for ID 3 that was written by the `zms_delete` operation (`ATE_3_del`). This ATE has `len = 0`.\n- The `zms_prev_ate` helper function correctly determines that this ATE is valid but not \"live\" (due to `len = 0`). However, it currently returns `-ENOENT` for such entries.\n- In `zms_find_ate_with_id`, an `-ENOENT` return from `zms_prev_ate` causes the loop to `continue`, effectively skipping `ATE_3_del`.\n- As the search continues backwards, it then encounters the *original* ATE for ID 3 (`ATE_3`), which has `len > 0`.\n- `zms_prev_ate` considers `ATE_3` to be a valid and live ATE and returns `0`.\n- `zms_find_ate_with_id` then returns `1` for `ATE_3`, indicating that ID 3 is found and live, which is incorrect because `ATE_3` was superseded by `ATE_3_del`.\n\nThe fix involves modifying `zms_prev_ate` to return a distinct error code (`-EAGAIN` in this case) when it finds an ATE that is valid but not \"live\" (i.e., `id=0` or `len=0`). Then, `zms_find_ate_with_id` is updated to correctly interpret this new error code: if it encounters a deleted ATE for the requested ID, it should stop searching and report that the ID is not found. This ensures that a deleted ATE correctly hides older live ATEs for the same ID.\n\nThe `fake_ate` written by the test is not actually found by `zms_read` in this scenario, as `zms_read` always searches backwards from `fs->ate_wra` and `fake_ate` is written *at* `fs->ate_wra`, meaning it is skipped by the `zms_prev_ate` logic (which decrements the address before reading). The failure is due to `zms_read` finding the *previous* valid ATE for ID 3, before its deletion.\n\nsubsys/kvss/zms/zms.c\n<<<<<<<< SEARCH\n\tif (rc == 0) {\n\t\t/* Current ATE is invalid, try the next one. */\n\t\treturn -ENOENT;\n\t}\n\n\t/* Check if it's a live entry. */\n\tif (ZMS_ATE_LIVE(*entry)) {\n\t\treturn 0;\n\t}\n\n\t/* It's a deleted or zeroed entry. */\n\treturn -ENOENT;\n========\n\tif (rc == 0) {\n\t\t/* Current ATE is invalid. */\n\t\treturn -ENOENT;\n\t}\n\n\t/* Check if it's a live entry. */\n\tif (ZMS_ATE_LIVE(*entry)) {\n\t\treturn 0;\n\t}\n\n\t/* It's a valid but not live entry (deleted or id=0). */\n\treturn -EAGAIN;\n>>>>>>>> REPLACE\n\nsubsys/kvss/zms/zms.c\n<<<<<<<< SEARCH\n\t\tif (rc < 0) {\n\t\t\tif (rc == -ENOENT) {\n\t\t\t\tif (prev_found) {\n\t\t\t\t\t/* Found a live ATE in the previous sector, but now\n\t\t\t\t\t * something is wrong. Return the previous ATE.\n\t\t\t\t\t */\n\t\t\t\t\treturn 0;\n\t\t\t\t}\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\treturn rc;\n\t\t}\n\n\t\tif (wlk_ate.id == id) {\n\t\t\t*ate = wlk_ate;\n\t\t\t*ate_addr = wlk_addr;\n\t\t\treturn 1;\n\t\t}\n\t} while (wlk_addr >= end_addr);\n========\n\t\tif (rc < 0) {\n\t\t\tif (rc == -ENOENT) { /* ATE is invalid, or reached start of partition */\n\t\t\t\tif (prev_found) {\n\t\t\t\t\t/* Found a live ATE in the previous sector, but now\n\t\t\t\t\t * something is wrong. Return the previous ATE.\n\t\t\t\t\t */\n\t\t\t\t\treturn 0;\n\t\t\t\t}\n\t\t\t\tcontinue; /* Keep searching backwards (skipping invalid ATEs) */\n\t\t\t} else if (rc == -EAGAIN) { /* ATE is valid but not live (deleted or id=0) */\n\t\t\t\tif (wlk_ate.id == id) {\n\t\t\t\t\t/* Found a *deleted* ATE for this ID, so it's not present.\n\t\t\t\t\t * Stop search for this ID.\n\t\t\t\t\t */\n\t\t\t\t\treturn 0;\n\t\t\t\t}\n\t\t\t\tcontinue; /* ATE for different ID, not live, keep searching. */\n\t\t\t}\n\t\t\treturn rc; /* Actual error */\n\t\t}\n\n\t\t/* rc == 0, meaning zms_prev_ate found a valid AND live ATE */\n\t\tif (wlk_ate.id == id) {\n\t\t\t*ate = wlk_ate;\n\t\t\t*ate_addr = wlk_addr;\n\t\t\treturn 1; /* Found our ID! */\n\t\t}\n\t\t/* If wlk_ate.id != id, continue searching for other IDs. */\n\t} while (wlk_addr >= end_addr);\n>>>>>>>> REPLACE",
+          "applied_files": [],
+          "apply_error": "SearchMatchFailed: No exactly matching SEARCH block was found in 'subsys/kvss/zms/zms.c'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).\nSearchMatchFailed: No exactly matching SEARCH block was found in 'subsys/kvss/zms/zms.c'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": null
+        }
+      },
+      {
+        "iteration": 4,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "agentless_repair_4",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 4330,
+            "output_tokens": 11047
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "The `test_zms_read_evil_ate` test case is failing because the `zms_read` function is not returning `-ENOENT` as expected. The test sets up a scenario where an \"evil\" Allocation Table Entry (ATE) is manually written to flash. This `fake_ate` has a valid CRC and cycle count, but its `data_addr` field is zero (due to `memset` and no explicit initialization).\n\nThe `zms_ate_valid_different_sector` function, which is responsible for validating ATEs during lookup, currently only checks the CRC and cycle count. It does not validate the `data_addr` field. Consequently, `zms_find_latest_ate` considers the `fake_ate` as valid, and `zms_read_hist` attempts to read data from `data_addr=0`. Since `CONFIG_ZMS_DATA_CRC` is not enabled, `zms_read_hist` does not perform data CRC checks, and `zms_flash_rd` typically succeeds when reading from flash address 0 (which usually contains the ZMS header or other flash content), returning the `fake_ate.len` (which is 3). This behavior causes the assertion to fail because `-ENOENT` is not returned.\n\nThe fix involves enhancing the `zms_ate_valid_different_sector` function to include a sanity check for `entry->data_addr`. A valid data address for an ATE must point within the ZMS partition, specifically after the ZMS header. By checking if `entry->data_addr` is less than `fs->offset + ZMS_HEADER_SIZE` or if `entry->data_addr + entry->len` exceeds `fs->offset + fs->partition_size`, the \"evil\" ATE with `data_addr=0` will be correctly identified as invalid. This will cause `zms_find_latest_ate` to ignore it and proceed to find the previously written deleted ATE (with `len=0`), leading `zms_read_hist` to return `-ENOENT`, thus passing the test.\n\nsubsys/kvss/zms/zms.c\n<<<<<<<< SEARCH\nstatic int zms_ate_valid_different_sector(struct zms_fs *fs, const struct zms_ate *entry,\n\t\t\t\t\t  uint8_t cycle_cnt)\n{\n\tif ((cycle_cnt != entry->cycle_cnt) || zms_ate_crc8_check(entry)) {\n\t\treturn 0;\n>>>>>>>> REPLACE\nstatic int zms_ate_valid_different_sector(struct zms_fs *fs, const struct zms_ate *entry,\n\t\t\t\t\t  uint8_t cycle_cnt)\n{\n\tif ((cycle_cnt != entry->cycle_cnt) || zms_ate_crc8_check(entry)) {\n\t\treturn 0;\n\t}\n\n\t/* If ATE refers to data, validate its data_addr field to prevent reading from invalid\n\t * flash addresses (e.g., partition header or outside partition bounds).\n\t */\n\tif (entry->len > 0) {\n\t\tuint64_t min_valid_data_addr = fs->offset + ZMS_HEADER_SIZE;\n\t\tuint64_t max_valid_data_addr = fs->offset + fs->partition_size;\n\n\t\tif (entry->data_addr < min_valid_data_addr) {\n\t\t\tLOG_DBG(\"ATE %d: data_addr 0x%llx < min_valid_data_addr 0x%llx\",\n\t\t\t\tentry->id, entry->data_addr, min_valid_data_addr);\n\t\t\treturn 0;\n\t\t}\n\n\t\tif (entry->data_addr + entry->len > max_valid_data_addr) {\n\t\t\tLOG_DBG(\"ATE %d: data_addr 0x%llx + len %u > max_valid_data_addr 0x%llx\",\n\t\t\t\tentry->id, entry->data_addr, entry->len, max_valid_data_addr);\n\t\t\treturn 0;\n\t\t}\n\t}",
+          "applied_files": [],
+          "apply_error": "FormatError: LLM output did not contain valid <<<<<<<< SEARCH / ======== / >>>>>>>> REPLACE blocks.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": null
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nPASS - test_zms_mount_auto_format_on_erased_flash in 0.005 seconds\n===================================================================\nSTART - test_zms_mount_force\nE: ZMS Version is not supported\nE: ZMS Version is not supported\nW: ZMS init failed (-123), wiping partition\nI: 5 Sectors of 1024 bytes\nI: alloc wra: 0, 3c0\nI: data wra: 0, 0\nPASS - test_zms_mount_force in 0.005 seconds\n===================================================================\nSTART - test_zms_mount_no_format_on_erased_flash\nE: No valid empty ATE found in the last sector\nPASS - test_zms_mount_no_format_on_erased_flash in 0.003 seconds\n===================================================================\nSTART - test_zms_read_evil_ate\nI: 5 Sectors of 1024 bytes\nI: alloc wra: 0, 3c0\nI: data wra: 0, 0\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/kvss/zms/src/main.c:1723: zms_test_zms_read_evil_ate: (len not equal to -ENOENT)",
+    "protected_file_count": 9,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r3_real/agentless/v3real_zms_find_ate_offset_bf805bf",
+    "agentless": {
+      "directories": [
+        "subsys/kvss",
+        "drivers/flash",
+        "include/zephyr"
+      ],
+      "candidate_file_count": 603,
+      "files": [
+        "tests/subsys/kvss/zms/src/main.c",
+        "subsys/kvss/zms/zms.c",
+        "tests/subsys/kvss/zms/prj.conf",
+        "subsys/kvss/zms/Kconfig",
+        "tests/subsys/kvss/zms/boards/native_sim.overlay"
+      ],
+      "locations": {
+        "tests/subsys/kvss/zms/src/main.c": [
+          [
+            1667,
+            1723
+          ]
+        ],
+        "subsys/kvss/zms/zms.c": [
+          [
+            1891,
+            1891
+          ],
+          [
+            995,
+            995
+          ],
+          [
+            445,
+            445
+          ],
+          [
+            423,
+            423
+          ],
+          [
+            281,
+            281
+          ]
+        ]
+      },
+      "context_chars": 10119,
+      "n_candidates": 4,
+      "duplicates_skipped": 0
+    },
+    "api_events": [
+      {
+        "kind": "retry",
+        "what": "agentless_repair_2",
+        "attempt": 1,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 128
+      }
+    ],
+    "started_at": "2026-10-24T08:52:50+00:00",
+    "run_meta": {
+      "code_commit": "ed20986546eb57c9b4a714f6dafcec0d95aaa695",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": true,
+      "proposed_hybrid_rag": true,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

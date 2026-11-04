@@ -1,0 +1,72 @@
+[
+  {
+    "case_id": "inject_thread_priority_swap_zbus_hlp",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 165.3890302181244,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-pro",
+            "input_tokens": 538,
+            "output_tokens": 15839
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/subsys/zbus/hlp_priority_boost/src/main.c",
+            "content": "/*\n * Copyright (c) 2024 Intel Corporation\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n#include <zephyr/zbus/zbus.h>\n#include <zephyr/zbus/zbus_messages.h>\n\n/* The subscriber thread has the highest priority, so the publisher thread\n * must be elevated to this priority.\n */\n#define SUB_THR_PRIO 2\n#define START_PRIO 5\n#define STACK_SIZE (1024 + CONFIG_TEST_EXTRA_STACK_SIZE)\n\nstatic atomic_t sub1_level;\nstatic atomic_t msub1_level;\nstatic int pub_prio_inside_pub_sub;\n\nZBUS_CHAN_DEFINE(prio_chan, /* Name */\n\t\t struct zbus_test_msg, /* Message type */\n\t\t NULL, /* Validator */\n\t\t NULL, /* User data */\n\t\t ZBUS_OBSERVERS(sub1, msub1), /* observers */\n\t\t ZBUS_MSG_INIT(0) /* Initial value {0} */\n\t\t );\n\n/* sub1 is a listener, its callback is executed in the publisher's context */\nstatic void sub1_cb(const struct zbus_channel *chan)\n{\n\tconst struct zbus_test_msg *msg;\n\n\tif (zbus_chan_claim(chan, K_NO_WAIT) == 0) {\n\t\tmsg = zbus_chan_const_msg(chan);\n\t\tatomic_set(&sub1_level, msg->level);\n\t\tprintk(\"sub1 level: %d\\n\", msg->level);\n\n\t\t/* This is the correct place to check the publisher's priority,\n\t\t * as it is boosted for the duration of the zbus_chan_pub() call.\n\t\t */\n\t\tpub_prio_inside_pub_sub = k_thread_priority_get(k_current_get());\n\t\tzbus_chan_finish(chan);\n\t}\n}\n\nZBUS_LISTENER_DEFINE(sub1, sub1_cb);\n\n/* msub1 is a subscriber with a dedicated thread */\nstatic void msub1_thread(void)\n{\n\tconst struct zbus_channel *chan;\n\tconst struct zbus_test_msg *msg;\n\n\twhile (1) {\n\t\tif (zbus_sub_wait(&msub1, &chan, K_FOREVER) == 0) {\n\t\t\tmsg = zbus_chan_const_msg(chan);\n\t\t\tatomic_set(&msub1_level, msg->level);\n\t\t\tprintk(\"msub1 level: %d\\n\", msg->level);\n\t\t}\n\t}\n}\n\nZBUS_SUBSCRIBER_DEFINE(msub1, 4);\nK_THREAD_DEFINE(msub1_tid, STACK_SIZE, msub1_thread, NULL, NULL, NULL, SUB_THR_PRIO, 0, 0);\n\nstatic void *hlp_priority_boost_setup(void)\n{\n\tk_thread_access_grant(k_current_get(), &msub1_tid);\n\n\treturn NULL;\n}\n\nstatic void hlp_priority_boost_before(void *fixture)\n{\n\tatomic_set(&sub1_level, 0);\n\tatomic_set(&msub1_level, 0);\n\tpub_prio_inside_pub_sub = -1;\n\n\t/* Let msub1_thread run to wait for a message */\n\tk_sleep(K_MSEC(200));\n}\n\nZTEST(hlp_priority_boost, test_priority_elevation)\n{\n\tstruct zbus_test_msg msg = {.level = 0};\n\tint initial_prio = k_thread_priority_get(k_current_get());\n\n\t/* Set the test thread priority to be lower than the subscriber */\n\tk_thread_priority_set(k_current_get(), START_PRIO);\n\n\tprintk(\"sub1 level: %d\\n\", atomic_get(&sub1_level));\n\tprintk(\"msub1 level: %d\\n\", atomic_get(&msub1_level));\n\n\tzassert_equal(atomic_get(&sub1_level), 0);\n\tzassert_equal(atomic_get(&msub1_level), 0);\n\n\tmsg.level = 1;\n\tzbus_chan_pub(&prio_chan, &msg, K_MSEC(200));\n\n\t/* Let msub1_thread run and process the message */\n\tk_sleep(K_MSEC(200));\n\n\tzassert_equal(atomic_get(&sub1_level), 1);\n\tzassert_equal(atomic_get(&msub1_level), 1);\n\n\t/* Check that priority was boosted to the highest priority subscriber's priority.\n\t * This check is on a value captured inside the listener callback.\n\t */\n\tzassert_equal(pub_prio_inside_pub_sub, SUB_THR_PRIO,\n\t\t      \"priority during publish was %d, expected %d\",\n\t\t      pub_prio_inside_pub_sub, SUB_THR_PRIO);\n\n\t/* Check that priority was restored after publishing */\n\tint prio = k_thread_priority_get(k_current_get());\n\n\tzassert_equal(prio, START_PRIO, \"priority not restored, is %d\", prio);\n\n\t/* Restore initial priority */\n\tk_thread_priority_set(k_current_get(), initial_prio);\n}\n\nZTEST_SUITE(hlp_priority_boost, NULL, hlp_priority_boost_setup, hlp_priority_boost_before, NULL,\n\t    NULL);\n"
+          },
+          "applied_files": [
+            "tests/subsys/zbus/hlp_priority_boost/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/subsys/zbus/hlp_priority_boost/src/main.c:10:10: fatal error: zephyr/zbus/zbus_messages.h: No such file or directory\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[108/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeslicing.c.obj\n[109/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/spinlock_validate.c.obj\n[110/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[111/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[112/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[113/118] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[114/118] Linking C static library zephyr/kernel/libkernel.a\n[115/118] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[116/118] Building native simulator runner, and linking final executable\n[117/118] Running utility command for native_runner_executable\n[117/118] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE hlp_priority_boost\n===================================================================\nSTART - test_priority_elevation\nsub1 level: 0\nmsub1 level: 0\nsub1 level: 1\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/zbus/hlp_priority_boost/src/main.c:141: hlp_priority_boost_test_priority_elevation: (prio == 2 is false)",
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/b1/inject_thread_priority_swap_zbus_hlp",
+    "api_events": [],
+    "started_at": "2026-09-26T07:05:36+00:00",
+    "run_meta": {
+      "code_commit": "538b7706719863a3dea78dc56e2c9df57e2888c9",
+      "code_dirty": false,
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-pro",
+        "pro": "gemini-2.5-pro",
+        "embedding": "models/gemini-embedding-001"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

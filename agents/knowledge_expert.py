@@ -1,16 +1,27 @@
 # agents/knowledge_expert.py
 import logging
+import os
 from typing import Dict, Any, List
-from graph_rag.build_graph import ZephyrGraphBuilder
+from graph_rag.case_graph import get_case_graph
 from graph_rag.retriever import GraphRetriever
 from graph_rag.hybrid_retriever import HybridRetriever
+from core.llm_retry import RetrievalDegradedError, record_fallback, strict_fallbacks
 
 logger = logging.getLogger(__name__)
 
-# 建議在全域或系統啟動時初始化並載入圖譜，避免在每次 LangGraph 迭代中重複建置
-# It is recommended to initialize and load the graph globally or at system startup to avoid rebuilding it during every LangGraph iteration.
-GRAPH_CACHE_PATH = "zephyr_graph_cache.pkl"
-_global_retriever = None
+# Hybrid RAG 的開關 (2026-10-18，ablation「只保留 Graph RAG」用)：預設開啟，關閉時 Knowledge Expert 只做圖譜
+# 檢索，retrieved_files 一律為空；run_meta 會記錄。Graph RAG 的開關見 graph_rag/case_graph.GRAPH_RAG。
+# Hybrid RAG switch (2026-10-18, for the "Graph RAG only" ablation): on by default; when off the Knowledge
+# Expert only does graph retrieval and retrieved_files is always empty; recorded in run_meta. The Graph RAG
+# switch is graph_rag/case_graph.GRAPH_RAG.
+HYBRID_RAG = os.environ.get("ZEPHYR_HYBRID_RAG", "1").strip().lower() not in ("0", "false", "no")
+
+# 圖譜 (2026-10-18 起)：每筆案例從注入後的 workspace 現場建 (graph_rag/case_graph.py)。舊的全域快取
+# zephyr_graph_cache.pkl 從來不存在；從原始樹建的 zephyr_graph_cache.full.pkl 含有注入前的正確內容，會洩漏
+# 答案，所以不再使用全域快取。
+# The graph (from 2026-10-18) is built per case from the injected workspace (graph_rag/case_graph.py). The old
+# global zephyr_graph_cache.pkl never existed, and zephyr_graph_cache.full.pkl was built from the clean tree
+# (pre-injection content, i.e. answers), so no global cache is used any more.
 
 # HybridRetriever 的 BM25 索引是針對單一 workspace_path 的原始碼樹建的，
 # 不能像圖譜檢索那樣用單一全域單例——不同案例的 workspace_path 不同，且
@@ -25,21 +36,6 @@ _global_retriever = None
 # repair loop reuse the same index (no re-scanning the whole tree every
 # iteration), without different cases polluting each other.
 _hybrid_retrievers: Dict[str, HybridRetriever] = {}
-
-
-def get_retriever() -> GraphRetriever:
-    global _global_retriever
-    if _global_retriever is None:
-        builder = ZephyrGraphBuilder()
-        try:
-            builder.load(GRAPH_CACHE_PATH)
-            logger.info("成功載入圖譜快取 (Successfully loaded graph cache).")
-        except FileNotFoundError:
-            logger.warning("找不到圖譜快取，請先執行 build_graph.py 進行建構 (Graph cache not found, please run build_graph.py to construct it first).")
-            # 這裡可以加入動態建置邏輯，或直接拋出例外
-            # dynamic build logic can be added here, or raise an exception
-        _global_retriever = GraphRetriever(builder.graph)
-    return _global_retriever
 
 
 def get_hybrid_retriever(workspace_path: str) -> HybridRetriever:
@@ -65,27 +61,40 @@ def knowledge_expert_node(state: Dict[str, Any]) -> Dict[str, Any]:
     Kconfig-symbol/DTS-node *names*, with no way to answer "which C file
     implements this subsystem's logic" (see graph_rag/hybrid_retriever.py's
     module docstring).
+
+    Analyzer 的關鍵字只決定要不要做圖譜檢索 (原始設計的決策規則講的就是「要不要檢索圖譜」)；Hybrid RAG 每輪都跑，
+    沒有關鍵字時改用最近一次過濾後的 build/run log 當查詢，和 B2 相同 (2026-10-19 使用者決定)。之前 Hybrid RAG
+    跟著圖譜的開關，Analyzer 對 runtime 錯誤判斷「與硬體無關、不用查圖譜」時，連實作檔的檢索也一起被跳過。
+    The Analyzer's keywords only decide whether graph retrieval runs (the original design's decision rules are
+    about "is graph retrieval needed"); Hybrid RAG runs every iteration, querying with the most recent filtered
+    build/run log when there are no keywords, like B2 (user decision 2026-10-19). Hybrid RAG used to follow the
+    graph switch, so when the Analyzer judged a runtime error "not hardware-related, no graph needed" the search
+    for implementation files was skipped as well.
     """
-    logger.info("--- 啟動 Knowledge Expert (Starting Knowledge Expert) ---")
+    logger.info("--- Starting Knowledge Expert ---")
 
     keywords = state.get("search_keywords", [])
     if not keywords:
-        logger.info("沒有收到關鍵字，跳過圖譜檢索 (No keywords received, skipping graph retrieval).")
-        return {"retrieved_context": "No keywords provided for graph retrieval.", "retrieved_files": []}
-
-    logger.info(f"正在檢索以下關鍵字的圖譜上下文 (Retrieving graph context for keywords): {keywords}")
-
-    retriever = get_retriever()
-
-    # 執行子圖提取與 YAML 序列化 (Execute subgraph extraction and YAML serialization)
-    yaml_context = retriever.retrieve_context(keywords, radius=2)
+        logger.info("No keywords received, skipping graph retrieval.")
+        yaml_context = "No keywords provided for graph retrieval."
+    else:
+        logger.info(f"Retrieving graph context for keywords: {keywords}")
+        graph, graph_meta = get_case_graph(state.get("workspace_path", ""), state.get("target_app", "."),
+                                           state.get("board", "native_sim"))
+        if graph is None:
+            yaml_context = "Knowledge graph retrieval is disabled."
+        elif graph.number_of_nodes() == 0:
+            yaml_context = f"Knowledge graph unavailable for this workspace ({graph_meta.get('error', 'empty graph')})."
+        else:
+            # 執行子圖提取與 YAML 序列化 (Execute subgraph extraction and YAML serialization)
+            yaml_context = GraphRetriever(graph).retrieve_context(keywords, radius=1)
 
     # 也可以透過 LLM 整理檢索結果，但為了節省 Token，直接傳遞 YAML 是最有效率的做法
     # We could also use an LLM to summarize the retrieved results, but to save tokens, passing YAML directly is the most efficient approach.
 
     retrieved_files: List[str] = []
     workspace_path = state.get("workspace_path", "")
-    if workspace_path:
+    if workspace_path and HYBRID_RAG:
         try:
             hybrid = get_hybrid_retriever(workspace_path)
             # top_k=8 而非更保守的 5——實測 (inject_runtime_fcb_nullcheck)
@@ -96,16 +105,27 @@ def knowledge_expert_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # be found (fcb_getnext.c) ranks decently on BM25 but not
             # standout on semantic score; after RRF fusion it lands at
             # rank 8, which a top_k=5 would miss.
-            retrieved_files = hybrid.retrieve(" ".join(keywords), top_k=8)
+            # 沒有關鍵字時用最近一次過濾後的 build/run log (last_build_log，不含規格檔還原提醒和 patch 套用失敗訊息)。
+            # Without keywords, query with the most recent filtered build/run log (last_build_log, which excludes the
+            # restore reminder and patch-application failure text).
+            query = " ".join(keywords) if keywords else (state.get("last_build_log") or state.get("current_error_log", ""))
+            retrieved_files = hybrid.retrieve(query, top_k=8)
             if retrieved_files:
-                logger.info(f"Hybrid RAG (BM25+語意) 額外檢索到候選檔案 (Hybrid RAG additionally retrieved candidate files): {retrieved_files}")
+                logger.info(f"Hybrid RAG (BM25 + semantic) additionally retrieved candidate files: {retrieved_files}")
         except Exception as e:
             # Hybrid RAG 是既有圖譜檢索之外「額外」的輔助訊號，失敗時不該
             # 讓整個 Knowledge 節點掛掉——退回只用圖譜檢索的結果。
             # Hybrid RAG is an additional signal on top of existing graph
             # retrieval — a failure here shouldn't take down the whole
             # Knowledge node; fall back to graph-retrieval-only results.
-            logger.warning(f"Hybrid RAG 檢索失敗，略過 (不影響既有的圖譜檢索) (Hybrid RAG retrieval failed, skipping — doesn't affect existing graph retrieval): {e}")
+            # 評測模式下不准退回 (見 core/llm_retry.py 的 strict_fallbacks)。
+            # Not allowed in evaluation mode (see core/llm_retry.py's strict_fallbacks).
+            if isinstance(e, RetrievalDegradedError):
+                raise
+            record_fallback("hybrid_retrieval", e)
+            if strict_fallbacks():
+                raise RetrievalDegradedError(f"Hybrid RAG retrieval failed and strict mode forbids skipping it: {e}") from e
+            logger.warning(f"Hybrid RAG retrieval failed, skipping (does not affect the existing graph retrieval): {e}")
 
     result: Dict[str, Any] = {"retrieved_context": yaml_context, "retrieved_files": retrieved_files}
 

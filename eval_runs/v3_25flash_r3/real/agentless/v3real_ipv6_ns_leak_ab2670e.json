@@ -1,0 +1,246 @@
+[
+  {
+    "case_id": "v3real_ipv6_ns_leak_ab2670e",
+    "category": "real_bug",
+    "pipeline": "agentless",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 4,
+    "ttr_seconds": 562.2019352912903,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "agentless_dirs",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 4112,
+            "output_tokens": 1916
+          },
+          {
+            "node": "agentless_files",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 8354,
+            "output_tokens": 1821
+          },
+          {
+            "node": "agentless_elements",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 11623,
+            "output_tokens": 4924
+          },
+          {
+            "node": "agentless_repair_1",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 3644,
+            "output_tokens": 7303
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "The `test_send_neighbor_discovery` test case fails because `net_pkt` objects are not being freed, leading to a memory leak. The assertion `k_mem_slab_num_free_get(tx) not equal to avail_pkt_count` confirms this.\n\nThe issue is located in the `tester_send` function, which is the `send` callback for the test network interface. According to the Zephyr network stack API, a `send` function takes ownership of the `net_pkt` passed to it and is responsible for freeing it, regardless of whether the packet is successfully transmitted, dropped, or processed internally.\n\nIn the original `tester_send` function:\n1. If `icmp->type == NET_ICMPV6_RS` and `expecting_ra` is false, the packet is dropped via `goto out;` without being freed.\n2. If `icmp->type == NET_ICMPV6_NS`, the packet is processed by `ns_handler` and then dropped via `goto out;` without being freed.\n3. If `net_recv_data` fails, the original packet is dropped via `goto out;` without being freed.\n4. In the successful path (after `net_recv_data` succeeds), the original `pkt` is not explicitly freed before `return 0;`.\n\nThe `out:` label itself only sets `test_failed = true;` and returns `0`, but does not free the `net_pkt`.\n\nThe fix involves:\n1. Renaming the `out:` label to `out_unref:`.\n2. Adding `net_pkt_unref(pkt);` to the `out_unref:` label to ensure the packet is always freed when exiting through this path.\n3. Changing all `goto out;` statements to `goto out_unref;`.\n4. Adding `net_pkt_unref(pkt);` before the final `return 0;` in the successful processing path.\n5. (Minor improvement) Changing the second `if (icmp->type == NET_ICMPV6_NS)` to `else if` for clearer logic, although it doesn't change the behavior for this specific test.\n\nThis ensures that every `net_pkt` received by `tester_send` is properly unreferenced, resolving the memory leak.\n\n```\ntests/net/ipv6/src/main.c\n<<<<<<<< SEARCH\n\tif (icmp->type == NET_ICMPV6_RS) {\n\t\tif (expecting_ra) {\n\t\t\tprepare_ra_message(pkt);\n\t\t} else {\n\t\t\tgoto out;\n\t\t}\n\t}\n\n\tif (icmp->type == NET_ICMPV6_NS) {\n\t\tif (ns_handler != NULL) {\n\t\t\tns_handler->fn(pkt, ns_handler->user_data);\n\t\t}\n\n\t\tif (dad_time[0] == 0U) {\n\t\t\tdad_time[0] = k_uptime_get_32();\n\t\t} else if (dad_time[1] == 0U) {\n\t\t\tdad_time[1] = k_uptime_get_32();\n\t\t} else if (dad_time[2] == 0U) {\n\t\t\tdad_time[2] = k_uptime_get_32();\n\t\t}\n\n\t\tgoto out;\n\t}\n\n\t/* Feed this data back to us */\n\tif (net_recv_data(net_pkt_iface(pkt),\n\t\t\t  net_pkt_clone(pkt, K_NO_WAIT)) < 0) {\n\t\tTC_ERROR(\"Data receive failed.\");\n\t\tgoto out;\n\t}\n\n\treturn 0;\n\nout:\n\ttest_failed = true;\n\n\treturn 0;\n========\n\tif (icmp->type == NET_ICMPV6_RS) {\n\t\tif (expecting_ra) {\n\t\t\tprepare_ra_message(pkt);\n\t\t} else {\n\t\t\tgoto out_unref;\n\t\t}\n\t} else if (icmp->type == NET_ICMPV6_NS) {\n\t\tif (ns_handler != NULL) {\n\t\t\tns_handler->fn(pkt, ns_handler->user_data);\n\t\t}\n\n\t\tif (dad_time[0] == 0U) {\n\t\t\tdad_time[0] = k_uptime_get_32();\n\t\t} else if (dad_time[1] == 0U) {\n\t\t\tdad_time[1] = k_uptime_get_32();\n\t\t} else if (dad_time[2] == 0U) {\n\t\t\tdad_time[2] = k_uptime_get_32();\n\t\t}\n\n\t\tgoto out_unref;\n\t}\n\n\t/* Feed this data back to us */\n\tif (net_recv_data(net_pkt_iface(pkt),\n\t\t\t  net_pkt_clone(pkt, K_NO_WAIT)) < 0) {\n\t\tTC_ERROR(\"Data receive failed.\");\n\t\tgoto out_unref;\n\t}\n\n\tnet_pkt_unref(pkt);\n\treturn 0;\n\nout_unref:\n\ttest_failed = true;\n\tnet_pkt_unref(pkt);\n\treturn 0;\n>>>>>>>> REPLACE\n```",
+          "applied_files": [
+            "tests/net/ipv6/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nSTART - test_prefix_timeout_long\nPASS - test_prefix_timeout_long in 0.000 seconds\n===================================================================\nSTART - test_ra_with_bad_hop_limit\nPASS - test_ra_with_bad_hop_limit in 0.020 seconds\n===================================================================\nSTART - test_rs_after_carrier_toggle\nPASS - test_rs_after_carrier_toggle in 0.040 seconds\n===================================================================\nSTART - test_rs_after_iface_up\nPASS - test_rs_after_iface_up in 0.040 seconds\n===================================================================\nSTART - test_rs_after_iface_up_carrier_delayed\nPASS - test_rs_after_iface_up_carrier_delayed in 0.060 seconds\n===================================================================\nSTART - test_rs_ra_message\nPASS - test_rs_ra_message in 0.020 seconds\n===================================================================\nSTART - test_send_neighbor_discovery\nAssertion failed at WEST_TOPDIR/zephyr/tests/net/ipv6/src/main.c:956: net_ipv6_test_send_neighbor_discovery: (k_mem_slab_num_free_get(tx) not equal to avail_pkt_count)",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/net/ipv6/src/main.c"
+          ]
+        }
+      },
+      {
+        "iteration": 2,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "agentless_repair_2",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 3644,
+            "output_tokens": 8356
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "The `tester_send` function, which acts as the `ethernet_api.send` implementation for the test interface, is responsible for freeing the `net_pkt` it receives in all execution paths, as per the Zephyr networking stack's L2 driver contract.\n\nUpon analysis, the original `tester_send` function did not free the `net_pkt` in several scenarios:\n1. When `net_recv_data` successfully processed a cloned packet, the original packet was not freed.\n2. When `prepare_ra_message` was called (i.e., `expecting_ra` was true), the packet was modified but not subsequently freed.\n3. In all `goto out;` paths (including unexpected RS messages, NS messages, and `net_recv_data` failures), the `pkt` was not freed before returning.\n\nThis leads to `net_pkt`s being leaked, causing the `k_mem_slab_num_free_get(tx) not equal to avail_pkt_count` assertion failure in `test_send_neighbor_discovery`.\n\nThe fix involves introducing a common `out_unref` label to ensure `net_pkt_unref(pkt)` is called before returning `0` in all paths, including those that previously simply returned `0` or jumped to the `out` label. The `out` label is retained for setting `test_failed = true;` for specific error conditions, and then falls through to `out_unref`.\n\n<tests/net/ipv6/src/main.c>\n<<<<<<<< SEARCH\n\treturn 0;\n\nout:\n\ttest_failed = true;\n\n\treturn 0;\n}\n========\n\tgoto out_unref;\n\nout:\n\ttest_failed = true;\nout_unref:\n\tnet_pkt_unref(pkt);\n\treturn 0;\n}\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "tests/net/ipv6/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nSTART - test_prefix_timeout_long\nPASS - test_prefix_timeout_long in 0.000 seconds\n===================================================================\nSTART - test_ra_with_bad_hop_limit\nPASS - test_ra_with_bad_hop_limit in 0.020 seconds\n===================================================================\nSTART - test_rs_after_carrier_toggle\nPASS - test_rs_after_carrier_toggle in 0.040 seconds\n===================================================================\nSTART - test_rs_after_iface_up\nPASS - test_rs_after_iface_up in 0.040 seconds\n===================================================================\nSTART - test_rs_after_iface_up_carrier_delayed\nPASS - test_rs_after_iface_up_carrier_delayed in 0.060 seconds\n===================================================================\nSTART - test_rs_ra_message\nPASS - test_rs_ra_message in 0.020 seconds\n===================================================================\nSTART - test_send_neighbor_discovery\nAssertion failed at WEST_TOPDIR/zephyr/tests/net/ipv6/src/main.c:956: net_ipv6_test_send_neighbor_discovery: (k_mem_slab_num_free_get(tx) not equal to avail_pkt_count)",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/net/ipv6/src/main.c"
+          ]
+        }
+      },
+      {
+        "iteration": 3,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "agentless_repair_3",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 3644,
+            "output_tokens": 7728
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "`test_send_neighbor_discovery` fails due to an assertion related to `k_mem_slab_num_free_get(tx)`. This indicates a memory leak, specifically `net_pkt` instances not being freed from the TX packet pool.\n\nTracing the `tester_send` function in `tests/net/ipv6/src/main.c`, which is the custom `send` hook for the test interface:\n1.  When an `NET_ICMPV6_NS` packet is received, the `ns_handler->fn` (which is `expect_nd_ns`) is called. `expect_nd_ns` consumes the packet's data but does not free the `net_pkt` itself. The `tester_send` function then proceeds to its `out` label, which also does not free the packet. This is a leak.\n2.  When `net_recv_data` is called for other packet types, `net_pkt_clone` is used to create a copy for the receive path. The *original* `pkt` passed to `tester_send` is still owned by `tester_send` and must be freed. In the original code, the successful path for `net_recv_data` returns `0` without freeing the original `pkt`, leading to another leak.\n3.  All paths leading to the `out` label in `tester_send` (including `NET_ICMPV6_RS` processing, `NET_ICMPV6_NS` processing, and `net_recv_data` failure) also did not free the `pkt`.\n\nThe fix involves restructuring `tester_send` to ensure `net_pkt_unref(pkt)` is called in all execution paths before the function returns. The `test_failed` global variable and the specific return values for `tester_send` are preserved.\n\ntests/net/ipv6/src/main.c\n<<<<<<<< SEARCH\n\treturn 0;\n\nout:\n\ttest_failed = true;\n\n\treturn 0;\n}\n========\n\tint ret = 0;\n\n\tif (!pkt->buffer) {\n\t\tTC_ERROR(\"No data to send!\\n\");\n\t\tret = -ENODATA;\n\t\tgoto cleanup;\n\t}\n\n\ticmp = get_icmp_hdr(pkt);\n\n\tpkt_num++;\n\n\t/* Reply with RA message */\n\tif (icmp->type == NET_ICMPV6_RS) {\n\t\tif (expecting_ra) {\n\t\t\tprepare_ra_message(pkt);\n\t\t}\n\t\ttest_failed = true; /* Original behavior from 'out' label */\n\t\tgoto cleanup;\n\t}\n\n\tif (icmp->type == NET_ICMPV6_NS) {\n\t\tif (ns_handler != NULL) {\n\t\t\tns_handler->fn(pkt, ns_handler->user_data);\n\t\t}\n\n\t\tif (dad_time[0] == 0U) {\n\t\t\tdad_time[0] = k_uptime_get_32();\n\t\t} else if (dad_time[1] == 0U) {\n\t\t\tdad_time[1] = k_uptime_get_32();\n\t\t} else if (dad_time[2] == 0U) {\n\t\t\tdad_time[2] = k_uptime_get_32();\n\t\t}\n\t\ttest_failed = true; /* Original behavior from 'out' label */\n\t\tgoto cleanup;\n\t}\n\n\t/* Feed this data back to us */\n\tif (net_recv_data(net_pkt_iface(pkt),\n\t\t\t  net_pkt_clone(pkt, K_NO_WAIT)) < 0) {\n\t\tTC_ERROR(\"Data receive failed.\");\n\t\ttest_failed = true; /* Original behavior from 'out' label */\n\t}\n\ncleanup:\n\tnet_pkt_unref(pkt);\n\treturn ret;\n}\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "tests/net/ipv6/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nSTART - test_prefix_timeout_long\nPASS - test_prefix_timeout_long in 0.000 seconds\n===================================================================\nSTART - test_ra_with_bad_hop_limit\nPASS - test_ra_with_bad_hop_limit in 0.020 seconds\n===================================================================\nSTART - test_rs_after_carrier_toggle\nPASS - test_rs_after_carrier_toggle in 0.040 seconds\n===================================================================\nSTART - test_rs_after_iface_up\nPASS - test_rs_after_iface_up in 0.040 seconds\n===================================================================\nSTART - test_rs_after_iface_up_carrier_delayed\nPASS - test_rs_after_iface_up_carrier_delayed in 0.060 seconds\n===================================================================\nSTART - test_rs_ra_message\nPASS - test_rs_ra_message in 0.020 seconds\n===================================================================\nSTART - test_send_neighbor_discovery\nAssertion failed at WEST_TOPDIR/zephyr/tests/net/ipv6/src/main.c:956: net_ipv6_test_send_neighbor_discovery: (k_mem_slab_num_free_get(tx) not equal to avail_pkt_count)",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/net/ipv6/src/main.c"
+          ]
+        }
+      },
+      {
+        "iteration": 4,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "agentless_repair_4",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 3644,
+            "output_tokens": 7856
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "The `tester_send` function in `tests/net/ipv6/src/main.c` is responsible for handling `net_pkt` objects sent by the network stack to the test network interface. According to Zephyr's network stack conventions, any `net_pkt` passed to a network interface's `send` function must eventually be unreferenced (`net_pkt_unref`) by that interface, unless its ownership is explicitly transferred elsewhere.\n\nAnalyzing the `tester_send` function, several paths lead to a `net_pkt` leak:\n1.  **ICMPv6 NS messages**: When an `NET_ICMPV6_NS` message is received, `tester_send` calls `ns_handler->fn` and then `goto out;`. The `out:` label, in its original form, does not unreference the `pkt`.\n2.  **Ignored ICMPv6 RS messages**: If an `NET_ICMPV6_RS` message is received and `expecting_ra` is false, `tester_send` calls `goto out;`. Again, the `pkt` is not unreferenced.\n3.  **General data packets (after cloning)**: For any other packet type, `tester_send` calls `net_recv_data` with a *clone* of the original `pkt`. After cloning, the original `pkt` is still owned by `tester_send` and must be unreferenced. The path for successful `net_recv_data` currently ends with `return 0;` without unreferencing `pkt`.\n\nThe `test_send_neighbor_discovery` failure specifically points to a `net_pkt` leak, which is consistent with the `NET_ICMPV6_NS` path (triggering NS messages) and the general data path (packets sent after ND resolution).\n\nThe fix is to ensure `net_pkt_unref(pkt)` is called in all exit paths of the `tester_send` function. This can be achieved by adding it before the direct `return 0;` and also at the `out:` label.\n\n### tests/net/ipv6/src/main.c\n<<<<<<<< SEARCH\n\treturn 0;\n\nout:\n\ttest_failed = true;\n\n\treturn 0;\n========\n\tnet_pkt_unref(pkt);\n\treturn 0;\n\nout:\n\ttest_failed = true;\n\tnet_pkt_unref(pkt);\n\treturn 0;\n>>>>>>>> REPLACE",
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file '### tests/net/ipv6/src/main.c' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": null
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_prefix_timeout_long\nPASS - test_prefix_timeout_long in 0.000 seconds\n===================================================================\nSTART - test_ra_with_bad_hop_limit\nPASS - test_ra_with_bad_hop_limit in 0.020 seconds\n===================================================================\nSTART - test_rs_after_carrier_toggle\nPASS - test_rs_after_carrier_toggle in 0.040 seconds\n===================================================================\nSTART - test_rs_after_iface_up\nPASS - test_rs_after_iface_up in 0.040 seconds\n===================================================================\nSTART - test_rs_after_iface_up_carrier_delayed\nPASS - test_rs_after_iface_up_carrier_delayed in 0.060 seconds\n===================================================================\nSTART - test_rs_ra_message\nPASS - test_rs_ra_message in 0.020 seconds\n===================================================================\nSTART - test_send_neighbor_discovery\nAssertion failed at WEST_TOPDIR/zephyr/tests/net/ipv6/src/main.c:956: net_ipv6_test_send_neighbor_discovery: (k_mem_slab_num_free_get(tx) not equal to avail_pkt_count)",
+    "protected_file_count": 5,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r3_real/agentless/v3real_ipv6_ns_leak_ab2670e",
+    "agentless": {
+      "directories": [
+        "subsys/net",
+        "lib/net_buf",
+        "drivers/net",
+        "kernel"
+      ],
+      "candidate_file_count": 508,
+      "files": [
+        "tests/net/ipv6/src/main.c",
+        "subsys/net/ip/ipv6_nbr.c",
+        "subsys/net/ip/net_pkt.c",
+        "tests/net/ipv6/prj.conf",
+        "lib/net_buf/buf.c"
+      ],
+      "locations": {
+        "tests/net/ipv6/src/main.c": [
+          [
+            884,
+            965
+          ],
+          [
+            388,
+            444
+          ]
+        ],
+        "subsys/net/ip/ipv6_nbr.c": [
+          [
+            3064,
+            3078
+          ]
+        ]
+      },
+      "context_chars": 7681,
+      "n_candidates": 4,
+      "duplicates_skipped": 0
+    },
+    "api_events": [
+      {
+        "kind": "retry",
+        "what": "agentless_repair_3",
+        "attempt": 1,
+        "error": "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}",
+        "wait_seconds": 110
+      }
+    ],
+    "started_at": "2026-10-24T07:53:43+00:00",
+    "run_meta": {
+      "code_commit": "ed20986546eb57c9b4a714f6dafcec0d95aaa695",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": true,
+      "proposed_hybrid_rag": true,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

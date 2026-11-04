@@ -1,0 +1,78 @@
+[
+  {
+    "case_id": "v3_c_net_buf_brace_34f8f2d_fx",
+    "category": "c_syntax",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 182.0283088684082,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 272,
+            "output_tokens": 30705
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/lib/net_buf/buf/src/main.c",
+            "content": "#include <zephyr/ztest.h>\n#include <zephyr/net/buf.h>\n#include <zephyr/kernel.h>\n#include <string.h>\n\n#define TEST_BUF_SIZE 64\n#define TEST_BUF_COUNT 4\n#define TEST_DATA_LEN 16\n\nNET_BUF_POOL_DEFINE(test_pool, TEST_BUF_COUNT, TEST_BUF_SIZE, 0, NULL);\n\nstatic void *net_buf_setup(void)\n{\n    return NULL;\n}\n\nstatic void net_buf_teardown(void *fixture)\n{\n    struct net_buf *buf;\n    int count = 0;\n    while ((buf = net_buf_alloc(&test_pool, K_NO_WAIT)) != NULL) {\n        net_buf_destroy(buf);\n        count++;\n    }\n    zassert_equal(count, TEST_BUF_COUNT, \"Not all buffers returned to pool in teardown\");\n}\n\n/* Test case 1: Basic allocation and destruction */\nZTEST(net_buf_tests, test_alloc_destroy)\n{\n    struct net_buf *buf;\n    int i;\n\n    for (i = 0; i < TEST_BUF_COUNT; i++) {\n        buf = net_buf_alloc(&test_pool, K_NO_WAIT);\n        zassert_not_null(buf, \"Failed to allocate buffer %d\", i);\n        zassert_equal(net_buf_tailroom(buf), TEST_BUF_SIZE, \"Incorrect tailroom after alloc\");\n        zassert_equal(net_buf_headroom(buf), 0, \"Incorrect headroom after alloc\");\n        zassert_equal(net_buf_frags(buf), NULL, \"Fragments not NULL after alloc\");\n        zassert_equal(net_buf_len(buf), 0, \"Length not 0 after alloc\");\n        net_buf_destroy(buf);\n    }\n\n    buf = net_buf_alloc(&test_pool, K_NO_WAIT);\n    zassert_is_null(buf, \"Allocated buffer beyond pool capacity\");\n\n    zassert_equal(test_pool.avail_count, TEST_BUF_COUNT, \"Pool count not restored after alloc/destroy cycle\");\n}\n\n/* Test case 2: Adding and pulling data with various types and detailed checks */\nZTEST(net_buf_tests, test_add_pull_data_types)\n{\n    struct net_buf *buf;\n    uint8_t u8_val = 0xAA;\n    uint16_t u16_val = 0xCCDD;\n    uint32_t u32_val = 0x11223344;\n    uint8_t data[TEST_DATA_LEN];\n    uint8_t read_data[TEST_DATA_LEN];\n    uint8_t read_u8;\n    uint16_t read_u16;\n    uint32_t read_u32;\n    uint8_t *ptr;\n    size_t len;\n\n    memset(data, 0x55, sizeof(data));\n\n    buf = net_buf_alloc(&test_pool, K_NO_WAIT);\n    zassert_not_null(buf, \"Failed to allocate buffer\");\n\n    /* Add data */\n    net_buf_add_u8(buf, u8_val);\n    net_buf_add_le16(buf, u16_val);\n    net_buf_add_be32(buf, u32_val);\n    net_buf_add_mem(buf, data, sizeof(data));\n\n    len = 1 + 2 + 4 + TEST_DATA_LEN;\n    zassert_equal(net_buf_len(buf), len, \"Incorrect length after adds\");\n    zassert_equal(net_buf_tailroom(buf), TEST_BUF_SIZE - len, \"Incorrect tailroom after adds\");\n\n    /* Check data pointers */\n    ptr = net_buf_head(buf);\n    zassert_equal(*ptr, u8_val, \"Head data mismatch (u8)\");\n    ptr = net_buf_tail(buf);\n    zassert_equal(*(ptr - 1), data[TEST_DATA_LEN - 1], \"Tail data mismatch (mem)\");\n    zassert_equal(net_buf_data(buf), net_buf_head(buf), \"net_buf_data should be net_buf_head initially\");\n\n    /* Pull data */\n    read_u8 = net_buf_pull_u8(buf);\n    zassert_equal(read_u8, u8_val, \"Pulled u8 mismatch\");\n    zassert_equal(net_buf_len(buf), len - 1, \"Length after pull u8 incorrect\");\n    zassert_equal(net_buf_data(buf), net_buf_head(buf) + 1, \"net_buf_data not advanced after pull u8\");\n\n    read_u16 = net_buf_pull_le16(buf);\n    zassert_equal(read_u16, u16_val, \"Pulled le16 mismatch\");\n    zassert_equal(net_buf_len(buf), len - 1 - 2, \"Length after pull le16 incorrect\");\n    zassert_equal(net_buf_data(buf), net_buf_head(buf) + 1 + 2, \"net_buf_data not advanced after pull le16\");\n\n    read_u32 = net_buf_pull_be32(buf);\n    zassert_equal(read_u32, u32_val, \"Pulled be32 mismatch\");\n    zassert_equal(net_buf_len(buf), len - 1 - 2 - 4, \"Length after pull be32 incorrect\");\n    zassert_equal(net_buf_data(buf), net_buf_head(buf) + 1 + 2 + 4, \"net_buf_data not advanced after pull be32\");\n\n    net_buf_pull_mem(buf, read_data, sizeof(read_data));\n    zassert_mem_equal(data, read_data, sizeof(data), \"Pulled mem mismatch\");\n    zassert_equal(net_buf_len(buf), 0, \"Buffer not empty after all pulls\");\n    zassert_equal(net_buf_data(buf), net_buf_head(buf) + len, \"net_buf_data not at end after all pulls\");\n\n    /* The following line was originally 'net_buf_destory(buf);' causing the error. */\n    net_buf_destroy(buf);\n}\n\n/* Test case 3: Headroom and tailroom manipulation */\nZTEST(net_buf_tests, test_headroom_tailroom)\n{\n    struct net_buf *buf;\n    uint8_t data[] = {0xAA, 0xBB};\n\n    buf = net_buf_alloc(&test_pool, K_NO_WAIT);\n    zassert_not_null(buf, \"Failed to allocate buffer\");\n\n    net_buf_reserve(buf, 10);\n    zassert_equal(net_buf_headroom(buf), 10, \"Incorrect headroom after reserve\");\n    zassert_equal(net_buf_tailroom(buf), TEST_BUF_SIZE - 10, \"Incorrect tailroom after reserve\");\n\n    net_buf_add_mem(buf, data, sizeof(data));\n    zassert_equal(net_buf_len(buf), sizeof(data), \"Incorrect length after add\");\n    zassert_equal(net_buf_headroom(buf), 10, \"Headroom changed unexpectedly\");\n    zassert_equal(net_buf_tailroom(buf), TEST_BUF_SIZE - 10 - sizeof(data), \"Incorrect tailroom\");\n\n    net_buf_pull(buf, 1); /* Pull 1 byte */\n    zassert_equal(net_buf_len(buf), 1, \"Incorrect length after pull\");\n    zassert_equal(net_buf_headroom(buf), 11, \"Headroom not increased after pull\");\n\n    net_buf_destroy(buf);\n}\n\n/* Test case 4: Fragment handling (simple case) */\nZTEST(net_buf_tests, test_fragments_simple)\n{\n    struct net_buf *buf1, *buf2;\n    uint8_t data1[] = {0x11, 0x22};\n    uint8_t data2[] = {0x33, 0x44};\n\n    buf1 = net_buf_alloc(&test_pool, K_NO_WAIT);\n    zassert_not_null(buf1, \"Failed to allocate buf1\");\n    net_buf_add_mem(buf1, data1, sizeof(data1));\n\n    buf2 = net_buf_alloc(&test_pool, K_NO_WAIT);\n    zassert_not_null(buf2, \"Failed to allocate buf2\");\n    net_buf_add_mem(buf2, data2, sizeof(data2));\n\n    net_buf_frag_add(buf1, buf2);\n    zassert_equal(net_buf_frags(buf1), buf2, \"Fragment not added\");\n    zassert_equal(net_buf_frags(buf2), NULL, \"Fragment has unexpected next\");\n\n    net_buf_destroy(buf1); /* This should destroy buf1 and then buf2 */\n}\n\n/* Test case 5: Test net_buf_unref */\nZTEST(net_buf_tests, test_unref)\n{\n    struct net_buf *buf;\n\n    buf = net_buf_alloc(&test_pool, K_NO_WAIT);\n    zassert_not_null(buf, \"Failed to allocate buffer\");\n\n    /* Initial ref count is 1 */\n    zassert_equal(buf->ref, 1, \"Initial ref count not 1\");\n\n    net_buf_ref(buf); /* Increment ref count */\n    zassert_equal(buf->ref, 2, \"Ref count not 2 after ref\");\n\n    net_buf_unref(buf); /* Decrement ref count */\n    zassert_equal(buf->ref, 1, \"Ref count not 1 after unref\");\n\n    net_buf_unref(buf); /* Decrement ref count, should destroy */\n    /* At this point, buf is destroyed and returned to pool.\n     * We cannot access buf->ref anymore.\n     * We can check pool count.\n     */\n    zassert_equal(test_pool.avail_count, TEST_BUF_COUNT, \"Buffer not returned to pool after final unref\");\n\n    /* Try to allocate again to confirm it's back */\n    buf = net_buf_alloc(&test_pool, K_NO_WAIT);\n    zassert_not_null(buf, \"Failed to re-allocate buffer after unref\");\n    net_buf_destroy(buf); /* Clean up */\n}\n\n/* Test case 6: Test net_buf_linearize */\nZTEST(net_buf_tests, test_linearize)\n{\n    struct net_buf *buf_frag1, *buf_frag2, *buf_linear;\n    uint8_t data1[] = {0x01, 0x02, 0x03, 0x04};\n    uint8_t data2[] = {0x05, 0x06, 0x07, 0x08};\n    uint8_t expected_data[] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};\n    uint8_t read_data[sizeof(expected_data)];\n    size_t len;\n\n    buf_frag1 = net_buf_alloc(&test_pool, K_NO_WAIT);\n    zassert_not_null(buf_frag1, \"Failed to allocate buf_frag1\");\n    net_buf_add_mem(buf_frag1, data1, sizeof(data1));\n\n    buf_frag2 = net_buf_alloc(&test_pool, K_NO_WAIT);\n    zassert_not_null(buf_frag2, \"Failed to allocate buf_frag2\");\n    net_buf_add_mem(buf_frag2, data2, sizeof(data2));\n\n    net_buf_frag_add(buf_frag1, buf_frag2);\n\n    buf_linear = net_buf_alloc(&test_pool, K_NO_WAIT);\n    zassert_not_null(buf_linear, \"Failed to allocate buf_linear\");\n\n    len = net_buf_linearize(buf_linear, buf_frag1, 0, sizeof(expected_data));\n    zassert_equal(len, sizeof(expected_data), \"Incorrect linearized length\");\n    zassert_equal(net_buf_len(buf_linear), sizeof(expected_data), \"Linearized buffer has incorrect length\");\n\n    net_buf_pull_mem(buf_linear, read_data, sizeof(read_data));\n    zassert_mem_equal(expected_data, read_data, sizeof(expected_data), \"Linearized data mismatch\");\n\n    net_buf_destroy(buf_linear);\n    net_buf_destroy(buf_frag1); /* This will also destroy buf_frag2 */\n}\n\nZTEST_SUITE(net_buf_tests, net_buf_setup, net_buf_teardown, NULL, NULL, NULL);\n"
+          },
+          "applied_files": [
+            "tests/lib/net_buf/buf/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/net_buf/buf/src/main.c:2:10: fatal error: zephyr/net/buf.h: No such file or directory\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/net_buf/buf/src/main.c:99:9: error: implicit declaration of function 'net_buf_destory'; did you mean 'net_buf_destroy'? [-Wimplicit-function-declaration]\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+    "protected_file_count": 3,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b1/v3_c_net_buf_brace_34f8f2d_fx",
+    "api_events": [],
+    "started_at": "2026-10-13T14:42:41+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

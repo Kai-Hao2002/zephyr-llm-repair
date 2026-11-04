@@ -1,0 +1,25 @@
+#!/bin/bash
+# Network lock for the OpenHands baseline (2026-10-18): the agent must not reach the internet (e.g. upstream
+# fix commits for the real-bug set). Allow loopback and replies to connections the host opens (the SDK talks
+# to the agent-server through a published port), drop every other outgoing packet, then drop CAP_NET_ADMIN /
+# CAP_NET_RAW from the bounding set before starting the agent-server, so the agent (root inside the
+# container) cannot change the rules. Needs `docker run --cap-add NET_ADMIN` (added by tools/openhands_runner.py).
+set -e
+# Resolve the proxy host while DNS still works, and pin it in /etc/hosts: once OUTPUT is dropped there is no DNS.
+proxy_ips=""
+if [ -n "${OH_PROXY_HOST:-}" ] && [ -n "${OH_PROXY_PORT:-}" ]; then
+  proxy_ips=$(getent ahostsv4 "$OH_PROXY_HOST" | awk '{print $1}' | sort -u)
+  first_ip=$(echo "$proxy_ips" | head -1)
+  [ -n "$first_ip" ] && echo "$first_ip $OH_PROXY_HOST" >> /etc/hosts
+fi
+for ipt in iptables ip6tables; do
+  $ipt -P OUTPUT DROP
+  $ipt -A OUTPUT -o lo -j ACCEPT
+  $ipt -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+done
+# The only other allowed destination is the host-side allowlist proxy (tools/egress_proxy.py), through which
+# the agent-server reaches the LLM API (in OpenHands V1 the LLM calls are made inside this container).
+for ip in $proxy_ips; do
+  iptables -A OUTPUT -p tcp -d "$ip" --dport "$OH_PROXY_PORT" -j ACCEPT
+done
+exec capsh --drop=cap_net_admin,cap_net_raw -- -c 'exec tini -- /usr/local/bin/openhands-agent-server "$@"' agent-server "$@"

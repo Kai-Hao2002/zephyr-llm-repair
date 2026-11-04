@@ -22,7 +22,7 @@ def setup_broken_zephyr_project(workspace_path: str):
     自動生成一個帶有語法錯誤的 Zephyr 專案供測試使用。
     Automatically generates a broken Zephyr project for testing.
     """
-    logger.info(f"📁 準備測試專案於: {workspace_path}")
+    logger.info(f"📁 Preparing the test project at: {workspace_path}")
     os.makedirs(os.path.join(workspace_path, "src"), exist_ok=True)
 
     # 1. CMakeLists.txt (標準 Zephyr 配置)
@@ -53,14 +53,14 @@ def run_phase_zero_build(workspace_path: str) -> str:
     執行首次建置，故意讓它失敗以取得初始錯誤日誌。
     Executes the initial build, intentionally failing it to get the raw error log.
     """
-    logger.info("\n🚧 [Phase 0] 執行首次建置以獲取錯誤特徵...")
+    logger.info("\n🚧 [Phase 0] Running the first build to capture the error signature...")
     executor = WestExecutor(target_project_path=workspace_path)
     result = executor.build_project(board="qemu_x86")
     
     log_filter = LogFilter()
     compressed_log = log_filter.compress_log(result["output"] + "\n" + result["error"])
     
-    logger.info("   ↳ 首次建置失敗 (符合預期)！擷取到的錯誤日誌:")
+    logger.info("   ↳ The first build failed (as expected)! Captured error log:")
     print("-" * 40)
     print(compressed_log)
     print("-" * 40)
@@ -80,11 +80,11 @@ def main():
     initial_log = run_phase_zero_build(test_workspace)
 
     if "Fallback" in initial_log and not "error" in initial_log.lower():
-        logger.error("❌ 無法捕捉到預期的編譯錯誤，請檢查 Docker 環境。")
+        logger.error("❌ Could not capture the expected compile error; please check the Docker environment.")
         return
 
     # 3. 初始化 LangGraph 狀態 (Initialize LangGraph State)
-    logger.info("\n🧠 [System] 初始化全域狀態與 LangGraph...")
+    logger.info("\n🧠 [System] Initializing the global state and LangGraph...")
     # 這個 demo 場景是把整個 hello_world app 直接放在 workspace 根目錄，
     # board/target_app 明確帶入舊有的預設值，行為與修改前完全相同——只是
     # 現在這兩個值是外部傳入而不是深藏在 devops_node 裡。
@@ -104,26 +104,26 @@ def main():
     graph = build_zephyr_graph()
 
     # 4. 啟動除錯迴圈 (Start Debugging Loop)
-    logger.info("🔄 [System] 開始執行多代理人閉環除錯...\n")
+    logger.info("🔄 [System] Starting the multi-agent closed-loop debugging...\n")
     start_time = time.time()
     
     # 使用 stream 逐節點印出進度
     for step_event in graph.stream(state):
         for node_name, updated_state in step_event.items():
-            print(f"\n✅ 節點 [{node_name}] 執行完畢.")
+            print(f"\n✅ Node [{node_name}] finished.")
             
             # 檢查是否已達到結束狀態
             if updated_state.get("final_status") == "resolved":
                 print("\n" + "🌟"*20)
-                print("🏆 任務成功！Zephyr 專案已修復並通過 QEMU 測試！")
+                print("🏆 Task succeeded! The Zephyr project is fixed and passes the QEMU test!")
                 print("🌟"*20)
                 break
             elif updated_state.get("final_status") == "failed_max_retries":
-                print("\n💀 達到最大重試次數，任務失敗。")
+                print("\n💀 Reached the maximum number of retries; the task failed.")
                 break
 
     end_time = time.time()
-    print(f"\n⏱️ 總耗時: {end_time - start_time:.2f} 秒")
+    print(f"\n⏱️ Total time: {end_time - start_time:.2f} s")
 
 if __name__ == "__main__":
     main()

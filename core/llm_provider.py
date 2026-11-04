@@ -67,12 +67,27 @@ _DEFAULT_PROVIDER = "gemini"
 # OpenAI pick the model matching each role's intent (cheap & fast vs. the
 # main generation workhorse).
 _MODEL_BY_PROVIDER_AND_ROLE = {
-    "gemini": {"fast": "gemini-2.5-flash", "pro": "gemini-2.5-pro"},
+    # 2026-10-03 起 v3 評測改用 gemini-3.8-flash (寫死確切 ID，不用會自動改指向的
+    # gemini-flash-latest 別名)；v2 用的是 gemini-2.5-pro (已不再開放給新使用者)。
+    # From 2026-10-03 the v3 evaluation uses gemini-3.8-flash (pinned to the exact ID,
+    # not the gemini-flash-latest alias, which can be repointed); v2 used gemini-2.5-pro
+    # (no longer offered to new users).
+    "gemini": {"fast": "gemini-3.8-flash", "pro": "gemini-3.8-flash"},
     "anthropic": {"fast": "claude-haiku-4-5-20251001", "pro": "claude-sonnet-5"},
     "openai": {"fast": "gpt-5-mini", "pro": "gpt-5"},
 }
 
 _provider = os.environ.get("ZEPHYR_LLM_PROVIDER", _DEFAULT_PROVIDER)
+
+# 單模型模式：開啟後 "fast" 角色也改用該供應商的 "pro" 模型，整條 pipeline 只用一個
+# 模型。RQ4 跨供應商比較時，「哪個模型算另一家的 fast 等價物」是主觀對應，會變成
+# 額外的混淆變因；單模型模式讓「換供應商」只改變一個東西。預設關閉，既有行為不變。
+# Single-model mode: when on, the "fast" role also uses the provider's "pro" model, so
+# the whole pipeline runs on one model. In an RQ4 cross-provider comparison, "which model
+# is the other provider's fast equivalent" is a subjective mapping and becomes an extra
+# confound; single-model mode makes "switching provider" change exactly one thing.
+# Off by default, so existing behavior is unchanged.
+_single_model = os.environ.get("ZEPHYR_SINGLE_MODEL", "").strip().lower() in ("1", "true", "yes")
 
 
 def set_provider(provider: str) -> None:
@@ -88,12 +103,46 @@ def get_provider() -> str:
     return _provider
 
 
+def set_single_model(enabled: bool) -> None:
+    """跟 set_provider 一樣，整次執行開頭呼叫一次 (Call once at process start, like set_provider)."""
+    global _single_model
+    _single_model = bool(enabled)
+
+
+def is_single_model() -> bool:
+    return _single_model
+
+
+# 環境變數 ZEPHYR_GEMINI_MODEL 有設定時，gemini 的 fast/pro 兩個角色都改用這個模型
+# (2026-10-07：v3 先用 gemini-2.5-flash 跑一輪，之後再用 gemini-3.8-flash)。實際用的
+# 模型經 get_model_name() 記進 run_meta.models。未設定時維持上面的對照表。
+# When ZEPHYR_GEMINI_MODEL is set, both gemini roles use that model (2026-10-07: v3 runs
+# once with gemini-2.5-flash, later with gemini-3.8-flash). The model actually used is
+# recorded in run_meta.models via get_model_name(). Unset keeps the table above.
+_gemini_model_override = os.environ.get("ZEPHYR_GEMINI_MODEL", "").strip()
+
+
+def _model_for_role(role: str) -> str:
+    if role not in ("fast", "pro"):
+        raise ValueError(f"unknown role '{role}', expected 'fast' or 'pro'")
+    if _provider == "gemini" and _gemini_model_override:
+        return _gemini_model_override
+    models = _MODEL_BY_PROVIDER_AND_ROLE[_provider]
+    return models["pro"] if _single_model else models[role]
+
+
 def get_model_name(role: str) -> str:
     """呼叫端 (agents/*.py) 記 token 用量時要標記用的實際模型名稱字串——
     不能寫死 "gemini-2.5-pro" 之類的固定字串，跨供應商比較時會失真。"""
-    if role not in ("fast", "pro"):
-        raise ValueError(f"unknown role '{role}', expected 'fast' or 'pro'")
-    return _MODEL_BY_PROVIDER_AND_ROLE[_provider][role]
+    return _model_for_role(role)
+
+
+# 修補生成呼叫的逾時秒數，所有 pipeline 共用。300 秒對 gemini-4-argon 太短：SDK 會把這個值放進
+# X-Server-Timeout，伺服器到期就回 504，重試也沒用 (2026-10-31 實測，同一筆 900 秒內一次成功)。
+# Timeout for patch-generation calls, shared by all pipelines. 300s is too short for gemini-4-argon:
+# the SDK sends this value as X-Server-Timeout and the server answers 504 once it expires, so retries
+# cannot help (measured 2026-10-31: the same case succeeded first try with 900s).
+PATCH_LLM_TIMEOUT = 900
 
 
 def get_chat_model(role: str, temperature: float = 0, timeout: int = 120) -> Any:
@@ -110,17 +159,22 @@ def get_chat_model(role: str, temperature: float = 0, timeout: int = 120) -> Any
     (agents/*.py) never need to change how they call this just because the
     provider changed.
     """
-    if role not in ("fast", "pro"):
-        raise ValueError(f"unknown role '{role}', expected 'fast' or 'pro'")
-    model = _MODEL_BY_PROVIDER_AND_ROLE[_provider][role]
+    model = _model_for_role(role)
 
+    # SDK 自己的重試關掉 (Gemini 的 attempts=1 即只呼叫一次)：重試一律交給
+    # core/llm_retry.py，否則 SDK 對逾時的 6 次快速重試會讓一個卡住的請求
+    # 在外層還沒判定卡住前就先耗掉 6 × timeout。
+    # SDK-level retries disabled (Gemini attempts=1 means a single call):
+    # retries are left entirely to core/llm_retry.py, otherwise the SDK's 6
+    # quick retries on timeouts burn 6 x timeout on a hung request before the
+    # outer layer can even detect the hang.
     if _provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
-        return ChatGoogleGenerativeAI(model=model, temperature=temperature, timeout=timeout)
+        return ChatGoogleGenerativeAI(model=model, temperature=temperature, timeout=timeout, max_retries=1)
     if _provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(model=model, temperature=temperature, timeout=timeout)
+        return ChatAnthropic(model=model, temperature=temperature, timeout=timeout, max_retries=0)
     if _provider == "openai":
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=model, temperature=temperature, timeout=timeout)
+        return ChatOpenAI(model=model, temperature=temperature, timeout=timeout, max_retries=0)
     raise ValueError(f"unknown provider '{_provider}'")  # pragma: no cover - set_provider already validates

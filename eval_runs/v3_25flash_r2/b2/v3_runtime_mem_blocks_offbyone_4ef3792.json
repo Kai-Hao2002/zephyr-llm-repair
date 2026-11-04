@@ -1,0 +1,91 @@
+[
+  {
+    "case_id": "v3_runtime_mem_blocks_offbyone_4ef3792",
+    "category": "runtime_crash",
+    "pipeline": "b2",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 131.79373908042908,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b2_single_agent_rag",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 24704,
+            "output_tokens": 25362
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": "The assertion failure at `tests/lib/mem_blocks_stats/src/main.c:144` indicates that `sys_mem_blocks_free` returned a non-zero status.\n\nTracing the memory operations:\n1.  `sys_mem_blocks_alloc(&mem_block_01, 3, blocks);` allocates 3 blocks (let's call their pointers `ptr_A`, `ptr_B`, `ptr_C`) and stores them in `blocks[0]`, `blocks[1]`, `blocks[2]`.\n2.  `sys_mem_blocks_free(&mem_block_01, 2, &blocks[1]);` frees the blocks pointed to by `blocks[1]` (`ptr_B`) and `blocks[2]` (`ptr_C`). At this point, `blocks[0]` (`ptr_A`) is still allocated, while `ptr_B` and `ptr_C` are free. The `blocks` array still holds `[ptr_A, ptr_B, ptr_C]`.\n3.  `sys_mem_blocks_alloc(&mem_block_01, 1, &blocks[1]);` allocates a new block (let's call its pointer `ptr_D`) and stores it in `blocks[1]`. Now, `blocks[0]` holds `ptr_A`, `blocks[1]` holds `ptr_D`, and `blocks[2]` still holds `ptr_C` (which is a freed block). Both `ptr_A` and `ptr_D` are allocated.\n4.  `sys_mem_blocks_free(&mem_block_01, 2, &blocks[0]);` (line 144) attempts to free the blocks pointed to by `blocks[0]` (`ptr_A`) and `blocks[1]` (`ptr_D`). Both `ptr_A` and `ptr_D` are currently allocated and valid.\n\nThe `sys_mem_blocks_free` function iterates through the provided array of pointers and calls `k_mem_slab_free` for each. If `k_mem_slab_free` returns an error (e.g., `-EFAULT` for an invalid or already freed block), `sys_mem_blocks_free` propagates that error.\n\nWhile the logic appears sound, a common defensive programming practice in memory management tests is to explicitly nullify pointers to freed memory. Although `blocks[2]` is not directly used in the final `sys_mem_blocks_free` call, its stale value (`ptr_C`, which is now freed) might, in some subtle way, interact with the memory allocator's internal state or debugging checks, leading to an unexpected error.\n\nThe fix involves clearing the pointers in the `blocks` array immediately after the memory they point to has been freed. This ensures that the array only contains valid pointers to allocated memory or `NULL`.\n\n<tests/lib/mem_blocks_stats/src/main.c>\n<<<<<<<< SEARCH\n\tstatus = sys_mem_blocks_free(&mem_block_01, 2, &blocks[1]);\n\tzassert_equal(status, 0, \"Routine failed with status %d\\n\", status);\n\n\tstatus = sys_mem_blocks_runtime_stats_get(&mem_block_01, &stats);\n\tzassert_equal(status, 0, \"Routine failed with status %d\\n\", status);\n\n\tzassert_equal(stats.free_bytes, BLK_SZ * (NUM_BLOCKS - 1),\n\t\t      \"Expected %u free bytes, not %zu\\n\",\n\t\t      BLK_SZ * (NUM_BLOCKS - 1), stats.free_bytes);\n\tzassert_equal(stats.allocated_bytes, 1 * BLK_SZ,\n\t\t      \"Expected %u allocated bytes, not %zu\\n\",\n\t\t      1 * BLK_SZ, stats.allocated_bytes);\n\tzassert_equal(stats.max_allocated_bytes, 3 * BLK_SZ,\n\t\t      \"Expected %u max allocated bytes, not %zu\\n\",\n\t\t      3 * BLK_SZ, stats.max_allocated_bytes);\n\n\t/* Allocate 1 block and verify the max is still at 3 */\n\n\tstatus = sys_mem_blocks_alloc(&mem_block_01, 1, &blocks[1]);\n\tzassert_equal(status, 0, \"Routine failed with status %d\\n\", status);\n\n\tstatus = sys_mem_blocks_runtime_stats_get(&mem_block_01, &stats);\n\tzassert_equal(status, 0, \"Routine failed with status %d\\n\", status);\n\n\tzassert_equal(stats.free_bytes, BLK_SZ * (NUM_BLOCKS - 2),\n\t\t      \"Expected %u free bytes, not %zu\\n\",\n\t\t      BLK_SZ * (NUM_BLOCKS - 2), stats.free_bytes);\n\tzassert_equal(stats.allocated_bytes, 2 * BLK_SZ,\n\t\t      \"Expected %u allocated bytes, not %zu\\n\",\n\t\t      2 * BLK_SZ, stats.allocated_bytes);\n\tzassert_equal(stats.max_allocated_bytes, 3 * BLK_SZ,\n\t\t      \"Expected %u max allocated bytes, not %zu\\n\",\n\t\t      3 * BLK_SZ, stats.max_allocated_bytes);\n\n\n\t/* Reset the max allocated blocks; verify max is 2 blocks */\n\n\tstatus = sys_mem_blocks_runtime_stats_reset_max(&mem_block_01);\n\tzassert_equal(status, 0, \"Routine failed with status %d\\n\", status);\n\n\tstatus = sys_mem_blocks_runtime_stats_get(&mem_block_01, &stats);\n\tzassert_equal(status, 0, \"Routine failed with status %d\\n\", status);\n\n\tzassert_equal(stats.free_bytes, BLK_SZ * (NUM_BLOCKS - 2),\n\t\t      \"Expected %u free bytes, not %zu\\n\",\n\t\t      BLK_SZ * (NUM_BLOCKS - 2), stats.free_bytes);\n\tzassert_equal(stats.allocated_bytes, 2 * BLK_SZ,\n\t\t      \"Expected %u allocated bytes, not %zu\\n\",\n\t\t      2 * BLK_SZ, stats.allocated_bytes);\n\tzassert_equal(stats.max_allocated_bytes, 2 * BLK_SZ,\n\t\t      \"Expected %u max allocated bytes, not %zu\\n\",\n\t\t      2 * BLK_SZ, stats.allocated_bytes);\n\n\t/* Free the last two blocks; verify stats results */\n\n\tstatus = sys_mem_blocks_free(&mem_block_01, 2, &blocks[0]);\n\tzassert_equal(status, 0, \"Routine failed with status %d\\n\", status);\n========\n\tstatus = sys_mem_blocks_free(&mem_block_01, 2, &blocks[1]);\n\tzassert_equal(status, 0, \"Routine failed with status %d\\n\", status);\n\tblocks[1] = NULL; /* Clear pointer to freed block */\n\tblocks[2] = NULL; /* Clear pointer to freed block */\n\n\tstatus = sys_mem_blocks_runtime_stats_get(&mem_block_01, &stats);\n\tzassert_equal(status, 0, \"Routine failed with status %d\\n\", status);\n\n\tzassert_equal(stats.free_bytes, BLK_SZ * (NUM_BLOCKS - 1),\n\t\t      \"Expected %u free bytes, not %zu\\n\",\n\t\t      BLK_SZ * (NUM_BLOCKS - 1), stats.free_bytes);\n\tzassert_equal(stats.allocated_bytes, 1 * BLK_SZ,\n\t\t      \"Expected %u allocated bytes, not %zu\\n\",\n\t\t      1 * BLK_SZ, stats.allocated_bytes);\n\tzassert_equal(stats.max_allocated_bytes, 3 * BLK_SZ,\n\t\t      \"Expected %u max allocated bytes, not %zu\\n\",\n\t\t      3 * BLK_SZ, stats.max_allocated_bytes);\n\n\t/* Allocate 1 block and verify the max is still at 3 */\n\n\tstatus = sys_mem_blocks_alloc(&mem_block_01, 1, &blocks[1]);\n\tzassert_equal(status, 0, \"Routine failed with status %d\\n\", status);\n\n\tstatus = sys_mem_blocks_runtime_stats_get(&mem_block_01, &stats);\n\tzassert_equal(status, 0, \"Routine failed with status %d\\n\", status);\n\n\tzassert_equal(stats.free_bytes, BLK_SZ * (NUM_BLOCKS - 2),\n\t\t      \"Expected %u free bytes, not %zu\\n\",\n\t\t      BLK_SZ * (NUM_BLOCKS - 2), stats.free_bytes);\n\tzassert_equal(stats.allocated_bytes, 2 * BLK_SZ,\n\t\t      \"Expected %u allocated bytes, not %zu\\n\",\n\t\t      2 * BLK_SZ, stats.allocated_bytes);\n\tzassert_equal(stats.max_allocated_bytes, 3 * BLK_SZ,\n\t\t      \"Expected %u max allocated bytes, not %zu\\n\",\n\t\t      3 * BLK_SZ, stats.max_allocated_bytes);\n\n\n\t/* Reset the max allocated blocks; verify max is 2 blocks */\n\n\tstatus = sys_mem_blocks_runtime_stats_reset_max(&mem_block_01);\n\tzassert_equal(status, 0, \"Routine failed with status %d\\n\", status);\n\n\tstatus = sys_mem_blocks_runtime_stats_get(&mem_block_01, &stats);\n\tzassert_equal(status, 0, \"Routine failed with status %d\\n\", status);\n\n\tzassert_equal(stats.free_bytes, BLK_SZ * (NUM_BLOCKS - 2),\n\t\t      \"Expected %u free bytes, not %zu\\n\",\n\t\t      BLK_SZ * (NUM_BLOCKS - 2), stats.free_bytes);\n\tzassert_equal(stats.allocated_bytes, 2 * BLK_SZ,\n\t\t      \"Expected %u allocated bytes, not %zu\\n\",\n\t\t      2 * BLK_SZ, stats.allocated_bytes);\n\tzassert_equal(stats.max_allocated_bytes, 2 * BLK_SZ,\n\t\t      \"Expected %u max allocated bytes, not %zu\\n\",\n\t\t      2 * BLK_SZ, stats.max_allocated_bytes);\n\n\t/* Free the last two blocks; verify stats results */\n\n\tstatus = sys_mem_blocks_free(&mem_block_01, 2, &blocks[0]);\n\tzassert_equal(status, 0, \"Routine failed with status %d\\n\", status);\n\tblocks[0] = NULL; /* Clear pointer to freed block */\n\tblocks[1] = NULL; /* Clear pointer to freed block */\n>>>>>>>> REPLACE",
+          "applied_files": [],
+          "apply_error": "SearchMatchFailed: No exactly matching SEARCH block was found in 'tests/lib/mem_blocks_stats/src/main.c'.\nMake sure the content of the SEARCH block is 100% identical to the original code in the file (including indentation).",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": [
+            "subsys/llext/Kconfig",
+            "arch/arm/Kconfig",
+            "tests/benchmarks/ipi_metric/Kconfig",
+            "Kconfig.zephyr",
+            "tests/subsys/random/rng/src/main.c",
+            "include/zephyr/xen/public/hvm/ioreq.h",
+            "samples/tfm_integration/psa_crypto/src/main.c",
+            "subsys/net/lib/tls_credentials/tls_credentials_digest_raw.h"
+          ],
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": [
+      "subsys/llext/Kconfig",
+      "arch/arm/Kconfig",
+      "tests/benchmarks/ipi_metric/Kconfig",
+      "Kconfig.zephyr",
+      "tests/subsys/random/rng/src/main.c",
+      "include/zephyr/xen/public/hvm/ioreq.h",
+      "samples/tfm_integration/psa_crypto/src/main.c",
+      "subsys/net/lib/tls_credentials/tls_credentials_digest_raw.h"
+    ],
+    "initial_error_log": "[Fallback Raw Tail]\n[138/146] Generating irq_int_vector_map.o\n[139/146] Generating irq_vectors_alloc.o\n[140/146] Generating gdt.bin\n[141/146] Generating gdt.o\n[142/146] Generating pagetables.bin\n[143/146] Generating pagetables.o\n[144/146] Building C object zephyr/CMakeFiles/zephyr_final.dir/misc/empty_file.c.obj\n[145/146] Linking C executable zephyr/zephyr.elf\nMemory region         Used Size  Region Size  %age Used\nRAM:      168504 B        31 MB      0.52%\nIDT_LIST:           0 B         2 KB      0.00%\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: qemu_x86/atom\n[145/146] To exit from QEMU enter: 'CTRL+a, x'[QEMU] CPU: qemu32,+nx,+pae\nSeaBIOS (version zephyr-v1.16.3-2-0-gf8da0cc-zephyr)\nBooting from ROM..\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE lib_mem_blocks_stats_test\n===================================================================\nSTART - test_mem_blocks_runtime_stats\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/mem_blocks_stats/src/main.c:144: lib_mem_blocks_stats_test_test_mem_blocks_runtime_stats: (status not equal to 0)",
+    "protected_file_count": 4,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b2/v3_runtime_mem_blocks_offbyone_4ef3792",
+    "api_events": [],
+    "started_at": "2026-10-14T06:42:18+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

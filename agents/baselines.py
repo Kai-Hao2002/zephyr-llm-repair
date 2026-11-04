@@ -29,7 +29,9 @@ from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 
 from core.llm_usage import extract_usage
-from core.llm_provider import get_chat_model, get_model_name
+from core.llm_provider import PATCH_LLM_TIMEOUT, get_chat_model, get_model_name
+from core.llm_retry import call_with_retry
+from agents.spec_rule import SPEC_RULE
 
 # 三個 baseline 的修補生成都用 "pro" 角色 (見 core/llm_provider.py)——跟
 # Proposed pipeline 的 Patch Expert 用同一個角色定位，維持公平比較 (三個
@@ -41,28 +43,31 @@ from core.llm_provider import get_chat_model, get_model_name
 # weaker/stronger underlying model).
 _PATCH_ROLE = "pro"
 
-_PATCH_FORMAT_SYSTEM_PROMPT = """你是一位嵌入式軟體工程師，專精於修復 Zephyr RTOS 的程式碼。
-請根據錯誤日誌與提供的專案原始碼，輸出修復程式碼。
+_PATCH_FORMAT_SYSTEM_PROMPT = """You are an embedded software engineer specializing in fixing Zephyr RTOS code.
+Based on the error log and the provided project source code, output the fix.
 
-【嚴格格式要求】
-你必須使用以下的 SEARCH/REPLACE 區塊格式來修改檔案。
-絕對不要在區塊外加上 ``` 程式碼區塊符號。
-SEARCH 區塊內的程式碼必須與原始檔案「一模一樣」（包含縮排）。
+[STRICT FORMAT REQUIREMENTS]
+You must modify files using the following SEARCH/REPLACE block format.
+Never wrap the blocks in ``` code fences.
+The code inside the SEARCH block must match the original file EXACTLY (including indentation).
 
-<檔案的相對路徑>
+<relative path of the file>
 <<<<<<<< SEARCH
-<要被替換的原始程式碼>
+<original code to be replaced>
 ========
-<修復後的新程式碼>
->>>>>>>> REPLACE"""
+<new code after the fix>
+>>>>>>>> REPLACE
+
+""" + SPEC_RULE
 
 
 class B1FullFilePatch(BaseModel):
-    """B1 沒有工具、沒有 RAG，只憑訓練時記得的 Zephyr 知識猜測要改哪個檔案、
-    改成什麼樣子——它從沒看過這次 workspace 裡的實際檔案內容，沒辦法產生
-    需要逐字元比對原文的 SEARCH/REPLACE，只能整檔輸出。"""
-    filepath: str = Field(description="你認為需要修正的檔案，相對於 Zephyr 專案根目錄的路徑 (例如 'samples/hello_world/src/main.c')。")
-    content: str = Field(description="該檔案修正後的完整內容 (整個檔案，不是片段)。")
+    """B1 has no tools and no RAG: it guesses which file to change, and how, purely from
+    the Zephyr knowledge it memorized during training. It has never seen the actual file
+    contents in this workspace, so it cannot produce a SEARCH/REPLACE block that needs a
+    character-exact match of the original text and can only output whole files."""
+    filepath: str = Field(description="The file you think needs to be fixed, as a path relative to the Zephyr project root (e.g. 'samples/hello_world/src/main.c').")
+    content: str = Field(description="The complete content of that file after the fix (the whole file, not a fragment).")
 
 
 def b1_generate_full_file_patch(error_log: str) -> Tuple[Dict[str, str], Dict[str, Any]]:
@@ -74,16 +79,16 @@ def b1_generate_full_file_patch(error_log: str) -> Tuple[Dict[str, str], Dict[st
     回傳 (patch 內容, 這次呼叫的 token 用量)。
     Returns (patch content, this call's token usage).
     """
-    # timeout=300：見 agents/patch_expert.py 的同款說明——這三個 baseline
+    # timeout：見 agents/patch_expert.py 的同款說明——這三個 baseline
     # 呼叫都是修補生成 (context 可能不小)，沒有 timeout 的話一次卡住的
     # API 呼叫會讓整個 --pipeline b1/b2/b3 跑分無限期卡住 (2026-09-01 實測
     # 曾讓一次 B3 pilot 卡了 1 小時 44 分鐘)。
-    # timeout=300: same rationale as agents/patch_expert.py — these three
+    # timeout: same rationale as agents/patch_expert.py — these three
     # baseline calls are all patch generation (context can be sizable);
     # without a timeout, one hung API call blocks an entire --pipeline
     # b1/b2/b3 run indefinitely (confirmed 2026-09-01: a B3 pilot hung for
     # 1h44m).
-    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=300)
+    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=PATCH_LLM_TIMEOUT)
     # include_raw=True：見 agents/analyzer.py 的同款說明，需要底層 AIMessage
     # 才拿得到 usage_metadata。
     # include_raw=True: see agents/analyzer.py — needs the underlying
@@ -91,14 +96,16 @@ def b1_generate_full_file_patch(error_log: str) -> Tuple[Dict[str, str], Dict[st
     structured_llm = llm.with_structured_output(B1FullFilePatch, include_raw=True)
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "你是一位 Zephyr RTOS 專家。你只會看到一段編譯或執行期錯誤日誌，"
-                    "完全看不到這個專案任何檔案的實際內容、任何檢索資料，也沒有任何工具可用。"
-                    "請完全憑你既有的 Zephyr 原始碼知識，判斷最可能出錯的檔案，"
-                    "直接輸出你認為修正後的完整檔案內容。"),
-        ("human", "錯誤日誌：\n{error_log}"),
+        ("system", "You are a Zephyr RTOS expert. You will only see a compile-time or runtime error log. "
+                    "You cannot see the actual content of any file in this project, you get no retrieval data, "
+                    "and you have no tools available. "
+                    "Relying purely on your existing knowledge of the Zephyr source code, work out the file that is most likely at fault, "
+                    "and directly output the complete content of that file as you believe it should be after the fix.\n\n"
+                    + SPEC_RULE),
+        ("human", "Error log:\n{error_log}"),
     ])
     chain = prompt | structured_llm
-    raw_output = chain.invoke({"error_log": error_log})
+    raw_output = call_with_retry(lambda: chain.invoke({"error_log": error_log}), what="b1_zero_shot")
     result: B1FullFilePatch = raw_output["parsed"]
     usage_entry = extract_usage(raw_output["raw"], node="b1_zero_shot", model=get_model_name(_PATCH_ROLE))
     return {"filepath": result.filepath.strip(), "content": result.content}, usage_entry
@@ -118,58 +125,76 @@ def b2_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
     回傳 (patch 內容, 這次呼叫的 token 用量)。
     Returns (patch content, this call's token usage).
     """
-    # timeout=300：見 agents/patch_expert.py 的同款說明——這三個 baseline
+    # timeout：見 agents/patch_expert.py 的同款說明——這三個 baseline
     # 呼叫都是修補生成 (context 可能不小)，沒有 timeout 的話一次卡住的
     # API 呼叫會讓整個 --pipeline b1/b2/b3 跑分無限期卡住 (2026-09-01 實測
     # 曾讓一次 B3 pilot 卡了 1 小時 44 分鐘)。
-    # timeout=300: same rationale as agents/patch_expert.py — these three
+    # timeout: same rationale as agents/patch_expert.py — these three
     # baseline calls are all patch generation (context can be sizable);
     # without a timeout, one hung API call blocks an entire --pipeline
     # b1/b2/b3 run indefinitely (confirmed 2026-09-01: a B3 pilot hung for
     # 1h44m).
-    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=300)
+    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=PATCH_LLM_TIMEOUT)
     prompt = ChatPromptTemplate.from_messages([
         ("system", _PATCH_FORMAT_SYSTEM_PROMPT),
-        ("human", "[目前專案原始碼與設定檔內容 (含關鍵字檢索額外找到的候選檔案)]\n{project_files}\n\n"
-                  "[目前的錯誤日誌]\n{error_log}\n\n請開始生成修補區塊："),
+        ("human", "[Current project source and configuration file contents (including candidate files additionally found by keyword retrieval)]\n{project_files}\n\n"
+                  "[Current error log]\n{error_log}\n\nPlease start generating the patch blocks:"),
     ])
     chain = prompt | llm
-    response = chain.invoke({"error_log": error_log, "project_files": project_files_content})
+    response = call_with_retry(lambda: chain.invoke({"error_log": error_log, "project_files": project_files_content}),
+                               what="b2_single_agent_rag")
     usage_entry = extract_usage(response, node="b2_single_agent_rag", model=get_model_name(_PATCH_ROLE))
-    return response.content, usage_entry
+    # gemini-3.x 的 content 可能是 content block 的 list (含 thinking/signature)，.text 只取文字部分
+    # gemini-3.x may return content as a list of blocks (thinking/signature); .text keeps only the text
+    return str(response.text), usage_entry
 
 
-def b3_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, Dict[str, Any]]:
+def b3_generate_patch(error_log: str, project_files_content: str,
+                      previous_attempts: str = "") -> Tuple[str, Dict[str, Any]]:
     """
     B3 Closed-Loop Single Agent (Table 2)："Build feedback, but no
     specialized multi-agent split"——單一 persona 身兼診斷與修補，closed
     loop 由 core/baseline_pipelines.py 的 run_b3 實作 (重複呼叫這個函式，
-    每次把最新一輪的 error_log 帶進來)。故意不接受、不傳入跨迭代記憶
-    (attempt_history)：提案原文把 Context Compression 明確歸屬 Supervisor
-    Node，屬於多代理人分工的一部分，B3 定義是「no specialized multi-agent
-    split」，給它記憶會讓「有沒有多代理人分工」這個變因跟「有沒有跨迭代
-    記憶」混在一起，稀釋掉 Proposed 相對 B3 的優勢歸因。也不給任何檢索——
-    B3 要對照的變因是「有沒有閉環重試」，不是「有沒有 RAG」。
+    每次把最新一輪的 error_log 帶進來)。不給任何檢索——B3 要對照的變因是
+    「有沒有閉環重試」，不是「有沒有 RAG」。
+
+    previous_attempts (2026-10-13 起)：這個 session 前幾輪的 patch 與結果，原文機械式截斷，
+    不經 LLM 壓縮 (壓縮屬於 Proposed 的 Supervisor)。之前的 B3 完全沒有跨迭代記憶，prompt 每輪都
+    一樣、temperature 0，2.5-flash 有 90/323 輪送出和上一輪相同的 patch；Table 2 只要求「沒有
+    多代理人分工」，沒有要求沒有記憶，一般的閉迴路單一 agent 本來就看得到自己的歷史。
+
+    previous_attempts (from 2026-10-13): this session's earlier patches and outcomes, mechanically
+    truncated, not LLM-compressed (compression belongs to Proposed's Supervisor). B3 used to have no
+    cross-iteration memory at all; with an identical prompt every round and temperature 0, 90/323 later
+    2.5-flash iterations resubmitted the previous patch. Table 2 only requires "no specialized
+    multi-agent split", not "no memory"; a plain closed-loop single agent sees its own history.
 
     回傳 (patch 內容, 這次呼叫的 token 用量)。
     Returns (patch content, this call's token usage).
     """
-    # timeout=300：見 agents/patch_expert.py 的同款說明——這三個 baseline
+    # timeout：見 agents/patch_expert.py 的同款說明——這三個 baseline
     # 呼叫都是修補生成 (context 可能不小)，沒有 timeout 的話一次卡住的
     # API 呼叫會讓整個 --pipeline b1/b2/b3 跑分無限期卡住 (2026-09-01 實測
     # 曾讓一次 B3 pilot 卡了 1 小時 44 分鐘)。
-    # timeout=300: same rationale as agents/patch_expert.py — these three
+    # timeout: same rationale as agents/patch_expert.py — these three
     # baseline calls are all patch generation (context can be sizable);
     # without a timeout, one hung API call blocks an entire --pipeline
     # b1/b2/b3 run indefinitely (confirmed 2026-09-01: a B3 pilot hung for
     # 1h44m).
-    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=300)
+    llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=PATCH_LLM_TIMEOUT)
     prompt = ChatPromptTemplate.from_messages([
         ("system", _PATCH_FORMAT_SYSTEM_PROMPT),
-        ("human", "[目前專案原始碼與設定檔內容]\n{project_files}\n\n"
-                  "[目前的錯誤日誌]\n{error_log}\n\n請開始生成修補區塊："),
+        ("human", "[Your earlier attempts in this session and their outcomes (oldest first)]\n{previous_attempts}\n"
+                  "(Always write SEARCH blocks against the current file contents below. If changes from an earlier "
+                  "patch do not appear there, they were reverted or never applied.)\n\n"
+                  "[Current project source and configuration file contents]\n{project_files}\n\n"
+                  "[Current error log]\n{error_log}\n\nPlease start generating the patch blocks:"),
     ])
     chain = prompt | llm
-    response = chain.invoke({"error_log": error_log, "project_files": project_files_content})
+    response = call_with_retry(lambda: chain.invoke({
+        "previous_attempts": previous_attempts or "(This is the first attempt; there is no history yet.)",
+        "error_log": error_log, "project_files": project_files_content}), what="b3_closed_loop")
     usage_entry = extract_usage(response, node="b3_closed_loop", model=get_model_name(_PATCH_ROLE))
-    return response.content, usage_entry
+    # gemini-3.x 的 content 可能是 content block 的 list (含 thinking/signature)，.text 只取文字部分
+    # gemini-3.x may return content as a list of blocks (thinking/signature); .text keeps only the text
+    return str(response.text), usage_entry

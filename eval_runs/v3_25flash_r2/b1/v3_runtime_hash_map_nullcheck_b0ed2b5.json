@@ -1,0 +1,76 @@
+[
+  {
+    "case_id": "v3_runtime_hash_map_nullcheck_b0ed2b5",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 49.6955041885376,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 381,
+            "output_tokens": 11207
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": {
+            "filepath": "lib/hash_map/hash_map.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/lib/hash_map.h>\n\n/*\n * This is a basic open-addressing hash map implementation with linear probing.\n * It supports deletion by marking entries as HASH_MAP_ENTRY_DELETED.\n */\n\nvoid hash_map_init(struct hash_map *map,\n                   struct hash_map_entry *entries, uint32_t capacity,\n                   hash_map_hash_func_t hash_func,\n                   hash_map_cmp_func_t cmp_func)\n{\n    __ASSERT_NO_MSG(map != NULL);\n    __ASSERT_NO_MSG(entries != NULL);\n    __ASSERT_NO_MSG(capacity > 0); /* Capacity must be greater than 0 to avoid modulo by zero */\n    __ASSERT_NO_MSG(hash_func != NULL);\n    __ASSERT_NO_MSG(cmp_func != NULL);\n\n    map->entries = entries;\n    map->capacity = capacity;\n    map->hash_func = hash_func;\n    map->cmp_func = cmp_func;\n    map->size = 0;\n\n    for (uint32_t i = 0; i < capacity; ++i) {\n        map->entries[i].state = HASH_MAP_ENTRY_EMPTY;\n        /* Optionally clear key/value pointers, though not strictly necessary for EMPTY state */\n        /* map->entries[i].key = NULL; */\n        /* map->entries[i].value = NULL; */\n    }\n}\n\nbool hash_map_insert(struct hash_map *map, const void *key, void *value)\n{\n    __ASSERT_NO_MSG(map != NULL);\n    __ASSERT_NO_MSG(key != NULL); /* Keys should generally not be NULL */\n\n    if (map->size == map->capacity) {\n        return false; /* Map is full */\n    }\n\n    uint32_t hash = map->hash_func(key);\n    uint32_t idx = hash % map->capacity;\n\n    for (uint32_t i = 0; i < map->capacity; ++i) {\n        struct hash_map_entry *entry = &map->entries[(idx + i) % map->capacity];\n\n        if (entry->state == HASH_MAP_ENTRY_OCCUPIED) {\n            if (map->cmp_func(key, entry->key)) {\n                /* Key already exists, update value */\n                entry->value = value;\n                return true;\n            }\n        } else { /* HASH_MAP_ENTRY_EMPTY or HASH_MAP_ENTRY_DELETED */\n            entry->key = key;\n            entry->value = value;\n            entry->state = HASH_MAP_ENTRY_OCCUPIED;\n            map->size++;\n            return true;\n        }\n    }\n    return false; /* Should not be reached if map->size < map->capacity */\n}\n\nbool hash_map_get(struct hash_map *map, const void *key, void **value)\n{\n    __ASSERT_NO_MSG(map != NULL);\n    __ASSERT_NO_MSG(key != NULL); /* Keys should generally not be NULL */\n\n    uint32_t hash = map->hash_func(key);\n    uint32_t idx = hash % map->capacity;\n\n    for (uint32_t i = 0; i < map->capacity; ++i) {\n        struct hash_map_entry *entry = &map->entries[(idx + i) % map->capacity];\n\n        if (entry->state == HASH_MAP_ENTRY_EMPTY) {\n            return false; /* Key not found */\n        }\n\n        if (entry->state == HASH_MAP_ENTRY_OCCUPIED && map->cmp_func(key, entry->key)) {\n            if (value != NULL) {\n                *value = entry->value;\n            }\n            return true; /* Key found */\n        }\n        /* If state is HASH_MAP_ENTRY_DELETED, continue probing */\n    }\n\n    return false; /* Table full, key not found */\n}\n\nbool hash_map_remove(struct hash_map *map, const void *key, void **value)\n{\n    __ASSERT_NO_MSG(map != NULL);\n    __ASSERT_NO_MSG(key != NULL); /* Keys should generally not be NULL */\n\n    uint32_t hash = map->hash_func(key);\n    uint32_t idx = hash % map->capacity;\n\n    for (uint32_t i = 0; i < map->capacity; ++i) {\n        struct hash_map_entry *entry = &map->entries[(idx + i) % map->capacity];\n\n        if (entry->state == HASH_MAP_ENTRY_EMPTY) {\n            return false; /* Key not found */\n        }\n\n        if (entry->state == HASH_MAP_ENTRY_OCCUPIED && map->cmp_func(key, entry->key)) {\n            if (value != NULL) {\n                *value = entry->value;\n            }\n            entry->state = HASH_MAP_ENTRY_DELETED;\n            map->size--;\n            return true; /* Key found and removed */\n        }\n        /* If state is HASH_MAP_ENTRY_DELETED, continue probing */\n    }\n\n    return false; /* Table full, key not found */\n}\n\nvoid hash_map_clear(struct hash_map *map, hash_map_clear_cb_t cb)\n{\n    __ASSERT_NO_MSG(map != NULL);\n\n    for (uint32_t i = 0; i < map->capacity; ++i) {\n        struct hash_map_entry *entry = &map->entries[i];\n        if (entry->state == HASH_MAP_ENTRY_OCCUPIED) {\n            if (cb != NULL) {\n                cb(entry->key, entry->value);\n            }\n            entry->state = HASH_MAP_ENTRY_EMPTY;\n            /* Optionally clear key/value pointers */\n            /* entry->key = NULL; */\n            /* entry->value = NULL; */\n        } else if (entry->state == HASH_MAP_ENTRY_DELETED) {\n            entry->state = HASH_MAP_ENTRY_EMPTY;\n            /* Optionally clear key/value pointers */\n            /* entry->key = NULL; */\n            /* entry->value = NULL; */\n        }\n    }\n    map->size = 0;\n}\n\nvoid hash_map_foreach(struct hash_map *map, hash_map_foreach_cb_t cb)\n{\n    __ASSERT_NO_MSG(map != NULL);\n    __ASSERT_NO_MSG(cb != NULL); /* Callback must be provided for foreach */\n\n    for (uint32_t i = 0; i < map->capacity; ++i) {\n        struct hash_map_entry *entry = &map->entries[i];\n        if (entry->state == HASH_MAP_ENTRY_OCCUPIED) {\n            cb(entry->key, entry->value);\n        }\n    }\n}\n\nuint32_t hash_map_size(const struct hash_map *map)\n{\n    __ASSERT_NO_MSG(map != NULL);\n    return map->size;\n}\n\nuint32_t hash_map_capacity(const struct hash_map *map)\n{\n    __ASSERT_NO_MSG(map != NULL);\n    return map->capacity;\n}\n"
+          },
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file 'lib/hash_map/hash_map.c' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nRunning TESTSUITE hash_map\n===================================================================\nCONFIG_TEST_LIB_HASH_MAP_MAX_ENTRIES: 40\nSTART - test_clear_callback\nPASS - test_clear_callback in 0.000 seconds\n===================================================================\nSTART - test_clear_no_callback\nPASS - test_clear_no_callback in 0.000 seconds\n===================================================================\nSTART - test_empty\nPASS - test_empty in 0.000 seconds\n===================================================================\nSTART - test_foreach\nPASS - test_foreach in 0.000 seconds\n===================================================================\nSTART - test_get_false\nPASS - test_get_false in 0.000 seconds\n===================================================================\nSTART - test_get_true\nSegmentation fault",
+    "protected_file_count": 14,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b1/v3_runtime_hash_map_nullcheck_b0ed2b5",
+    "api_events": [],
+    "started_at": "2026-10-13T17:45:30+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

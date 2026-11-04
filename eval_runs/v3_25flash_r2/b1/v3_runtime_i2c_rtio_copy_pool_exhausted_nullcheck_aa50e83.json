@@ -1,0 +1,78 @@
+[
+  {
+    "case_id": "v3_runtime_i2c_rtio_copy_pool_exhausted_nullcheck_aa50e83",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 76.93324995040894,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 801,
+            "output_tokens": 5031
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "drivers/i2c/i2c_rtio.c",
+            "content": "#include <zephyr/drivers/i2c.h>\n#include <zephyr/drivers/i2c_rtio.h>\n#include <zephyr/rtio/rtio.h>\n#include <zephyr/kernel.h>\n#include <zephyr/logging/log.h>\n\nLOG_MODULE_REGISTER(i2c_rtio, CONFIG_I2C_RTIO_LOG_LEVEL);\n\nstatic void i2c_iodev_submit_work_handler(struct k_work *work);\n\nstruct i2c_rtio_work {\n\tstruct k_work work;\n\tstruct rtio_iodev_sqe *sqe;\n\tconst struct device *dev;\n\tstruct i2c_msg *msgs;\n\tuint8_t *read_buf;\n\tsize_t read_len;\n\tint msg_count;\n};\n\nK_WORK_DEFINE_STATIC(i2c_rtio_work_item, i2c_iodev_submit_work_handler);\n\nstatic void i2c_iodev_submit_work_handler(struct k_work *work)\n{\n\tstruct i2c_rtio_work *rtio_work = CONTAINER_OF(work, struct i2c_rtio_work, work);\n\tconst struct device *dev = rtio_work->dev;\n\tstruct rtio_iodev_sqe *sqe = rtio_work->sqe;\n\tstruct i2c_msg *msgs = rtio_work->msgs;\n\tuint8_t *read_buf = rtio_work->read_buf;\n\tsize_t read_len = rtio_work->read_len;\n\tint msg_count = rtio_work->msg_count;\n\tint ret;\n\n\tLOG_DBG(\"Sync RTIO work item for: %p\", sqe);\n\n\tret = i2c_transfer(dev, msgs, msg_count, RTIO_IODEV_SQE_GET_ADDR(sqe));\n\n\tif (ret == 0 && read_buf != NULL) {\n\t\t/* Copy data from temporary buffer to user buffer */\n\t\trtio_sbuf_copy_to_user(sqe, read_buf, read_len);\n\t}\n\n\t/* Free temporary messages and read buffer */\n\tif (msgs != NULL) {\n\t\trtio_sbuf_free(sqe, msgs);\n\t}\n\tif (read_buf != NULL) {\n\t\trtio_sbuf_free(sqe, read_buf);\n\t}\n\n\trtio_iodev_sqe_complete(sqe, ret);\n}\n\nstatic int i2c_iodev_submit_fallback(const struct device *dev, struct rtio_iodev_sqe *sqe)\n{\n\tconst struct i2c_rtio_iodev_data *data = sqe->iodev_data;\n\tstruct i2c_msg *msgs;\n\tuint8_t *read_buf = NULL;\n\tsize_t read_len = 0;\n\tint i;\n\n\tLOG_DBG(\"Executing fallback for dev: %p, sqe: %p\", dev, sqe);\n\n\t/* Allocate temporary messages array */\n\tmsgs = rtio_sbuf_alloc(sqe, sizeof(struct i2c_msg) * data->msg_count);\n\tif (msgs == NULL) {\n\t\tLOG_ERR(\"Failed to allocate I2C messages buffer\");\n\t\treturn -ENOMEM; /* Fix: Return error if allocation fails */\n\t}\n\n\t/* Copy messages from user to temporary buffer and identify total read length */\n\tfor (i = 0; i < data->msg_count; i++) {\n\t\tmsgs[i] = data->msgs[i];\n\t\tif ((msgs[i].flags & I2C_MSG_RW_MASK) == I2C_MSG_READ) {\n\t\t\tread_len += msgs[i].len;\n\t\t}\n\t}\n\n\tif (read_len > 0) {\n\t\tread_buf = rtio_sbuf_alloc(sqe, read_len);\n\t\tif (read_buf == NULL) {\n\t\t\tLOG_ERR(\"Failed to allocate I2C read buffer\");\n\t\t\trtio_sbuf_free(sqe, msgs); /* Fix: Free previously allocated msgs */\n\t\t\treturn -ENOMEM; /* Fix: Return error if allocation fails */\n\t\t}\n\n\t\t/* Update read message buffers to point to the temporary read_buf */\n\t\tsize_t current_offset = 0;\n\t\tfor (i = 0; i < data->msg_count; i++) {\n\t\t\tif ((msgs[i].flags & I2C_MSG_RW_MASK) == I2C_MSG_READ) {\n\t\t\t\tmsgs[i].buf = read_buf + current_offset;\n\t\t\t\tcurrent_offset += msgs[i].len;\n\t\t\t}\n\t\t}\n\t}\n\n\t/* Schedule work item for synchronous transfer */\n\tstruct i2c_rtio_work *rtio_work = &i2c_rtio_work_item;\n\trtio_work->dev = dev;\n\trtio_work->sqe = sqe;\n\trtio_work->msgs = msgs;\n\trtio_work->read_buf = read_buf;\n\trtio_work->read_len = read_len;\n\trtio_work->msg_count = data->msg_count;\n\n\tk_work_submit(&rtio_work->work);\n\n\treturn 0;\n}\n\nstatic const struct rtio_iodev_api i2c_rtio_iodev_api = {\n\t.submit = i2c_iodev_submit_fallback,\n};\n\nvoid i2c_rtio_iodev_init(struct rtio_iodev_sqe *sqe, const struct device *dev,\n\t\t\t const struct i2c_rtio_iodev_data *data)\n{\n\tsqe->iodev_data = data;\n\tsqe->iodev_api = &i2c_rtio_iodev_api;\n\tsqe->dev = dev;\n}\n"
+          },
+          "applied_files": [
+            "drivers/i2c/i2c_rtio.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:2:10: fatal error: zephyr/drivers/i2c_rtio.h: No such file or directory\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw:    R    P len=03:\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw: contents:\nd3 7f f5                                         |...\nPASS - test_fallback_transaction in 0.000 seconds\n===================================================================\nSTART - test_fallback_transaction_error\n[00:00:00.000,000] <dbg> i2c_rtio.i2c_iodev_submit_fallback: Executing fallback for dev: 0x805bae8, sqe: 0x8060b30\n[00:00:00.000,000] <dbg> i2c_rtio.i2c_iodev_submit_work_handler: Sync RTIO work item for: 0x8060b30\n[00:00:00.000,000] <dbg> i2c_emul_ctlr.i2c_emul_transfer: i2c_emul_transfer(dev=0x805bae8, addr=0x80)\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw: I2C msg: i2c@100, addr=80\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw:    R      len=03:\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw: contents:\nd3 7f f5                                         |...\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw:    R    P len=03:\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw: contents:\nd3 7f f5                                         |...\nPASS - test_fallback_transaction_error in 0.000 seconds\n===================================================================\nSTART - test_i2c_rtio_copy_pool_exhausted\nSegmentation fault",
+    "protected_file_count": 8,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b1/v3_runtime_i2c_rtio_copy_pool_exhausted_nullcheck_aa50e83",
+    "api_events": [],
+    "started_at": "2026-10-13T17:49:26+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

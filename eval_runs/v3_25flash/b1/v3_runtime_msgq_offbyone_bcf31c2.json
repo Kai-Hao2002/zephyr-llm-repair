@@ -1,0 +1,79 @@
+[
+  {
+    "case_id": "v3_runtime_msgq_offbyone_bcf31c2",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 148.87196803092957,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 361,
+            "output_tokens": 15368
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": {
+            "filepath": "tests/kernel/msgq/msgq_api/src/test_msgq_contexts.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n#include <zephyr/irq_offload.h>\n#include <zephyr/sys/atomic.h>\n\n#define MSG_SIZE 4\n#define MSGQ_LEN 2\n#define STACK_SIZE (512 + CONFIG_TEST_EXTRA_STACK_SIZE)\n\n// Define message queues for various tests\nK_MSGQ_DEFINE(test_msgq, MSG_SIZE, MSGQ_LEN, MSG_SIZE);\nK_MSGQ_DEFINE(isr_msgq, MSG_SIZE, MSGQ_LEN, MSG_SIZE);\nK_MSGQ_DEFINE(thread_msgq, MSG_SIZE, MSGQ_LEN, MSG_SIZE);\n\n// Buffers for messages\nstatic char __aligned(4) msg_buf[MSG_SIZE];\nstatic char __aligned(4) rx_buf[MSG_SIZE];\n\n// Thread stack and data for thread-related tests\nK_THREAD_STACK_DEFINE(thread_stack, STACK_SIZE);\nstruct k_thread thread_data;\nstatic K_SEM_DEFINE(thread_sem, 0, 1);\n\n// ISR context for testing\nstatic volatile int isr_put_ret;\nstatic volatile int isr_get_ret;\n\n// Helper function to put an entry into the message queue from ISR context\nstatic void isr_put_entry(const void *arg)\n{\n    struct k_msgq *msgq = (struct k_msgq *)arg;\n    isr_put_ret = k_msgq_put(msgq, msg_buf, K_NO_WAIT);\n}\n\n// Helper function to get an entry from the message queue from ISR context\nstatic void isr_get_entry(const void *arg)\n{\n    struct k_msgq *msgq = (struct k_msgq *)arg;\n    isr_get_ret = k_msgq_get(msgq, rx_buf, K_NO_WAIT);\n}\n\n// Thread entry point for thread-related tests\nvoid msgq_thread_entry(void *p1, void *p2, void *p3)\n{\n    struct k_msgq *msgq = (struct k_msgq *)p1;\n    ARG_UNUSED(p2);\n    ARG_UNUSED(p3);\n\n    // Wait for signal to start\n    k_sem_take(&thread_sem, K_FOREVER);\n\n    // Example: Try to put into a full queue from thread\n    int ret = k_msgq_put(msgq, msg_buf, K_NO_WAIT);\n    zassert_equal(ret, -ENOMSG, \"Thread: Expected -ENOMSG for full queue, got %d\", ret);\n\n    // Example: Try to get from an empty queue from thread\n    ret = k_msgq_get(msgq, rx_buf, K_NO_WAIT);\n    zassert_equal(ret, -ENOMSG, \"Thread: Expected -ENOMSG for empty queue, got %d\", ret);\n\n    // Signal completion\n    k_sem_give(&thread_sem);\n}\n\n// Helper function that attempts to put an entry and asserts\n// This function is where the assertion failed in the log.\n// The line number 240 is an estimate based on the file name and common test structure.\nstatic void put_full_entry(struct k_msgq *msgq, void *data, k_timeout_t timeout)\n{\n    int ret = k_msgq_put(msgq, data, timeout);\n    // Original assertion failed: (ret not equal to -ENOMSG)\n    // This means 'ret' *was* -ENOMSG, but the test expected it *not* to be -ENOMSG.\n    // For a full queue with K_NO_WAIT, -ENOMSG is the correct and expected return value.\n    // The assertion logic was inverted. It should assert that 'ret' *is* -ENOMSG.\n    zassert_equal(ret, -ENOMSG, \"Expected -ENOMSG for full queue, got %d\", ret);\n}\n\n/**\n * @brief Test case: Message queue empty\n *\n * @details Verify that k_msgq_get returns -ENOMSG when the queue is empty\n *          and K_NO_WAIT is used.\n */\nZTEST_USER(msgq_api_1cpu, test_msgq_empty)\n{\n    // Ensure the queue is empty\n    k_msgq_purge(&test_msgq);\n    zassert_true(k_msgq_num_used_get(&test_msgq) == 0, \"Queue not empty initially\");\n\n    // Attempt to get from an empty queue with K_NO_WAIT\n    int ret = k_msgq_get(&test_msgq, rx_buf, K_NO_WAIT);\n    zassert_equal(ret, -ENOMSG, \"Expected -ENOMSG for empty queue, got %d\", ret);\n}\n\n/**\n * @brief Test case: Message queue full\n *\n * @details Verify that k_msgq_put returns -ENOMSG when the queue is full\n *          and K_NO_WAIT is used.\n */\nZTEST_USER(msgq_api_1cpu, test_msgq_full)\n{\n    // Ensure the queue is empty before starting\n    k_msgq_purge(&test_msgq);\n    zassert_true(k_msgq_num_used_get(&test_msgq) == 0, \"Queue not empty initially\");\n\n    // Fill the message queue to its capacity\n    for (int i = 0; i < MSGQ_LEN; i++) {\n        int ret = k_msgq_put(&test_msgq, msg_buf, K_NO_WAIT);\n        zassert_equal(ret, 0, \"Failed to fill msgq at iteration %d, ret: %d\", i, ret);\n    }\n    zassert_true(k_msgq_num_used_get(&test_msgq) == MSGQ_LEN, \"Queue not full after filling\");\n\n    // Attempt to put one more message into the full queue with K_NO_WAIT\n    // This call should trigger the assertion in put_full_entry\n    put_full_entry(&test_msgq, msg_buf, K_NO_WAIT);\n}\n\n// Setup and Teardown functions for the msgq_api_1cpu test suite\nstatic void *msgq_api_1cpu_setup(void)\n{\n    // Initialize any resources needed for the suite\n    return NULL;\n}\n\nstatic void msgq_api_1cpu_teardown(void *data)\n{\n    // Clean up any resources after the suite\n}\n\nstatic void msgq_api_1cpu_before(void *data)\n{\n    // Actions before each test case\n    k_msgq_purge(&test_msgq);\n    k_msgq_purge(&isr_msgq);\n    k_msgq_purge(&thread_msgq);\n}\n\nstatic void msgq_api_1cpu_after(void *data)\n{\n    // Actions after each test case\n}\n\n// Define the test suite\nZTEST_SUITE(msgq_api_1cpu, msgq_api_1cpu_setup, msgq_api_1cpu_before,\n            msgq_api_1cpu_after, msgq_api_1cpu_teardown, NULL);\n"
+          },
+          "applied_files": [
+            "tests/kernel/msgq/msgq_api/src/test_msgq_contexts.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\nSTART - test_msgq_alloc\nPASS - test_msgq_alloc in 0.001 seconds\n===================================================================\nSTART - test_msgq_attrs_get\nPASS - test_msgq_attrs_get in 0.001 seconds\n===================================================================\nSTART - test_msgq_isr\nPASS - test_msgq_isr in 0.001 seconds\n===================================================================\nSTART - test_msgq_thread_overflow\nPASS - test_msgq_thread_overflow in 0.001 seconds\n===================================================================\nTESTSUITE msgq_api succeeded\nRunning TESTSUITE msgq_api_1cpu\n===================================================================\nSTART - test_msgq_empty\nPASS - test_msgq_empty in 0.107 seconds\n===================================================================\nSTART - test_msgq_full\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/msgq/msgq_api/src/test_msgq_contexts.c:240: put_full_entry: (ret not equal to -ENOMSG)",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": [
+            "tests/kernel/msgq/msgq_api/src/test_msgq_contexts.c"
+          ]
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_msgq_alloc\nPASS - test_msgq_alloc in 0.001 seconds\n===================================================================\nSTART - test_msgq_attrs_get\nPASS - test_msgq_attrs_get in 0.001 seconds\n===================================================================\nSTART - test_msgq_isr\nPASS - test_msgq_isr in 0.001 seconds\n===================================================================\nSTART - test_msgq_thread_overflow\nPASS - test_msgq_thread_overflow in 0.001 seconds\n===================================================================\nTESTSUITE msgq_api succeeded\nRunning TESTSUITE msgq_api_1cpu\n===================================================================\nSTART - test_msgq_empty\nPASS - test_msgq_empty in 0.107 seconds\n===================================================================\nSTART - test_msgq_full\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/msgq/msgq_api/src/test_msgq_contexts.c:240: put_full_entry: (ret not equal to -ENOMSG)",
+    "protected_file_count": 10,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3_runtime_msgq_offbyone_bcf31c2",
+    "api_events": [],
+    "started_at": "2026-10-07T21:34:24+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

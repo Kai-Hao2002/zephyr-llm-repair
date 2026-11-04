@@ -1,0 +1,72 @@
+[
+  {
+    "case_id": "inject_api_substitute_event_reset_on_wait",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 205.9331157207489,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-pro",
+            "input_tokens": 484,
+            "output_tokens": 18605
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/kernel/events/event_api/src/main.c",
+            "content": "/*\n * Copyright (c) 2021, Peter Bigot Consulting, LLC\n * Copyright (c) 2023, Intel Corporation\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n\n#define STACK_SIZE (512 + CONFIG_TEST_EXTRA_STACK_SIZE)\n#define TIMEOUT_MS 200\n\nstatic K_THREAD_STACK_DEFINE(tstack, STACK_SIZE);\nstatic struct k_thread tdata;\nstatic K_THREAD_STACK_DEFINE(tstack2, STACK_SIZE);\nstatic struct k_thread tdata2;\n\n\nstatic K_EVENT_DEFINE(test_event);\n\n/* Helper thread that waits for something to be posted to an event,\n * then records the value and the time it was received.\n */\nstatic void drive_receive_events(void *p1, void *p2, void *p3)\n{\n\tuint32_t evt_mask = (uint32_t)POINTER_TO_UINT(p1);\n\tuint32_t *evt_received = p2;\n\tint64_t *uptime_received = p3;\n\tbool wait_for_all = (bool)POINTER_TO_UINT(p3);\n\n\t*evt_received = k_event_wait(&test_event, evt_mask, wait_for_all, K_FOREVER);\n\tif (uptime_received != NULL) {\n\t\t*uptime_received = k_uptime_get();\n\t}\n}\n\n/**\n * @brief Test that posting an event wakes a thread waiting for it.\n *\n * The helper thread is started and waits on an event.  The main\n * thread sleeps to allow the helper to run and block, then posts\n * the event and verifies that the thread received it.\n *\n * @ingroup kernel_event_tests\n *\n * @see k_event_post(), k_event_wait()\n */\nZTEST(events_api, test_event_post)\n{\n\tuint32_t events_to_send = 0x101;\n\tuint32_t events_received = 0;\n\tint64_t uptime_received = 0;\n\n\tk_event_init(&test_event);\n\n\tk_thread_create(&tdata, tstack, K_THREAD_STACK_SIZEOF(tstack),\n\t\t\tdrive_receive_events,\n\t\t\tUINT_TO_POINTER(events_to_send), &events_received, &uptime_received,\n\t\t\tK_PRIO_PREEMPT(0), 0, K_NO_WAIT);\n\n\t/* Let the other thread run and wait on the event */\n\tk_msleep(100);\n\n\tint64_t uptime_before_send = k_uptime_get();\n\n\tk_event_post(&test_event, events_to_send);\n\n\tk_thread_join(&tdata, K_FOREVER);\n\n\tzassert_equal(events_received, events_to_send,\n\t\t      \"did not receive sent events\");\n\tzassert_true(uptime_received >= uptime_before_send,\n\t\t     \"received event before it was sent\");\n}\n\n/**\n * @brief Test that waiting for an event that has already been posted\n * completes immediately.\n *\n * An event is posted.  Then a helper thread is started that waits on\n * that event.  The helper should not block.\n *\n * @ingroup kernel_event_tests\n *\n * @see k_event_post(), k_event_wait()\n */\nZTEST(events_api, test_event_receive_existing)\n{\n\tuint32_t events_to_send = 0x202;\n\tuint32_t events_received = 0;\n\tint64_t uptime_received = 0;\n\n\tk_event_init(&test_event);\n\n\tk_event_post(&test_event, events_to_send);\n\n\tint64_t uptime_before_wait = k_uptime_get();\n\n\tk_thread_create(&tdata, tstack, K_THREAD_STACK_SIZEOF(tstack),\n\t\t\tdrive_receive_events,\n\t\t\tUINT_TO_POINTER(events_to_send), &events_received, &uptime_received,\n\t\t\tK_PRIO_PREEMPT(0), 0, K_NO_WAIT);\n\n\tk_thread_join(&tdata, K_FOREVER);\n\n\tzassert_equal(events_received, events_to_send,\n\t\t      \"did not receive sent events\");\n\n\t/* Technically the other thread could be scheduled after the\n\t * tick in which we posted, but it's not going to be delayed\n\t * long.\n\t */\n\tzassert_true(uptime_received <= uptime_before_wait + 1,\n\t\t     \"wait for existing event was delayed\");\n}\n\nZTEST(events_api, test_event_set_and_clear)\n{\n\tk_event_init(&test_event);\n\tzassert_equal(test_event.events, 0, \"event not initialized to 0\");\n\n\tk_event_set(&test_event, 0x1234);\n\tzassert_equal(test_event.events, 0x1234, \"event_set failed\");\n\n\tk_event_clear(&test_event, 0x1030);\n\tzassert_equal(test_event.events, 0x0204, \"event_clear failed\");\n}\n\nZTEST(events_api, test_event_test)\n{\n\tuint32_t events;\n\n\tk_event_init(&test_event);\n\tk_event_post(&test_event, 0xABCD);\n\n\tevents = k_event_test(&test_event, 0x1234);\n\tzassert_equal(events, 0x200, \"k_event_test failed\");\n}\n\nstatic void drive_timeout(void *p1, void *p2, void *p3)\n{\n\tuint32_t *events_received = p1;\n\t*events_received = k_event_wait(&test_event, 0x1, false, K_MSEC(TIMEOUT_MS));\n}\n\nZTEST(events_api, test_event_timeout)\n{\n\tuint32_t events_received = 0xAAAA;\n\n\tk_event_init(&test_event);\n\n\tk_thread_create(&tdata, tstack, K_THREAD_STACK_SIZEOF(tstack),\n\t\t\tdrive_timeout, &events_received, NULL, NULL,\n\t\t\tK_PRIO_PREEMPT(0), 0, K_NO_WAIT);\n\n\tk_thread_join(&tdata, K_FOREVER);\n\n\tzassert_equal(events_received, 0, \"wait should have timed out and returned 0\");\n}\n\nstatic void waiter_thread(void *p1, void *p2, void *p3)\n{\n\tuint32_t expected_events = POINTER_TO_UINT(p1);\n\tuint32_t received_events;\n\n\treceived_events = k_event_wait(&test_event, 0xFFFFFFFF, true, K_FOREVER);\n\tzassert_equal(received_events, expected_events, \"waiter received wrong events\");\n}\n\nZTEST(events_api, test_multiple_waiters)\n{\n\tk_event_init(&test_event);\n\n\tk_thread_create(&tdata, tstack, K_THREAD_STACK_SIZEOF(tstack),\n\t\t\twaiter_thread, UINT_TO_POINTER(0x1), NULL, NULL,\n\t\t\tK_PRIO_PREEMPT(0), 0, K_NO_WAIT);\n\n\tk_thread_create(&tdata2, tstack2, K_THREAD_STACK_SIZEOF(tstack2),\n\t\t\twaiter_thread, UINT_TO_POINTER(0x2), NULL, NULL,\n\t\t\tK_PRIO_PREEMPT(0), 0, K_NO_WAIT);\n\n\tk_msleep(100); /* let waiters block */\n\n\tk_event_post(&test_event, 0x1 | 0x2);\n\n\tk_thread_join(&tdata, K_FOREVER);\n\tk_thread_join(&tdata2, K_FOREVER);\n}\n\n/**\n * @brief Test that waiting for an event with reset leaves the event object\n * in the expected state.\n *\n * A helper thread is started and waits on an event using k_poll with\n * the K_POLL_STATE_EVENT_RESET flag.  The main thread posts the\n * event.  The helper thread verifies that the event object's event\n * state has been cleared.\n *\n * The helper thread then posts a different event and waits on it\n * without the reset flag, and verifies that the event object's event\n * state is not cleared.\n *\n * @ingroup kernel_event_tests\n *\n * @see k_poll(), K_POLL_STATE_EVENT_RESET\n */\nstatic void drive_reset_on_wait(void *p1, void *p2, void *p3)\n{\n\tstruct k_poll_event events[1] = {\n\t\tK_POLL_EVENT_INITIALIZER(K_POLL_TYPE_EVENT,\n\t\t\t\t\t K_POLL_MODE_NOTIFY_ONLY,\n\t\t\t\t\t &test_event),\n\t};\n\tevents[0].events = 0xFFF;\n\n\t/* test: wait for event, with reset */\n\tevents[0].state |= K_POLL_STATE_EVENT_RESET;\n\tTC_PRINT(\"Waiting for event 0x456, with reset\\n\");\n\t(void)k_poll(events, 1, K_FOREVER);\n\tzassert_equal(events[0].events, 0x456, \"did not receive expected events\");\n\tzassert_equal(test_event.events, 0, \"events were not reset\");\n\n\t/* test: wait for event, no reset */\n\tk_event_post(&test_event, 0x123);\n\tevents[0].state = K_POLL_STATE_NOT_READY;\n\tTC_PRINT(\"Waiting for event 0x123, no reset\\n\");\n\t(void)k_poll(events, 1, K_FOREVER);\n\tzassert_equal(events[0].events, 0x123, \"did not receive expected events\");\n\tzassert_equal(test_event.events, 0x123, \"events were reset\");\n}\n\nZTEST(events_api, test_event_reset_on_wait)\n{\n\tk_event_init(&test_event);\n\n\tk_thread_create(&tdata, tstack, K_THREAD_STACK_SIZEOF(tstack),\n\t\t\tdrive_reset_on_wait, NULL, NULL, NULL,\n\t\t\tK_PRIO_PREEMPT(0), 0, K_NO_WAIT);\n\n\t/* Allow waiter to run and block */\n\tk_msleep(100);\n\n\tk_event_post(&test_event, 0x456);\n\n\tk_thread_join(&tdata, K_FOREVER);\n}\n\nZTEST_SUITE(events_api, NULL, NULL, NULL, NULL, NULL);\n"
+          },
+          "applied_files": [
+            "tests/kernel/events/event_api/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/events/event_api/src/main.c:211:42: error: ‘K_POLL_TYPE_EVENT’ undeclared (first use in this function); did you mean ‘Z_POLL_TYPE_BIT’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/kernel.h:6899:18: error: ‘union <anonymous>’ has no member named ‘_typed_K_POLL_TYPE_EVENT’; did you mean ‘_typed_K_POLL_TYPE_SIGNAL’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/events/event_api/src/main.c:215:18: error: ‘struct k_poll_event’ has no member named ‘events’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/events/event_api/src/main.c:218:28: error: ‘K_POLL_STATE_EVENT_RESET’ undeclared (first use in this function); did you mean ‘K_POLL_STATE_NOT_READY’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/events/event_api/src/main.c:221:32: error: ‘struct k_poll_event’ has no member named ‘events’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/events/event_api/src/main.c:229:32: error: ‘struct k_poll_event’ has no member named ‘events’\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[107/114] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[108/114] Building C object zephyr/kernel/CMakeFiles/kernel.dir/events.c.obj\n[109/114] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[110/114] Linking C static library zephyr/kernel/libkernel.a\n[111/114] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[112/114] Building native simulator runner, and linking final executable\n[113/114] Running utility command for native_runner_executable\n[113/114] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE events_api\n===================================================================\nSTART - test_event_post\nPASS - test_event_post in 0.000 seconds\n===================================================================\nSTART - test_event_receive_existing\nPASS - test_event_receive_existing in 0.110 seconds\n===================================================================\nSTART - test_event_reset_on_wait\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/events/event_api/src/main.c:312: drive_reset_on_wait: test_event.events == 0x123 is false",
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/b1/inject_api_substitute_event_reset_on_wait",
+    "api_events": [],
+    "started_at": "2026-09-26T05:20:39+00:00",
+    "run_meta": {
+      "code_commit": "538b7706719863a3dea78dc56e2c9df57e2888c9",
+      "code_dirty": false,
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-pro",
+        "pro": "gemini-2.5-pro",
+        "embedding": "models/gemini-embedding-001"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

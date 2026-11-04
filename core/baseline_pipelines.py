@@ -8,10 +8,8 @@ QemuOracle/LogFilter/build_devops_docker_cmd/evaluate_repair_attempt)，但
 刻意不重用 apply_patch_node/devops_node/qa_node 這幾個 LangGraph 節點：
 那幾個節點會呼叫 agents/supervisor.py 的 record_attempt_outcome，把結果
 寫進 attempt_history (Proposed 的跨迭代記憶機制)。B1/B2 是單發、用不到；
-B3 依 Table 2 定義 ("no specialized multi-agent split") 刻意不給跨迭代
-記憶——Context Compression 明確歸屬 Supervisor Node，屬於多代理人分工的
-一部分。重用那幾個節點會產生用不到的壓縮 LLM 呼叫成本，還會讓「B3 沒有
-記憶」這個實驗設計在程式碼裡沒有真的做到。B1/B2/B3 也同樣沒有 DevOps
+B3 不經過 Supervisor 的 LLM 壓縮記憶 (Context Compression 屬於多代理人
+分工)；2026-10-13 起 B3 自己保留原文截斷的前幾輪 patch 與結果 (見 run_b3)。B1/B2/B3 也同樣沒有 DevOps
 Expert/QA Expert 這種角色分工 (跟 Proposed 相比，這正是 Table 2 要對照的
 變因之一)，所以繼續共用同一個 evaluate_repair_attempt() 呼叫拿到「編譯+
 執行」合併後的單一結果，不像 Proposed 拆成 devops_node/qa_node 兩個階段。
@@ -26,21 +24,22 @@ evaluate_repair_attempt — but deliberately doesn't reuse the
 apply_patch_node/devops_node/qa_node LangGraph nodes. Those nodes call
 agents/supervisor.py's record_attempt_outcome, writing into attempt_history
 (Proposed's cross-iteration memory). B1/B2 are single-shot and never read
-it; B3, per Table 2's definition ("no specialized multi-agent split"),
-deliberately gets no cross-iteration memory — Context Compression is
-explicitly attributed to the Supervisor Node, part of the multi-agent split.
-Reusing those nodes would incur an unused compression-LLM cost and would
-leave "B3 has no memory" as a claim the code doesn't actually enforce.
+it; B3 does not get the Supervisor's LLM-compressed memory (Context Compression
+belongs to the multi-agent split); from 2026-10-13 B3 keeps its own
+mechanically truncated history of earlier patches and outcomes (see run_b3).
 B1/B2/B3 also have no DevOps Expert/QA Expert role split at all (exactly
 the variable Table 2 measures relative to Proposed), so they keep sharing
 one evaluate_repair_attempt() call that returns the combined build+execute
 result in one shot, rather than Proposed's two-stage devops_node/qa_node.
 """
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from core.state import ZephyrAgentState
-from core.workflow import evaluate_repair_attempt
+from core.workflow import _rollback_patch, evaluate_repair_attempt, with_last_build_log
+from core.proposed_opt import B3_GATE, MAX_GATE_RETRIES_PER_ITERATION
+from core.trajectory import build_trajectory
+from core.protected_files import is_protected, pop_restored, restore_reminder
 from tools.patch_applier import PatchApplier
 from agents.patch_expert import collect_relevant_context_paths, MAX_PATCH_CONTEXT_CHARS
 from agents.baselines import b1_generate_full_file_patch, b2_generate_patch, b3_generate_patch
@@ -69,7 +68,8 @@ def _read_context_files(workspace_path: str, target_app: str, error_log: str,
 
 
 def _iteration_log_entry(current_iter: int, compiled: bool, resolved: bool,
-                          tool_invocation_error: bool, usage_entries: list) -> Dict[str, Any]:
+                          tool_invocation_error: bool, usage_entries: list,
+                          trajectory: Dict[str, Any] = None) -> Dict[str, Any]:
     """跟 agents/supervisor.py 的 _build_iteration_log_entry 完全同一個
     shape——results.json 的分析腳本 (analyze_results.py) 要能不分 pipeline
     地讀同一種 iteration_log 結構，Proposed 跟 B1/B2/B3 的紀錄格式不能各自
@@ -80,7 +80,14 @@ def _iteration_log_entry(current_iter: int, compiled: bool, resolved: bool,
         "resolved": resolved,
         "tool_invocation_error": tool_invocation_error,
         "token_usage": usage_entries,
+        "trajectory": trajectory,
     }
+
+
+def _trajectory(workspace_path: str, stage: str, status: str, **fields) -> Dict[str, Any]:
+    """build_trajectory 加上這一輪被評測端還原的受保護檔案 (見 core/protected_files.py)。
+    build_trajectory plus the protected files the evaluator restored this iteration (see core/protected_files.py)."""
+    return build_trajectory(stage, status, restored_files=pop_restored(workspace_path), **fields)
 
 
 def run_b1(state: ZephyrAgentState) -> Dict[str, Any]:
@@ -93,27 +100,34 @@ def run_b1(state: ZephyrAgentState) -> Dict[str, Any]:
     """
     workspace_path = state["workspace_path"]
     error_log = state.get("current_error_log", "")
-    print("\n🧪 [B1 Zero-Shot] 只憑錯誤日誌，猜測要修正的檔案與內容...")
+    print("\n🧪 [B1 Zero-Shot] Guessing the file and content to fix from the error log alone...")
 
     patch, usage_entry = b1_generate_full_file_patch(error_log)
     applier = PatchApplier(workspace_path=workspace_path)
     apply_result = applier.apply_full_file(patch["filepath"], patch["content"])
 
     if not apply_result["success"]:
-        print(f"   ❌ 套用失敗：{apply_result['error']}")
+        print(f"   ❌ Patch application failed: {apply_result['error']}")
         return {
             "final_status": "failed_max_retries", "iterations": 1, "error_type": "patch_format_error",
-            "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry])],
+            "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry], _trajectory(workspace_path,
+                "apply", "patch_format_error", patch=patch, applied_files=apply_result.get("applied_files", []), apply_error=apply_result["error"],
+            ))],
         }
 
     eval_result = evaluate_repair_attempt(
         workspace_path, state["board"], state["target_app"], state.get("required_pass_test")
     )
     final_status = "resolved" if eval_result["resolved"] else "failed_max_retries"
-    print(f"   {'🎉' if eval_result['resolved'] else '💥'} 建置/執行結果：{eval_result['status']}")
+    print(f"   {'🎉' if eval_result['resolved'] else '💥'} Build/run result: {eval_result['status']}")
     return {
         "final_status": final_status, "iterations": 1, "error_type": eval_result["status"],
-        "iteration_log": [_iteration_log_entry(1, eval_result["compiled"], eval_result["resolved"], False, [usage_entry])],
+        "iteration_log": [_iteration_log_entry(
+            1, eval_result["compiled"], eval_result["resolved"], False, [usage_entry],
+            _trajectory(workspace_path, "run" if eval_result["compiled"] else "build", eval_result["status"], patch=patch,
+                             applied_files=apply_result["applied_files"],
+                             filtered_log=eval_result["log"]),
+        )],
     }
 
 
@@ -128,12 +142,12 @@ def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
     workspace_path = state["workspace_path"]
     target_app = state["target_app"]
     error_log = state.get("current_error_log", "")
-    print("\n🧪 [B2 Single-Agent+RAG] BM25-only 檢索候選檔案，生成修補...")
+    print("\n🧪 [B2 Single-Agent+RAG] Retrieving candidate files with BM25 only, generating the patch...")
 
     retriever = HybridRetriever(workspace_path)
     retrieved_files = retriever.retrieve(error_log, top_k=8, bm25_only=True)
     if retrieved_files:
-        print(f"   ↳ BM25 檢索到候選檔案：{retrieved_files}")
+        print(f"   ↳ BM25 retrieved candidate files: {retrieved_files}")
 
     project_files_content = _read_context_files(workspace_path, target_app, error_log, retrieved_files)
     patch_text, usage_entry = b2_generate_patch(error_log, project_files_content)
@@ -141,10 +155,13 @@ def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
     applier = PatchApplier(workspace_path=workspace_path)
     apply_result = applier.apply_patches(patch_text)
     if not apply_result["success"]:
-        print(f"   ❌ 套用失敗：{apply_result['error']}")
+        print(f"   ❌ Patch application failed: {apply_result['error']}")
         return {
             "final_status": "failed_max_retries", "iterations": 1, "error_type": "patch_format_error",
-            "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry])],
+            "iteration_log": [_iteration_log_entry(1, False, False, True, [usage_entry], _trajectory(workspace_path,
+                "apply", "patch_format_error", patch=patch_text, applied_files=apply_result.get("applied_files", []),
+                apply_error=apply_result["error"], retrieved_files=retrieved_files,
+            ))],
             "first_retrieval_files": retrieved_files,
         }
 
@@ -152,40 +169,100 @@ def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
         workspace_path, state["board"], state["target_app"], state.get("required_pass_test")
     )
     final_status = "resolved" if eval_result["resolved"] else "failed_max_retries"
-    print(f"   {'🎉' if eval_result['resolved'] else '💥'} 建置/執行結果：{eval_result['status']}")
+    print(f"   {'🎉' if eval_result['resolved'] else '💥'} Build/run result: {eval_result['status']}")
     return {
         "final_status": final_status, "iterations": 1, "error_type": eval_result["status"],
-        "iteration_log": [_iteration_log_entry(1, eval_result["compiled"], eval_result["resolved"], False, [usage_entry])],
+        "iteration_log": [_iteration_log_entry(
+            1, eval_result["compiled"], eval_result["resolved"], False, [usage_entry],
+            _trajectory(workspace_path, "run" if eval_result["compiled"] else "build", eval_result["status"], patch=patch_text,
+                             applied_files=apply_result["applied_files"],
+                             filtered_log=eval_result["log"], retrieved_files=retrieved_files),
+        )],
         "first_retrieval_files": retrieved_files,
     }
+
+
+# B3 歷史的機械式截斷上限 (每輪 patch / 每輪結果 log)。Mechanical truncation limits for B3's history.
+_B3_HISTORY_PATCH_CHARS = 6000
+_B3_HISTORY_LOG_CHARS = 3000
+
+
+def _clip_middle(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]}\n…[{len(text) - limit} chars omitted]…\n{text[-half:]}"
+
+
+def _render_b3_history(history: List[Dict[str, Any]]) -> str:
+    parts = []
+    for h in history:
+        parts.append(f"--- Attempt {h['iteration']} ---\n[Patch]\n{_clip_middle(h['patch'] or '', _B3_HISTORY_PATCH_CHARS)}\n"
+                     f"[Outcome: {h['outcome']}]\n{_clip_middle(h['log'] or '', _B3_HISTORY_LOG_CHARS)}")
+    return "\n\n".join(parts)
 
 
 def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
     """
     B3 Closed-Loop Single Agent：單一 LLM persona 身兼診斷+修補，重複
     apply→build 直到成功或用完 max_iters；不做 StaticCheck (DevOps Expert
-    的專門化分工)、不給 RAG (first_retrieval_files 永遠不設定)、不給跨迭代
-    記憶 (每次只帶最新 error_log，不是完整歷史——見 agents/baselines.py 的
-    b3_generate_patch 說明)。
+    的專門化分工)、不給 RAG (first_retrieval_files 永遠不設定)。2026-10-13 起
+    每輪附上這個 session 前幾輪的 patch 與結果 (原文機械式截斷，不經 LLM 壓縮)，
+    見 agents/baselines.py 的 b3_generate_patch 說明；patch 套用失敗時，最近一次
+    build/run 的 log 附在失敗訊息後面 (core/workflow.with_last_build_log)。
     """
     workspace_path = state["workspace_path"]
     target_app = state["target_app"]
     board = state["board"]
     required_pass_test = state.get("required_pass_test")
     error_log = state.get("current_error_log", "")
+    last_build_log = error_log
+    history: List[Dict[str, Any]] = []
     iteration_log = []
 
     for current_iter in range(1, max_iters + 1):
-        print(f"\n🧪 [B3 Closed-Loop] 第 {current_iter}/{max_iters} 次迭代...")
-        project_files_content = _read_context_files(workspace_path, target_app, error_log, [])
-        patch_text, usage_entry = b3_generate_patch(error_log, project_files_content)
+        print(f"\n🧪 [B3 Closed-Loop] Iteration {current_iter}/{max_iters}...")
+        # 套用閘門 (2026-10-31，ZEPHYR_B3_GATE)：和優化版 Proposed 相同，不合格的 patch 還原後在本輪重試，
+        # 不消耗迭代；關閉時第一次就離開迴圈，行為和之前相同。
+        # Apply gate (ZEPHYR_B3_GATE): as in optimized Proposed, a rejected patch is rolled back and retried
+        # within the iteration; with the switch off the loop exits on the first pass, as before.
+        usages: List[Dict[str, Any]] = []
+        gate_events: List[str] = []
+        while True:
+            project_files_content = _read_context_files(workspace_path, target_app, error_log, [])
+            patch_text, usage_entry = b3_generate_patch(error_log, project_files_content, _render_b3_history(history))
+            usages.append(usage_entry)
 
-        applier = PatchApplier(workspace_path=workspace_path)
-        apply_result = applier.apply_patches(patch_text)
+            applier = PatchApplier(workspace_path=workspace_path)
+            apply_result = applier.apply_patches(patch_text)
+            if not B3_GATE:
+                break
+            applied = apply_result.get("applied_files", [])
+            gate_reason = None
+            if not apply_result["success"]:
+                gate_reason = f"Patch Application Failed:\n{apply_result['error']}"
+                _rollback_patch(workspace_path, apply_result.get("original_contents", {}))
+            elif applied and all(is_protected(workspace_path, f) for f in applied):
+                gate_reason = restore_reminder(sorted(set(applied))).strip()
+            if not gate_reason or len(gate_events) >= MAX_GATE_RETRIES_PER_ITERATION:
+                break
+            print(f"   ↩️ Patch rejected before building (retry {len(gate_events) + 1}/{MAX_GATE_RETRIES_PER_ITERATION} "
+                  f"in iteration {current_iter}).")
+            _rollback_patch(workspace_path, apply_result.get("original_contents", {}))
+            error_log = with_last_build_log(gate_reason, last_build_log, "from before this patch; nothing was built after it")
+            gate_events.append(gate_reason[:300])
+
         if not apply_result["success"]:
-            print(f"   ❌ 套用失敗：{apply_result['error']}")
-            error_log = f"Patch Application Failed:\n{apply_result['error']}"
-            iteration_log.append(_iteration_log_entry(current_iter, False, False, True, [usage_entry]))
+            print(f"   ❌ Patch application failed: {apply_result['error']}")
+            failure = f"Patch Application Failed:\n{apply_result['error']}"
+            history.append({"iteration": current_iter, "patch": patch_text,
+                            "outcome": "patch application failed (nothing was built)", "log": failure})
+            error_log = with_last_build_log(failure, last_build_log, "from before this patch; nothing was built after it")
+            iteration_log.append(_iteration_log_entry(current_iter, False, False, True, usages, _trajectory(workspace_path,
+                "apply", "patch_format_error", patch=patch_text, applied_files=apply_result.get("applied_files", []), apply_error=apply_result["error"],
+            )))
+            if B3_GATE:
+                iteration_log[-1]["trajectory"]["gate_events"] = gate_events
             if current_iter >= max_iters:
                 return {"final_status": "failed_max_retries", "iterations": current_iter,
                         "error_type": "patch_format_error", "iteration_log": iteration_log}
@@ -193,15 +270,26 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
 
         eval_result = evaluate_repair_attempt(workspace_path, board, target_app, required_pass_test)
         iteration_log.append(_iteration_log_entry(
-            current_iter, eval_result["compiled"], eval_result["resolved"], False, [usage_entry]
+            current_iter, eval_result["compiled"], eval_result["resolved"], False, usages,
+            _trajectory(workspace_path, "run" if eval_result["compiled"] else "build", eval_result["status"], patch=patch_text,
+                             applied_files=apply_result["applied_files"], filtered_log=eval_result["log"]),
         ))
+        if B3_GATE:
+            iteration_log[-1]["trajectory"]["gate_events"] = gate_events
         if eval_result["resolved"]:
-            print("   🎉 執行期驗證通過！")
+            print("   🎉 Runtime verification passed!")
             return {"final_status": "resolved", "iterations": current_iter, "error_type": "success",
                     "iteration_log": iteration_log}
 
-        print(f"   💥 建置/執行失敗 (狀態: {eval_result['status']})")
-        error_log = eval_result["log"]
+        print(f"   💥 Build/run failed (status: {eval_result['status']})")
+        # 規格檔被還原時提醒 agent (2026-10-18，見 core/protected_files.restore_reminder)。
+        # Remind the agent when specification files were reverted (2026-10-18; see core/protected_files.restore_reminder).
+        reminder = restore_reminder(iteration_log[-1]["trajectory"].get("restored_files") or [])
+        last_build_log = eval_result["log"]
+        error_log = reminder + eval_result["log"]
+        history.append({"iteration": current_iter, "patch": patch_text,
+                        "outcome": f"applied to {apply_result['applied_files']}; build/run failed with status {eval_result['status']}",
+                        "log": error_log})
         if current_iter >= max_iters:
             return {"final_status": "failed_max_retries", "iterations": current_iter,
                     "error_type": eval_result["status"], "iteration_log": iteration_log}

@@ -9,17 +9,33 @@ source.
 """
 import os
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 from langchain_core.prompts import ChatPromptTemplate
 
 from core.state import ZephyrAgentState
 from core.llm_usage import extract_usage, append_usage
-from core.llm_provider import get_chat_model, get_model_name
+from core.llm_provider import PATCH_LLM_TIMEOUT, get_chat_model, get_model_name
+from core.llm_retry import call_with_retry
+from agents.spec_rule import SPEC_RULE
+from core.proposed_opt import PROPOSED_OPT, RETRIEVAL_CONTEXT_QUOTA_CHARS
 
 _LOG_PATH_PREFIX = "/zephyrproject/zephyr/"
 _LOG_EXT_PATH_RE = re.compile(re.escape(_LOG_PATH_PREFIX) + r"([\w\-./]+\.(?:c|h|conf|dts|dtsi|overlay))\b")
 _LOG_KCONFIG_PATH_RE = re.compile(re.escape(_LOG_PATH_PREFIX) + r"([\w\-./]+/Kconfig(?:\.\w+)?)\b")
+# 相對路徑寫法 (v3 起)：Zephyr 的 Kconfig 警告寫 "(defined at subsys/fs/fcb/Kconfig:10)"，
+# ztest/__ASSERT 訊息經 -fmacro-prefix-map 改寫成 "WEST_TOPDIR/zephyr/..." 或
+# "ZEPHYR_BASE/..."。v2 只認絕對路徑，kconfig 案例中有 14/20 的 log 寫出了注入檔
+# 卻沒被收進上下文，沒有檢索的 B3 因此 0/20 (見 eval_runs/v2/analysis/failure_report.html 3.4)。
+# Relative path forms (from v3): Kconfig's "(defined at subsys/fs/fcb/Kconfig:10)" and
+# macro-prefix-mapped "WEST_TOPDIR/zephyr/..." / "ZEPHYR_BASE/..." locations. v2 only took
+# absolute paths, so 14/20 kconfig logs named the injected file but it never reached the
+# context (B3, which has no retrieval, scored 0/20).
+_LOG_RELATIVE_PATH_RES = (
+    re.compile(r"\(defined at ([\w\-./]+):\d+\)"),
+    re.compile(r"\bWEST_TOPDIR/zephyr/([\w\-./]+?):\d+"),
+    re.compile(r"\bZEPHYR_BASE/([\w\-./]+?):\d+"),
+)
 
 # 若比對出來的檔案總大小仍然偏大 (例如 target_app 本身就是個檔案很多的大型
 # app)，設一個保守上限並截斷，寧可讓 Patch 用不完整的上下文重試，也不要
@@ -112,6 +128,8 @@ def collect_relevant_context_paths(workspace_path: str, target_app: str, error_l
     candidates = set()
     candidates.update(_LOG_EXT_PATH_RE.findall(error_log))
     candidates.update(_LOG_KCONFIG_PATH_RE.findall(error_log))
+    for rel_re in _LOG_RELATIVE_PATH_RES:
+        candidates.update(rel_re.findall(error_log))
     candidates.update(retrieved_files or [])
 
     target_app_dir = os.path.join(workspace_path, target_app)
@@ -128,17 +146,65 @@ def collect_relevant_context_paths(workspace_path: str, target_app: str, error_l
     return sorted(p for p in candidates if os.path.isfile(os.path.join(workspace_path, p)))
 
 
-def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
-    print("\n🛠️ [LLM Patch] 正在生成精確修補區塊...")
+def _log_cited_paths(error_log: str) -> List[str]:
+    """log 提到的路徑，依第一次出現的位置排序。Paths cited in the log, in order of first appearance."""
+    hits = []
+    for pattern in (_LOG_EXT_PATH_RE, _LOG_KCONFIG_PATH_RE) + _LOG_RELATIVE_PATH_RES:
+        hits.extend((m.start(), m.group(1)) for m in pattern.finditer(error_log))
+    return list(dict.fromkeys(path for _, path in sorted(hits)))
 
-    # timeout=300 (見 agents/analyzer.py 的說明，這裡的上限拉長是因為送進去
+
+def select_ordered_context(workspace_path: str, target_app: str, error_log: str, retrieved_files: List[str] = None,
+                           limit: int = MAX_PATCH_CONTEXT_CHARS,
+                           retrieval_quota: int = RETRIEVAL_CONTEXT_QUOTA_CHARS) -> Tuple[List[Tuple[str, str]], Dict[str, Any]]:
+    """
+    依重要性放檔案 (2026-10-31，ZEPHYR_PROPOSED_OPT)：log 提到的檔案、target_app、檢索結果 (照排名)。
+    檢索結果另有配額；單一檔案放不下時略過，繼續放下一個，不像字母排序版本到上限就整批停止。
+    Files by importance: log-cited, target_app, retrieved (by rank). Retrieved files have their own quota; a
+    file that does not fit is skipped and the next one still gets a chance, unlike the alphabetical version
+    that stops at the limit.
+    """
+    app_files = []
+    target_app_dir = os.path.join(workspace_path, target_app)
+    for root, dirs, files in os.walk(target_app_dir):
+        app_files.extend(os.path.relpath(os.path.join(root, f), workspace_path) for f in files if _is_context_source_file(f))
+    tiers = (("log", _log_cited_paths(error_log), limit), ("target_app", sorted(app_files), limit),
+             ("retrieved", list(retrieved_files or []), retrieval_quota))
+    chosen, seen, total = [], set(), 0
+    stats = {"included": {}, "skipped": []}
+    for tier, paths, tier_limit in tiers:
+        tier_total = 0
+        for rel_path in paths:
+            filepath = os.path.join(workspace_path, rel_path)
+            if rel_path in seen or not os.path.isfile(filepath):
+                continue
+            seen.add(rel_path)
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                continue
+            if total + len(content) > limit or tier_total + len(content) > tier_limit:
+                stats["skipped"].append(rel_path)
+                continue
+            chosen.append((rel_path, content))
+            total += len(content)
+            tier_total += len(content)
+        stats["included"][tier] = tier_total
+    return chosen, stats
+
+
+def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
+    print("\n🛠️ [LLM Patch] Generating precise patch blocks...")
+
+    # timeout 見 core/llm_provider.PATCH_LLM_TIMEOUT (也見 agents/analyzer.py 的說明，這裡的上限拉長是因為送進去
     # 的上下文可能到 300k 字元，真正生成花的時間本來就比分類任務長，
     # 120 秒可能連正常、沒卡住的請求都會誤殺)。
-    # timeout=300 (see agents/analyzer.py; longer here because the context
+    # Timeout: see core/llm_provider.PATCH_LLM_TIMEOUT (and agents/analyzer.py; longer here because the context
     # sent in can be up to 300k chars — genuine generation legitimately
     # takes longer than a classification task, and 120s risked cutting off
     # requests that weren't actually hung).
-    llm = get_chat_model(role="pro", temperature=0, timeout=300)
+    llm = get_chat_model(role="pro", temperature=0, timeout=PATCH_LLM_TIMEOUT)
 
     # 動態讀取專案內的原始碼檔案，提供給 LLM 作為上下文——範圍限縮邏輯見
     # collect_relevant_context_paths。
@@ -146,7 +212,11 @@ def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     target_app = state.get("target_app", ".")
     error_log = state.get("current_error_log", "")
     project_files_content = ""
-    if os.path.exists(workspace_path):
+    context_stats: Dict[str, Any] = {}
+    if PROPOSED_OPT and os.path.exists(workspace_path):
+        chosen, context_stats = select_ordered_context(workspace_path, target_app, error_log, state.get("retrieved_files", []))
+        project_files_content = "".join(f"\n--- {rel_path} ---\n{content}\n" for rel_path, content in chosen)
+    elif os.path.exists(workspace_path):
         total_chars = 0
         retrieved_files = state.get("retrieved_files", [])
         for rel_path in collect_relevant_context_paths(workspace_path, target_app, error_log, retrieved_files):
@@ -157,7 +227,7 @@ def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
             except Exception:
                 continue
             if total_chars + len(content) > MAX_PATCH_CONTEXT_CHARS:
-                print(f"   ⚠️ 上下文已達 {MAX_PATCH_CONTEXT_CHARS} 字元上限，略過 {rel_path} 及其後續檔案。")
+                print(f"   ⚠️ Context reached the {MAX_PATCH_CONTEXT_CHARS}-character limit; skipping {rel_path} and all following files.")
                 break
             project_files_content += f"\n--- {rel_path} ---\n{content}\n"
             total_chars += len(content)
@@ -174,52 +244,60 @@ def patch_node(state: ZephyrAgentState) -> Dict[str, Any]:
     # circle between the same visible files. Listed in the prompt so it at
     # least knows which directions are already shown not to work.
     attempt_history = state.get("attempt_history", [])
-    attempt_history_text = "\n".join(attempt_history) if attempt_history else "（這是第一次嘗試，尚無歷史紀錄）"
+    attempt_history_text = "\n".join(attempt_history) if attempt_history else "(This is the first attempt; there is no history yet.)"
+    if state.get("ineffective_attempts"):
+        attempt_history_text += ("\n\n[Directions shown not to work: the failure stayed the same after these edits]\n"
+                                 + "\n".join(state["ineffective_attempts"]))
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """你是一位頂尖的嵌入式軟體工程師，專精於修復 Zephyr RTOS 的程式碼。
-請根據錯誤日誌與提供的專案原始碼，輸出修復程式碼。
+        ("system", """You are a top-tier embedded software engineer specializing in fixing Zephyr RTOS code.
+Based on the error log and the provided project source code, output the fix.
 
-【嚴格格式要求】
-你必須使用以下的 SEARCH/REPLACE 區塊格式來修改檔案。
-絕對不要在區塊外加上 ``` 程式碼區塊符號。
-SEARCH 區塊內的程式碼必須與原始檔案「一模一樣」（包含縮排）。
+[STRICT FORMAT REQUIREMENTS]
+You must modify files using the following SEARCH/REPLACE block format.
+Never wrap the blocks in ``` code fences.
+The code inside the SEARCH block must match the original file EXACTLY (including indentation).
 
-<檔案的相對路徑>
+<relative path of the file>
 <<<<<<<< SEARCH
-<要被替換的原始程式碼>
+<original code to be replaced>
 ========
-<修復後的新程式碼>
->>>>>>>> REPLACE"""),
-        ("human", """[之前已經嘗試過的修補與結果]
-{attempt_history}
-（判讀原則：若某筆紀錄是「套用失敗」，代表 SEARCH 區塊的文字沒有跟檔案內容逐字元比對成功——原始碼完全沒有被改動，請對照下方最新的原始碼內容重新逐字元、含縮排確認，修改方向本身不一定有錯，不需要因此更換方向；若某筆紀錄是「套用成功但建置/執行仍失敗」，代表這個修改方向已經證明無效，請換一個不同的方式或檔案。）
+<new code after the fix>
+>>>>>>>> REPLACE
 
-[目前專案原始碼與設定檔內容]
+""" + SPEC_RULE),
+        ("human", """[Patches attempted earlier and their outcomes]
+{attempt_history}
+(How to read this: if a record says the patch application failed, the text of the SEARCH block did not match the file content character for character, so the source code was not modified at all. Re-check character by character, including indentation, against the latest source code below; the direction of the change is not necessarily wrong, so there is no need to switch direction because of it. If a record says the patch was applied but the build/run still failed, that direction has been shown not to work; please try a different approach or a different file. Always write SEARCH blocks against the current source code below: if changes from an earlier patch do not appear there, they were reverted or never applied.)
+
+[Current project source and configuration file contents]
 {project_files}
 
-[檢索到的知識圖譜上下文]
+[Retrieved knowledge graph context]
 {context}
 
-[目前的錯誤日誌]
+[Current error log]
 {error_log}
 
-請開始生成修補區塊：""")
+Please start generating the patch blocks:""")
     ])
 
     chain = prompt | llm
-    response = chain.invoke({
+    response = call_with_retry(lambda: chain.invoke({
         "attempt_history": attempt_history_text,
         "project_files": project_files_content,
-        "context": state.get("retrieved_context", "無"),
+        "context": state.get("retrieved_context", "None"),
         "error_log": state.get("current_error_log", "")
-    })
+    }), what="patch_expert")
 
-    patch_text = response.content
+    # gemini-3.x 的 content 可能是 content block 的 list (含 thinking/signature)，.text 只取文字部分
+    # gemini-3.x may return content as a list of blocks (thinking/signature); .text keeps only the text
+    patch_text = str(response.text)
     usage_entry = extract_usage(response, node="patch_expert", model=get_model_name("pro"))
-    print("   ↳ 成功生成修補區塊！")
+    print("   ↳ Patch blocks generated successfully!")
     return {
         "patch_content": patch_text,
-        "messages": [f"Patch Expert 已生成修補方案。"],
+        "context_stats": context_stats,
+        "messages": ["Patch Expert generated a patch."],
         "pending_token_usage": append_usage(state.get("pending_token_usage", []), usage_entry),
     }

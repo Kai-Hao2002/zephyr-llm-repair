@@ -1,7 +1,10 @@
 # tools/log_filter
 import re
 import logging
+from collections import deque
 from typing import List
+
+from tools.devops_analyzer import extract_failed_units
 
 class LogFilter:
     """
@@ -20,7 +23,8 @@ class LogFilter:
         # 定義核心錯誤特徵的正規表示式 (Regex patterns for core errors)
         
         # 1. C 語言 / GCC / Clang 編譯錯誤 (e.g., src/main.c:12:3: error: undefined reference)
-        self.c_error_re = re.compile(r"(?i)^.*:\d+:\d+:\s+error:\s+.*")
+        # "fatal error:" (e.g. missing header) must match too, not only plain "error:".
+        self.c_error_re = re.compile(r"(?i)^.*:\d+:\d+:\s+(?:fatal\s+)?error:\s+.*")
         
         # 2. CMake 配置錯誤 (e.g., CMake Error at CMakeLists.txt:10)
         self.cmake_error_re = re.compile(r"^CMake Error.*:")
@@ -44,6 +48,47 @@ class LogFilter:
         # 5. Ninja 建置中斷提示
         self.ninja_fatal_re = re.compile(r"^ninja: build stopped:.*")
 
+        # 6. Zephyr 自己的 Kconfig 警告格式：不帶 "檔名:行號:" 前綴，而是
+        # "warning: SYM (defined at 檔案:行號) was assigned the value 'y' but got 'n'..."，
+        # 且說明文字會折成多行。舊的 kconfig_error_re 要求 "檔名:行號: warning:"，
+        # 完全對不上這個格式，導致真正的 Kconfig 依賴錯誤被整段丟掉。
+        # Zephyr's own Kconfig warning format has no "file:line:" prefix and wraps
+        # onto several lines; kconfig_error_re never matched it.
+        self.kconfig_warning_start_re = re.compile(r"^warning:\s+\S+.*")
+        self.kconfig_warning_end_re = re.compile(
+            r"^(?:warning:|error:|--\s|Parsing |Loaded |Merged |Configuration saved|"
+            r"Kconfig header|CMake |ninja:|\[\d+/\d+\])"
+        )
+        self.kconfig_abort_re = re.compile(r"^error:\s+Aborting due to Kconfig warnings")
+        self.kconfig_warning_max_lines = 8
+
+        # 7. 連結期錯誤 (e.g., undefined reference to `foo')。同一個符號常被重複上百次，
+        # 依符號去重並設上限，避免洗掉真正的線索。
+        # Link-time errors; one symbol is often repeated hundreds of times, so
+        # dedupe by symbol and cap the total.
+        self.link_error_re = re.compile(
+            r"(?i)(?:undefined reference to|multiple definition of|cannot find -l|collect2: error)"
+        )
+        self.link_symbol_re = re.compile(r"(?:undefined reference to|multiple definition of)\s+[`'\"]?([^'`\"\s]+)")
+        self.link_error_max_symbols = 15
+
+        # 8. 去重後的 C/C++ 編譯錯誤上限：保留前 c_error_max_head 筆與最後 c_error_max_tail 筆。
+        # Cap on distinct C/C++ compilation errors: keep the first head and the last tail entries.
+        self.c_error_max_head = 15
+        self.c_error_max_tail = 5
+
+        # 9. Docker Desktop CLI 的提示行 / Docker Desktop CLI hint lines
+        self.docker_hint_re = re.compile(r"^What's next:\s*$|Debug this container error with Gordon|^\s*docker ai\b")
+
+        # 10. gcc 的巨集展開位置 (e.g., src/main.c:294:1: note: in expansion of macro 'ZTEST_SUITE')。
+        # 錯誤回報在標頭檔時，這一行才指出真正被編譯的檔案；只留 .c/.cc/.cpp 的位置，
+        # 標頭檔內部的展開鏈不留。
+        # gcc's macro expansion site: when an error is reported inside a header, this line names
+        # the file being compiled. Only sites in .c/.cc/.cpp files are kept, not chains inside headers.
+        self.macro_site_re = re.compile(r"^\S+\.(?:c|cc|cpp):\d+:\d+:\s+note:\s+in expansion of macro\b")
+        self.compiler_warning_re = re.compile(r"^\S+:\d+:\d+:\s+warning:")
+        self.macro_site_max = 10
+
     def compress_log(self, raw_log: str) -> str:
         """
         輸入原始編譯日誌字串，回傳高密度的錯誤摘要。
@@ -55,15 +100,47 @@ class LogFilter:
         # 新增：用於清除 ANSI 顏色代碼的正則表達式
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         
-        lines = raw_log.splitlines()
-        extracted_lines: List[str] = []
-        capturing_cmake_stack = False 
+        # Docker Desktop CLI 在容器非 0 結束時附加的提示 ("What's next:" + "Debug this container error
+        # with Gordon → docker ai ...")，與 Zephyr 無關，先整行拿掉。
+        # Docker Desktop CLI hint appended when a container exits non-zero; unrelated to Zephyr.
+        lines = [l for l in raw_log.splitlines() if not self.docker_hint_re.search(ansi_escape.sub('', l))]
+        # 元素是一行文字，或一筆 C 錯誤的區塊 (後面的巨集展開位置會附加進去，輸出前才攤平)。
+        # Items are lines, or the block of one C error (macro sites get appended to it; flattened on output).
+        extracted_lines: List = []
+        capturing_cmake_stack = False
+        kconfig_warning_lines_left = 0
+        seen_dedupe = set()
+        link_symbols = set()
+        link_omitted = 0
+        dup_omitted = 0
+        c_error_count = 0
+        c_error_tail = deque(maxlen=self.c_error_max_tail)
+        current_c_block = None
+        macro_sites = set()
 
         for line in lines:
             # 清除顏色代碼並去除前後空白
             clean_line = ansi_escape.sub('', line).strip()
-            
+
             if not clean_line:
+                kconfig_warning_lines_left = 0
+                continue
+
+            # --- Kconfig 警告的多行延續 ---
+            if kconfig_warning_lines_left > 0:
+                if not self.kconfig_warning_end_re.match(clean_line):
+                    extracted_lines.append(clean_line)
+                    kconfig_warning_lines_left -= 1
+                    continue
+                kconfig_warning_lines_left = 0
+
+            # --- 附在 C 錯誤後面的巨集展開位置；編譯器警告的展開位置不留 ---
+            if self.compiler_warning_re.match(clean_line):
+                current_c_block = None
+            elif current_c_block is not None and self.macro_site_re.match(clean_line):
+                if clean_line not in macro_sites and len(macro_sites) < self.macro_site_max:
+                    macro_sites.add(clean_line)
+                    current_c_block.append(clean_line)
                 continue
 
             # --- 處理 CMake 的連續 Call Stack ---
@@ -84,8 +161,24 @@ class LogFilter:
                 capturing_cmake_stack = True
             
             elif self.c_error_re.match(clean_line):
-                extracted_lines.append("\n[C/C++ Compilation Error Detected]")
-                extracted_lines.append(clean_line)
+                # 同一行錯誤 (缺標頭、標頭內的同一個巨集展開錯誤) 會隨每個編譯單元或每個
+                # 呼叫點重複出現，只留第一次。
+                # The same error line repeats per compilation unit / call site; keep the first.
+                if clean_line in seen_dedupe:
+                    dup_omitted += 1
+                    current_c_block = None
+                    continue
+                seen_dedupe.add(clean_line)
+                c_error_count += 1
+                current_c_block = block = ["\n[C/C++ Compilation Error Detected]", clean_line]
+                if c_error_count <= self.c_error_max_head:
+                    extracted_lines.append(block)
+                else:
+                    # 少一個右大括號會讓後面每個函式都報錯 (v3_c_heap_kasan_brace: 446 筆、91 KB)；
+                    # 保留前段與最後幾筆 (gcc 最後的 "expected ... at end of input" 才指出真正位置)。
+                    # A missing brace cascades into hundreds of errors; keep the head and the last
+                    # few (gcc's final "expected ... at end of input" points at the real location).
+                    c_error_tail.append(block)
             
             elif self.dts_error_re.match(clean_line):
                 extracted_lines.append("\n[DeviceTree Error Detected]")
@@ -94,19 +187,111 @@ class LogFilter:
             elif self.kconfig_error_re.match(clean_line):
                 extracted_lines.append("\n[Kconfig/Configuration Error Detected]")
                 extracted_lines.append(clean_line)
+
+            elif self.kconfig_warning_start_re.match(clean_line):
+                extracted_lines.append("\n[Kconfig/Configuration Error Detected]")
+                extracted_lines.append(clean_line)
+                kconfig_warning_lines_left = self.kconfig_warning_max_lines
+
+            elif self.kconfig_abort_re.match(clean_line):
+                extracted_lines.append("\n[Kconfig/Configuration Error Detected]")
+                extracted_lines.append(clean_line)
+
+            elif self.link_error_re.search(clean_line):
+                m = self.link_symbol_re.search(clean_line)
+                key = m.group(1) if m else clean_line
+                if key in link_symbols:
+                    continue
+                if len(link_symbols) >= self.link_error_max_symbols:
+                    link_omitted += 1
+                    continue
+                if not link_symbols:
+                    extracted_lines.append("\n[Linker Error Detected]")
+                link_symbols.add(key)
+                extracted_lines.append(clean_line)
                 
             elif self.ninja_fatal_re.match(clean_line):
                 extracted_lines.append("\n[Ninja Build Stopped]")
                 extracted_lines.append(clean_line)
 
-        compressed_output = "\n".join(extracted_lines).strip()
-        
+        if c_error_count > self.c_error_max_head:
+            omitted = c_error_count - self.c_error_max_head - len(c_error_tail)
+            if omitted:
+                extracted_lines.append(f"\n[... {omitted} more distinct compilation errors omitted]")
+            extracted_lines.extend(c_error_tail)
+        if link_omitted:
+            extracted_lines.append(f"[... {link_omitted} more distinct link errors omitted]")
+        if dup_omitted:
+            extracted_lines.append(f"[... {dup_omitted} duplicate compilation error lines omitted]")
+
+        flat_lines: List[str] = []
+        for item in extracted_lines:
+            flat_lines.extend(item) if isinstance(item, list) else flat_lines.append(item)
+        compressed_output = "\n".join(flat_lines).strip()
+
+        # 程式有開機執行 (看得到開機橫幅) 時，一律附上執行期的尾段：建置期規則
+        # 可能只命中無害的 Kconfig 警告 (例如 MAX_THREAD_BYTES/USERSPACE)，
+        # 舊版因此不再輸出尾段，v2 有 22 筆 runtime_crash 的 assertion 就這樣
+        # 被整段丟掉 (見 eval_runs/v2/analysis/failure_report.html 第 3.1 節)。
+        # When the program booted, always append the runtime tail: build-phase rules
+        # may match only a benign Kconfig warning, and the old code then dropped the
+        # tail - hiding the assertion in 22 v2 runtime_crash cases.
+        if compressed_output:
+            runtime_tail = self._runtime_tail(lines, ansi_escape)
+            # 程式已經開機、尾段又有失敗訊息時，建置期的訊息只是警告，失敗訊息放最前面 (2026-10-31)。
+            # The program built and ran, so build-phase text is only warnings: lead with the failure.
+            if runtime_tail and any(self._FAILURE_RE.search(l) for l in runtime_tail.splitlines()):
+                build_part = compressed_output.replace("[Kconfig/Configuration Error Detected]", "[Build Warning]")
+                compressed_output = f"[Runtime Log Tail]\n{runtime_tail}\n\n[Build Messages]\n{build_part}"
+            elif runtime_tail:
+                compressed_output += "\n\n[Runtime Log Tail]\n" + runtime_tail
+
+            # 錯誤回報在標頭檔時，模型要看到真正被編譯的檔案 (r3：c_syntax 8/19 筆因此看不到注入檔)。
+            # When an error is reported in a header, show the file actually being compiled.
+            units = extract_failed_units("\n".join(ansi_escape.sub('', l) for l in lines))
+            if units:
+                unit_lines = "\n".join(f"/zephyrproject/zephyr/{u}" for u in units)
+                compressed_output = f"[Failed Compilation Units]\n{unit_lines}\n\n{compressed_output}"
+
         if not compressed_output:
-            self.logger.warning("未匹配到標準錯誤特徵，回傳日誌尾端作為備用 (No standard patterns matched, returning tail).")
+            self.logger.warning("No standard patterns matched, returning tail.")
             fallback_lines = [ansi_escape.sub('', l).strip() for l in lines[-20:]]
             return "[Fallback Raw Tail]\n" + "\n".join(fallback_lines)
 
         return compressed_output
+
+    _BOOT_BANNER_RE = re.compile(r"\*\*\* Booting Zephyr OS")
+    _TEST_START_RE = re.compile(r"^START - \w+")
+    _FAILURE_RE = re.compile(r"Assertion failed|ASSERTION FAIL|^FAIL - |ZEPHYR FATAL ERROR|Segmentation fault|Fault"
+                             r"|\*\*\* .+ \*\*\*: terminated|^Aborted\b")
+    runtime_tail_max_lines = 40
+
+    def _runtime_tail(self, lines: List[str], ansi_escape) -> str:
+        """開機橫幅之後的輸出：從最後一個 `START - <test>` 開始 (最多 40 行)，
+        沒有 ztest 輸出時取最後 20 行；沒開機則回傳空字串。
+        Output after the boot banner: from the last `START - <test>` line (max 40
+        lines), or the last 20 lines when there is no ztest output; '' if never booted."""
+        boot_idx = None
+        for i, l in enumerate(lines):
+            if self._BOOT_BANNER_RE.search(l):
+                boot_idx = i
+        if boot_idx is None:
+            return ""
+        run = [ansi_escape.sub('', l).strip() for l in lines[boot_idx:]]
+        run = [l for l in run if l]
+        # 有失敗訊息時，從第一個失敗之前最近的 START 開始；否則從最後一個 START 開始。
+        # With a failure marker, start at the START line preceding the first failure;
+        # otherwise at the last START line.
+        first_fail = next((i for i, l in enumerate(run) if self._FAILURE_RE.search(l)), None)
+        search_end = first_fail + 1 if first_fail is not None else len(run)
+        start = None
+        for i, l in enumerate(run[:search_end]):
+            if self._TEST_START_RE.match(l):
+                start = i
+        tail = run[start:] if start is not None else run[-20:]
+        if len(tail) > self.runtime_tail_max_lines:
+            tail = tail[:self.runtime_tail_max_lines // 2] + ["[...]"] + tail[-self.runtime_tail_max_lines // 2:]
+        return "\n".join(tail)
 
 
 # ==========================================
@@ -142,10 +327,10 @@ ninja: build stopped: subcommand failed.
 
     log_filter = LogFilter()
     
-    print("=== 原始日誌長度 (Raw Log Length): {} 字元 ===".format(len(dummy_raw_log)))
+    print("=== Raw Log Length: {} characters ===".format(len(dummy_raw_log)))
     
     compressed = log_filter.compress_log(dummy_raw_log)
     
-    print("\n=== 過濾後的最小重現日誌 (Compressed Minimal Repro Log) ===")
+    print("\n=== Compressed Minimal Repro Log ===")
     print(compressed)
-    print("\n=== 壓縮後長度 (Compressed Length): {} 字元 ===".format(len(compressed)))
+    print("\n=== Compressed Length: {} characters ===".format(len(compressed)))

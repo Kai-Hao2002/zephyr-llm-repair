@@ -1,0 +1,95 @@
+[
+  {
+    "case_id": "v3new_runtime_mbox_91db82a",
+    "category": "runtime_crash",
+    "pipeline": "b2",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 349.7519197463989,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b2_single_agent_rag",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 29947,
+            "output_tokens": 64424
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": "The error log indicates an assertion failure in `test_mbox_api.c` at line 282:\n`Assertion failed at WEST_TOPDIR/zephyr/tests/kernel/mbox/mbox_api/src/test_mbox_api.c:282: tmbox_get: mmsg.size not equal to sizeof(data[info_type])`\n\nLet's examine the relevant code snippet in `tmbox_get` for the `ASYNC_PUT_GET_BUFFER` case:\n\n```c\n\tcase ASYNC_PUT_GET_BUFFER:\n\t\t/**TESTPOINT: mbox async get buffer*/\n\t\tmmsg.size = sizeof(rxdata); // Line 279: mmsg.size is initialized to MAIL_LEN (64)\n\t\tmmsg.rx_source_thread = K_ANY;\n\t\tzassert_true(k_mbox_get(pmbox, &mmsg, NULL, K_FOREVER) == 0,\n\t\t\t     NULL);\n\t\tzassert_equal(mmsg.info, ASYNC_PUT_GET_BUFFER);\n\t\tzassert_equal(mmsg.size, sizeof(data[info_type])); // Line 282: Assertion fails here.\n\t\tk_mbox_data_get(&mmsg, rxdata);\n\t\tzassert_true(memcmp(rxdata, data[info_type], MAIL_LEN) == 0,\n\t\t\t     NULL);\n\t\tbreak;\n```\n\nAnd in `tmbox_put` for the same `info_type`:\n\n```c\n\tcase ASYNC_PUT_GET_BUFFER:\n\t\t/**TESTPOINT: mbox async put buffer*/\n\t\tmmsg.info = ASYNC_PUT_GET_BUFFER;\n\t\tmmsg.size = sizeof(data[info_type]); // mmsg.size is set to MAIL_LEN (64)\n\t\tmmsg.tx_data = data[info_type];\n\t\tmmsg.tx_target_thread = K_ANY;\n\t\tk_mbox_async_put(pmbox, &mmsg, &sync_sema);\n\t\t/*wait for msg being taken*/\n\t\tk_sem_take(&sync_sema, K_FOREVER);\n\t\tbreak;\n```\n\nThe `k_mbox_get` function, when called with `buffer = NULL`, is expected to retrieve the message metadata, including the actual size of the message, and store it in `mmsg.size`. The `k_mbox_async_put` function puts a message of size `sizeof(data[info_type])`, which is `MAIL_LEN` (64 bytes). Therefore, after `k_mbox_get` returns, `mmsg.size` should be 64.\n\nThe assertion `zassert_equal(mmsg.size, sizeof(data[info_type]))` is failing, which means `mmsg.size` is not 64 at line 282.\nHowever, the subsequent assertion `zassert_true(memcmp(rxdata, data[info_type], MAIL_LEN) == 0, NULL);` passes. For `memcmp` to pass, `k_mbox_data_get(&mmsg, rxdata)` must have successfully copied 64 bytes into `rxdata`. This implies that `mmsg.size` *must* have been 64 when `k_mbox_data_get` was called.\n\nThis presents a contradiction: `mmsg.size` is not 64 at line 282, but it is 64 when `k_mbox_data_get` is called shortly after. There is no intervening code that modifies `mmsg.size`.\n\nThis suggests that the initial value of `mmsg.size` (set to `sizeof(rxdata)`, which is 64) is being incorrectly interpreted or overwritten by `k_mbox_get` when `buffer` is `NULL`, and then somehow restored or correctly used by `k_mbox_data_get`.\n\nA common pattern in Zephyr's `k_mbox_get` when `buffer` is `NULL` is that the `msg->size` field is not used as an input (max buffer size) but solely as an output (actual message size). Setting it to 0 before calling `k_mbox_get` is a safer practice to ensure it's purely an output, as seen in other `k_mbox_get` calls in this same test file (e.g., `ASYNC_MULTIPLE_PUT` case).\n\nBy initializing `mmsg.size` to 0 before calling `k_mbox_get`, we ensure that the value returned by `k_mbox_get` is explicitly what the mailbox subsystem reports, rather than relying on or being confused by a pre-set value. This aligns with how `k_mbox_get` is used in other asynchronous scenarios in this test.\n\nThe fix is to initialize `mmsg.size` to 0 before calling `k_mbox_get` in the `ASYNC_PUT_GET_BUFFER` case, similar to how it's done in `ASYNC_MULTIPLE_PUT`.\n\n<tests/kernel/mbox/mbox_api/src/test_mbox_api.c>\n<<<<<<<< SEARCH\n\t\t/**TESTPOINT: mbox async get buffer*/\n\t\tmmsg.size = sizeof(rxdata);\n\t\tmmsg.rx_source_thread = K_ANY;\n\t\tzassert_true(k_mbox_get(pmbox, &mmsg, NULL, K_FOREVER) == 0,\n\t\t\t     NULL);\n\t\tzassert_equal(mmsg.info, ASYNC_PUT_GET_BUFFER);\n\t\tzassert_equal(mmsg.size, sizeof(data[info_type]));\n\t\tk_mbox_data_get(&mmsg, rxdata);\n\t\tzassert_true(memcmp(rxdata, data[info_type], MAIL_LEN) == 0,\n\t\t\t     NULL);\n\t\tbreak;\n========\n\t\t/**TESTPOINT: mbox async get buffer*/\n\t\tmmsg.size = 0; /* Initialize size to 0 for async get */\n\t\tmmsg.rx_source_thread = K_ANY;\n\t\tzassert_true(k_mbox_get(pmbox, &mmsg, NULL, K_FOREVER) == 0,\n\t\t\t     NULL);\n\t\tzassert_equal(mmsg.info, ASYNC_PUT_GET_BUFFER);\n\t\tzassert_equal(mmsg.size, sizeof(data[info_type]));\n\t\tk_mbox_data_get(&mmsg, rxdata);\n\t\tzassert_true(memcmp(rxdata, data[info_type], MAIL_LEN) == 0,\n\t\t\t     NULL);\n\t\tbreak;\n>>>>>>>> REPLACE",
+          "applied_files": [
+            "tests/kernel/mbox/mbox_api/src/test_mbox_api.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\n[107/111] Linking C static library zephyr/kernel/libkernel.a\n[108/111] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[109/111] Building native simulator runner, and linking final executable\n[110/111] Running utility command for native_runner_executable\n[110/111] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE mbox_api\n===================================================================\nSTART - test_define_multi_mbox\nPASS - test_define_multi_mbox in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_multiple_put\nPASS - test_mbox_async_multiple_put in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_put_get_block\nPASS - test_mbox_async_put_get_block in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_put_get_buffer\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/mbox/mbox_api/src/test_mbox_api.c:282: tmbox_get: mmsg.size not equal to sizeof(data[info_type])",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": [
+            "tests/kernel/mbox/mbox_api/src/test_mbox_api.c",
+            "soc/native/inf_clock/Kconfig",
+            "Kconfig.zephyr",
+            "subsys/llext/Kconfig",
+            "include/zephyr/llext/symbol.h",
+            "scripts/native_simulator/common/src/include/nsi_cpu_if.h",
+            "subsys/fs/Kconfig",
+            "tests/kernel/multiprocessing/mp/src/main.c"
+          ],
+          "restored_files": [
+            "tests/kernel/mbox/mbox_api/src/test_mbox_api.c"
+          ]
+        }
+      }
+    ],
+    "first_retrieval_files": [
+      "tests/kernel/mbox/mbox_api/src/test_mbox_api.c",
+      "soc/native/inf_clock/Kconfig",
+      "Kconfig.zephyr",
+      "subsys/llext/Kconfig",
+      "include/zephyr/llext/symbol.h",
+      "scripts/native_simulator/common/src/include/nsi_cpu_if.h",
+      "subsys/fs/Kconfig",
+      "tests/kernel/multiprocessing/mp/src/main.c"
+    ],
+    "initial_error_log": "[Fallback Raw Tail]\n[107/111] Linking C static library zephyr/kernel/libkernel.a\n[108/111] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[109/111] Building native simulator runner, and linking final executable\n[110/111] Running utility command for native_runner_executable\n[110/111] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE mbox_api\n===================================================================\nSTART - test_define_multi_mbox\nPASS - test_define_multi_mbox in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_multiple_put\nPASS - test_mbox_async_multiple_put in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_put_get_block\nPASS - test_mbox_async_put_get_block in 0.000 seconds\n===================================================================\nSTART - test_mbox_async_put_get_buffer\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/mbox/mbox_api/src/test_mbox_api.c:282: tmbox_get: mmsg.size not equal to sizeof(data[info_type])",
+    "protected_file_count": 6,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_r2_main/b2/v3new_runtime_mbox_91db82a",
+    "api_events": [],
+    "started_at": "2026-10-14T14:10:30+00:00",
+    "run_meta": {
+      "code_commit": "dbb8c72a127bffd1a0e188f7aed55202dce9fa4f",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "embedding_key_fingerprint": "e5eaec49",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

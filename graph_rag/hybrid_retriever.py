@@ -29,6 +29,8 @@ from typing import List, Optional
 from rank_bm25 import BM25Okapi
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
+from core.llm_retry import RetrievalDegradedError, call_with_retry, record_fallback, strict_fallbacks
+
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _INDEXABLE_EXTENSIONS = (".c", ".h", ".conf", ".dts", ".dtsi", ".overlay")
 
@@ -39,7 +41,11 @@ _INDEXABLE_EXTENSIONS = (".c", ".h", ".conf", ".dts", ".dtsi", ".overlay")
 # supported by this API version); gemini-embedding-001 is the embedding
 # model that actually works — verified with a real embed_query() call
 # first, not guessed from docs.
-_EMBEDDING_MODEL = "models/gemini-embedding-001"
+# v3 (2026-10-03 起) 改用 gemini-embedding-2；v2 用的是 gemini-embedding-001。
+# 送進 embedding 的內容長度 (_EMBED_CONTENT_CHARS) 刻意不變，只換模型。
+# v3 (from 2026-10-03) uses gemini-embedding-2; v2 used gemini-embedding-001. The
+# embedded content length (_EMBED_CONTENT_CHARS) is deliberately unchanged; only the model changes.
+EMBEDDING_MODEL = "models/gemini-embedding-2"
 
 
 def _is_indexable_file(filename: str) -> bool:
@@ -146,8 +152,17 @@ class HybridRetriever:
             # as agents/analyzer.py: Gemini API calls have been observed to
             # hang with no response at all; without a timeout the caller
             # blocks indefinitely.
+            # GEMINI_EMBEDDING_API_KEY 有設定時 embedding 改用這把金鑰 (2026-10-11：免費層
+            # embedding 每天只有 1,000 筆內容，每次檢索就用掉 31 筆，所以 embedding 改走付費金鑰，
+            # 生成呼叫仍用 GEMINI_API_KEY)。未設定時沿用 GEMINI_API_KEY。
+            # When GEMINI_EMBEDDING_API_KEY is set, embeddings use that key (2026-10-11: the free
+            # tier allows 1,000 embedded contents per day and each retrieval uses 31, so embeddings
+            # go through a billed key while generation stays on GEMINI_API_KEY). Unset falls back
+            # to GEMINI_API_KEY.
+            embed_key = os.environ.get("GEMINI_EMBEDDING_API_KEY") or None
             self._embeddings = GoogleGenerativeAIEmbeddings(
-                model=_EMBEDDING_MODEL, request_options={"timeout": 120}
+                model=EMBEDDING_MODEL, request_options={"timeout": 120},
+                **({"google_api_key": embed_key} if embed_key else {}),
             )
         return self._embeddings
 
@@ -197,8 +212,8 @@ class HybridRetriever:
                         candidate_contents.append(f.read()[: self._EMBED_CONTENT_CHARS])
                 except Exception:
                     candidate_contents.append("")
-            doc_vectors = embeddings.embed_documents(candidate_contents)
-            query_vector = embeddings.embed_query(query)
+            doc_vectors = call_with_retry(lambda: embeddings.embed_documents(candidate_contents), what="embed_documents")
+            query_vector = call_with_retry(lambda: embeddings.embed_query(query), what="embed_query")
             semantic_order = sorted(
                 range(len(candidate_paths)),
                 key=lambda i: _cosine_similarity(query_vector, doc_vectors[i]),
@@ -241,7 +256,12 @@ class HybridRetriever:
             # dedupe first.
             final_order = sorted(candidate_paths, key=lambda p: combined_scores[p], reverse=True)
             return final_order[:top_k]
-        except Exception:
+        except Exception as e:
+            record_fallback("hybrid_semantic_rerank", e)
+            if strict_fallbacks():
+                raise RetrievalDegradedError(
+                    f"Hybrid semantic re-rank failed and strict mode forbids the BM25 fallback: {e}"
+                ) from e
             # 語意重排失敗 (例如 embedding API 暫時出錯) 時退回純 BM25
             # 排序，而不是讓整個檢索直接沒有任何結果——BM25 的排序本身
             # 已經是有用的訊號，只是少了語意層的再排序。

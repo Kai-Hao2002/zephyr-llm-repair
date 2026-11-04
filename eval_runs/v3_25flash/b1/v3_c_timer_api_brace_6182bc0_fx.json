@@ -1,0 +1,77 @@
+[
+  {
+    "case_id": "v3_c_timer_api_brace_6182bc0_fx",
+    "category": "c_syntax",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 54.83381199836731,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 184,
+            "output_tokens": 2633
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/kernel/timer/timer_api/src/main.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n\n#define STACK_SIZE (512 + CONFIG_TEST_EXTRA_STACK_SIZE)\n#define THREAD_PRIORITY K_PRIO_PREEMPT(10)\n\nstatic K_THREAD_STACK_DEFINE(tstack, STACK_SIZE);\nstatic struct k_thread tdata;\n\nstatic K_TIMER_DEFINE(test_timer, NULL, NULL);\n\nstatic volatile int timer_expiry_count;\nstatic volatile int timer_stop_count;\n\nstatic void timer_expiry_fn(struct k_timer *timer)\n{\n\ttimer_expiry_count++;\n}\n\nstatic void timer_stop_fn(struct k_timer *timer)\n{\n\ttimer_stop_count++;\n}\n\nZTEST_DMEM volatile int timer_user_data;\n\nstatic void timer_user_data_expiry_fn(struct k_timer *timer)\n{\n\tvolatile int *data = (volatile int *)timer->user_data;\n\n\t*data = 1;\n}\n\nstatic void timer_user_data_stop_fn(struct k_timer *timer)\n{\n\tvolatile int *data = (volatile int *)timer->user_data;\n\n\t*data = 2;\n}\n\n/**\n * @brief Test k_timer_init\n *\n * @details Test timer initialization with expiry and stop functions.\n *\n * @ingroup kernel_timer_tests\n */\nZTEST(timer_api, test_timer_init)\n{\n\tk_timer_init(&test_timer, timer_expiry_fn, timer_stop_fn);\n\n\tzassert_equal(test_timer.expiry_fn, timer_expiry_fn, \"Expiry function not set\");\n\tzassert_equal(test_timer.stop_fn, timer_stop_fn, \"Stop function not set\");\n}\n\n/**\n * @brief Test k_timer_start and k_timer_stop\n *\n * @details Test starting and stopping a timer.\n *\n * @ingroup kernel_timer_tests\n */\nZTEST(timer_api, test_timer_start_stop)\n{\n\tk_timer_init(&test_timer, timer_expiry_fn, timer_stop_fn);\n\n\ttimer_expiry_count = 0;\n\ttimer_stop_count = 0;\n\n\tk_timer_start(&test_timer, K_MSEC(10), K_NO_WAIT);\n\tk_sleep(K_MSEC(5));\n\tk_timer_stop(&test_timer);\n\n\tzassert_equal(timer_expiry_count, 0, \"Timer expired unexpectedly\");\n\tzassert_equal(timer_stop_count, 1, \"Stop function not called\");\n\n\ttimer_expiry_count = 0;\n\ttimer_stop_count = 0;\n\n\tk_timer_start(&test_timer, K_MSEC(10), K_MSEC(10));\n\tk_sleep(K_MSEC(15));\n\tk_timer_stop(&test_timer);\n\n\tzassert_equal(timer_expiry_count, 1, \"Timer did not expire\");\n\tzassert_equal(timer_stop_count, 1, \"Stop function not called\");\n}\n\n/**\n * @brief Test k_timer_status_get\n *\n * @details Test getting timer status.\n *\n * @ingroup kernel_timer_tests\n */\nZTEST(timer_api, test_timer_status_get)\n{\n\tk_timer_init(&test_timer, timer_expiry_fn, timer_stop_fn);\n\n\ttimer_expiry_count = 0;\n\n\tk_timer_start(&test_timer, K_MSEC(10), K_NO_WAIT);\n\tk_sleep(K_MSEC(5));\n\tzassert_equal(k_timer_status_get(&test_timer), 0, \"Timer status incorrect\");\n\tk_timer_stop(&test_timer);\n\n\tk_timer_start(&test_timer, K_MSEC(10), K_NO_WAIT);\n\tk_sleep(K_MSEC(15));\n\tzassert_equal(k_timer_status_get(&test_timer), 1, \"Timer status incorrect\");\n\tk_timer_stop(&test_timer);\n}\n\n/**\n * @brief Test k_timer_remaining_get\n *\n * @details Test getting remaining time on a timer.\n *\n * @ingroup kernel_timer_tests\n */\nZTEST(timer_api, test_timer_remaining_get)\n{\n\tk_timer_init(&test_timer, timer_expiry_fn, timer_stop_fn);\n\n\tk_timer_start(&test_timer, K_MSEC(100), K_NO_WAIT);\n\tk_busy_wait(10000);\n\t/* Remaining time should be around 90ms */\n\tzassert_true(k_timer_remaining_get(&test_timer) > K_MSEC(80).ticks, \"Remaining time incorrect\");\n\tzassert_true(k_timer_remaining_get(&test_timer) < K_MSEC(100).ticks, \"Remaining time incorrect\");\n\tk_timer_stop(&test_timer);\n}\n\n/**\n * @brief Test k_timer_user_data_set and k_timer_user_data_get\n *\n * @details Test setting and getting user data for a timer.\n *\n * @ingroup kernel_timer_tests\n */\nZTEST(timer_api, test_timer_user_data)\n{\n\tk_timer_init(&test_timer, timer_user_data_expiry_fn, timer_user_data_stop_fn);\n\n\tk_timer_user_data_set(&test_timer, (void *)&timer_user_data);\n\tzassert_equal(k_timer_user_data_get(&test_timer), (void *)&timer_user_data, \"User data not set\");\n\n\ttimer_user_data = 0;\n\tk_timer_start(&test_timer, K_MSEC(10), K_NO_WAIT);\n\tk_sleep(K_MSEC(5));\n\tk_timer_stop(&test_timer);\n\tzassert_equal(timer_user_data, 2, \"User data not updated by stop function\");\n\n\ttimer_user_data = 0;\n\tk_timer_start(&test_timer, K_MSEC(10), K_MSEC(10));\n\tk_sleep(K_MSEC(15));\n\tk_timer_stop(&test_timer);\n\tzassert_equal(timer_user_data, 1, \"User data not updated by expiry function\");\n}\n\n/**\n * @brief Test k_timer_is_active\n *\n * @details Test checking if a timer is active.\n *\n * @ingroup kernel_timer_tests\n */\nZTEST(timer_api, test_timer_is_active)\n{\n\tk_timer_init(&test_timer, NULL, NULL);\n\n\tzassert_false(k_timer_is_active(&test_timer), \"Timer should not be active\");\n\n\tk_timer_start(&test_timer, K_MSEC(100), K_NO_WAIT);\n\tzassert_true(k_timer_is_active(&test_timer), \"Timer should be active\");\n\n\tk_timer_stop(&test_timer);\n\tzassert_false(k_timer_is_active(&test_timer), \"Timer should not be active\");\n}\n\n/**\n * @brief Test k_timer_remaining_get_32\n *\n * @details Test getting remaining time on a timer (32-bit).\n *\n * @ingroup kernel_timer_tests\n */\nZTEST(timer_api, test_timer_remaining_get_32)\n{\n\tk_timer_init(&test_timer, timer_expiry_fn, timer_stop_fn);\n\n\tk_timer_start(&test_timer, K_MSEC(100), K_NO_WAIT);\n\tk_busy_wait(10000);\n\t/* Remaining time should be around 90ms */\n\tzassert_true(k_timer_remaining_get_32(&test_timer) > K_MSEC(80).ticks, \"Remaining time incorrect\");\n\tzassert_true(k_timer_remaining_get_32(&test_timer) < K_MSEC(100).ticks, \"Remaining time incorrect\");\n\tk_timer_stop(&test_timer);\n}\n\n/**\n * @brief Test k_timer_status_get_32\n *\n * @details Test getting timer status (32-bit).\n *\n * @ingroup kernel_timer_tests\n */\nZTEST(timer_api, test_timer_status_get_32)\n{\n\tk_timer_init(&test_timer, timer_expiry_fn, timer_stop_fn);\n\n\ttimer_expiry_count = 0;\n\n\tk_timer_start(&test_timer, K_MSEC(10), K_NO_WAIT);\n\tk_sleep(K_MSEC(5));\n\tzassert_equal(k_timer_status_get_32(&test_timer), 0, \"Timer status incorrect\");\n\tk_timer_stop(&test_timer);\n\n\tk_timer_start(&test_timer, K_MSEC(10), K_NO_WAIT);\n\tk_sleep(K_MSEC(15));\n\tzassert_equal(k_timer_status_get_32(&test_timer), 1, \"Timer status incorrect\");\n\tk_timer_stop(&test_timer);\n}\n\nZTEST_SUITE(timer_api, NULL, NULL, NULL, NULL, NULL);\n"
+          },
+          "applied_files": [
+            "tests/kernel/timer/timer_api/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/timer/timer_api/src/main.c:169:23: error: implicit declaration of function 'k_timer_is_active'; did you mean 'k_timer_start'? [-Wimplicit-function-declaration]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/timer/timer_api/src/main.c:192:22: error: implicit declaration of function 'k_timer_remaining_get_32'; did you mean 'k_timer_remaining_get'? [-Wimplicit-function-declaration]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/timer/timer_api/src/main.c:212:23: error: implicit declaration of function 'k_timer_status_get_32'; did you mean 'k_timer_status_get'? [-Wimplicit-function-declaration]\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/timer/timer_api/src/main.c:154:9: error: implicit declaration of function 'k_busy_wiat'; did you mean 'k_busy_wait'? [-Wimplicit-function-declaration]\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+    "protected_file_count": 7,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3_c_timer_api_brace_6182bc0_fx",
+    "api_events": [],
+    "started_at": "2026-10-07T17:13:18+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

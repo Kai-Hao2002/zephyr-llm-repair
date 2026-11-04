@@ -1,0 +1,75 @@
+[
+  {
+    "case_id": "v3new_runtime_cobs_c79b1e8_r3",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 249.84195804595947,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-2.5-flash",
+            "input_tokens": 366,
+            "output_tokens": 64465
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": {
+            "filepath": "lib/cobs/cobs.c",
+            "content": "#include <zephyr/kernel.h>\n#include <zephyr/sys/cobs.h>\n#include <zephyr/sys/util.h>\n\nsize_t cobs_encode(uint8_t *dst, size_t dst_len, const uint8_t *src, size_t src_len)\n{\n    size_t encoded_len = 0;\n    const uint8_t *end = src + src_len;\n    uint8_t *code_ptr = dst;\n    uint8_t code = 1;\n\n    if (dst_len == 0) {\n        return 0;\n    }\n\n    dst++; /* Reserve space for the first code byte */\n    encoded_len++;\n\n    while (src < end) {\n        if (encoded_len >= dst_len) {\n            return 0; /* Not enough space in destination buffer */\n        }\n\n        if (*src == 0x00) {\n            *code_ptr = code;\n            code_ptr = dst;\n            code = 1;\n            dst++;\n            encoded_len++;\n        } else {\n            *dst++ = *src;\n            code++;\n            encoded_len++;\n            if (code == 0xFF) {\n                *code_ptr = code;\n                code_ptr = dst;\n                code = 1;\n                dst++;\n                encoded_len++;\n            }\n        }\n        src++;\n    }\n\n    *code_ptr = code;\n\n    if (encoded_len >= dst_len) {\n        return 0; /* Not enough space for the final delimiter */\n    }\n\n    *dst = 0x00; /* Add the final delimiter */\n    encoded_len++;\n\n    return encoded_len;\n}\n\nsize_t cobs_decode(uint8_t *dst, size_t dst_len, const uint8_t *src, size_t src_len)\n{\n    size_t decoded_len = 0;\n    uint8_t code;\n    const uint8_t *end = src + src_len;\n\n    while (src < end) {\n        code = *src++;\n\n        if (code == 0x00) {\n            /* Invalid COBS data: 0x00 byte in the middle of the frame */\n            return 0;\n        }\n\n        if (decoded_len + code - 1 > dst_len) {\n            /* Not enough space in destination buffer */\n            return 0;\n        }\n\n        for (int i = 1; i < code; i++) {\n            if (src >= end) {\n                /* Invalid COBS data: not enough source data */\n                return 0;\n            }\n            *dst++ = *src++;\n            decoded_len++;\n        }\n\n        /* Insert 0x00 byte unless it's the last block and the original\n         * data didn't end with 0x00. The COBS encoder adds a final 0x00\n         * if the original data does not end with 0x00. If the original\n         * data ends with 0x00, the encoder encodes it as part of the data,\n         * and the 'code' byte will be 1. So, if code is 1, we insert 0x00.\n         * If code > 1, we insert 0x00. The only case we don't insert 0x00\n         * is if we are at the end of the encoded buffer and the last 'code'\n         * byte was not 1. This means the original data did not end with 0x00,\n         * and the final 0x00 is the frame delimiter.\n         */\n        if (code < 0xFF && src < end) {\n            *dst++ = 0x00;\n            decoded_len++;\n        }\n    }\n\n    return decoded_len;\n}\n\nvoid cobs_decode_ctx_init(struct cobs_decode_ctx *ctx)\n{\n    ctx->code = 0x00;\n    ctx->dst_ptr = NULL;\n    ctx->dst_len = 0;\n    ctx->decoded_len = 0;\n    ctx->insert_zero = false;\n}\n\nint cobs_decode_stream(struct cobs_decode_ctx *ctx, uint8_t *dst, size_t dst_len,\n                       const uint8_t *src, size_t src_len, size_t *decoded_len_out)\n{\n    if (ctx->dst_ptr == NULL) {\n        ctx->dst_ptr = dst;\n        ctx->dst_len = dst_len;\n        ctx->decoded_len = 0;\n        ctx->insert_zero = false;\n    }\n\n    for (size_t i = 0; i < src_len; i++) {\n        uint8_t byte = src[i];\n\n        if (ctx->code == 0x00) { /* Expecting a code byte */\n            if (ctx->insert_zero) {\n                if (ctx->decoded_len >= ctx->dst_len) {\n                    return -ENOMEM;\n                }\n                *ctx->dst_ptr++ = 0x00;\n                ctx->decoded_len++;\n                ctx->insert_zero = false;\n            }\n\n            if (byte == 0x00) { /* Frame delimiter */\n                *decoded_len_out = ctx->decoded_len;\n                cobs_decode_ctx_init(ctx);\n                return 1;\n            }\n            ctx->code = byte;\n        } else { /* Expecting data byte */\n            if (ctx->decoded_len >= ctx->dst_len) {\n                return -ENOMEM;\n            }\n            *ctx->dst_ptr++ = byte;\n            ctx->decoded_len++;\n            ctx->code--;\n\n            if (ctx->code == 0x00) { /* Block finished, prepare to insert 0x00 */\n                ctx->insert_zero = true;\n            }\n        }\n    }\n\n    *decoded_len_out = ctx->decoded_len; /* Update decoded_len_out for partial frame */\n    return 0;\n}\n"
+          },
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file 'lib/cobs/cobs.c' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE cobs_tests\n===================================================================\nSTART - test_cobs_consecutive_delims\nPASS - test_cobs_consecutive_delims in 0.000 seconds\n===================================================================\nSTART - test_cobs_invalid_delim_pos\nPASS - test_cobs_invalid_delim_pos in 0.000 seconds\n===================================================================\nSTART - test_cobs_invalid_overrun\nPASS - test_cobs_invalid_overrun in 0.000 seconds\n===================================================================\nSTART - test_decode\nPASS - test_decode in 0.000 seconds\n===================================================================\nSTART - test_decode_stream\nPASS - test_decode_stream in 0.000 seconds\n===================================================================\nSTART - test_decode_stream_frame_complete\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/cobs/src/main.c:529: cobs_frame_tester: test->decoded_len not equal to dst->len",
+    "protected_file_count": 4,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v3_eval_work_v3_25flash_main/b1/v3new_runtime_cobs_c79b1e8_r3",
+    "api_events": [],
+    "started_at": "2026-10-10T09:45:14+00:00",
+    "run_meta": {
+      "code_commit": "138162657b5a505e60cae207edb0526ca8729548",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-2.5-flash",
+        "pro": "gemini-2.5-flash",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "free_tier_retry_policy": true,
+      "gemini_key_fingerprint": "fefcb2ba",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

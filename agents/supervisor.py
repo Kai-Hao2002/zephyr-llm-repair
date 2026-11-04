@@ -21,6 +21,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from core.state import ZephyrAgentState
 from core.llm_usage import extract_usage
 from core.llm_provider import get_chat_model, get_model_name
+from core.llm_retry import call_with_retry, record_fallback
 
 # 從第幾次迭代開始，把每次嘗試的結果壓成一句話再放進 attempt_history，
 # 而不是繼續帶著較完整的錯誤日誌片段——迭代次數愈往後，愈需要控制
@@ -77,23 +78,26 @@ def _compress_outcome_to_one_sentence(outcome_description: str) -> Tuple[str, Op
         # failure, but with no timeout that "failure" never arrives.
         llm = get_chat_model(role="fast", temperature=0, timeout=120)
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "把以下這次修補嘗試的內容與結果，壓縮成剛好一句話的繁體中文摘要，"
-                       "保留關鍵資訊 (改了哪個檔案、為什麼還是失敗)。只輸出這一句話，"
-                       "不要加任何前綴、編號或其他說明文字。"),
+            ("system", "Compress the content and outcome of the following patch attempt into exactly one sentence of English summary, "
+                       "keeping the key information (which file was changed, and why it still failed). Output only this one sentence, "
+                       "with no prefix, numbering, or other explanatory text."),
             ("human", "{outcome}")
         ])
         chain = prompt | llm
-        response = chain.invoke({"outcome": outcome_description})
+        response = call_with_retry(lambda: chain.invoke({"outcome": outcome_description}), what="supervisor_compression")
         usage_entry = extract_usage(response, node="supervisor_compression", model=get_model_name("fast"))
-        first_line = response.content.strip().splitlines()[0] if response.content.strip() else ""
+        text = str(response.text)  # gemini-3.x: content may be a list of blocks
+        first_line = text.strip().splitlines()[0] if text.strip() else ""
         return (first_line or outcome_description[:200], usage_entry)
-    except Exception:
+    except Exception as e:
+        record_fallback("supervisor_compression", e)
         return (outcome_description[:200], None)
 
 
 def _build_iteration_log_entry(current_iter: int, *, compiled: bool, resolved: bool,
                                 tool_invocation_error: bool,
-                                token_usage: List[Dict[str, Any]]) -> Dict[str, Any]:
+                                token_usage: List[Dict[str, Any]],
+                                trajectory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """兩個公開函式 (record_attempt_outcome/record_iteration_success) 共用的
     iteration_log 條目組裝邏輯，見 core/state.py 的欄位說明。"""
     return {
@@ -102,11 +106,13 @@ def _build_iteration_log_entry(current_iter: int, *, compiled: bool, resolved: b
         "resolved": resolved,
         "tool_invocation_error": tool_invocation_error,
         "token_usage": token_usage,
+        "trajectory": trajectory,
     }
 
 
 def record_attempt_outcome(current_iter: int, outcome_description: str, *, compiled: bool,
-                            tool_invocation_error: bool, pending_token_usage: List[Dict[str, Any]]) -> Dict[str, Any]:
+                            tool_invocation_error: bool, pending_token_usage: List[Dict[str, Any]],
+                            trajectory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     建立這次迭代(失敗收場)要附加進 attempt_history/iteration_log 的一筆
     紀錄，回傳一個可以直接跟呼叫端節點 (apply_patch_node/static_check_node/
@@ -151,16 +157,18 @@ def record_attempt_outcome(current_iter: int, outcome_description: str, *, compi
     else:
         body = outcome_description[:_RAW_LOG_EXCERPT_CHARS]
     return {
-        "attempt_history": [f"[第 {current_iter} 次迭代] {body}"],
+        "attempt_history": [f"[Iteration {current_iter}] {body}"],
         "iteration_log": [_build_iteration_log_entry(
             current_iter, compiled=compiled, resolved=False,
             tool_invocation_error=tool_invocation_error, token_usage=token_usage,
+            trajectory=trajectory,
         )],
         "pending_token_usage": [],
     }
 
 
-def record_iteration_success(current_iter: int, pending_token_usage: List[Dict[str, Any]]) -> Dict[str, Any]:
+def record_iteration_success(current_iter: int, pending_token_usage: List[Dict[str, Any]],
+                             trajectory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     qa_node 修復成功時的對應函式——成功不需要壓縮摘要 (Patch 不會再被
     呼叫)，但仍然要寫一筆 iteration_log 條目 (RQ1/RQ3 的 Pass@k、迭代次數
@@ -175,6 +183,7 @@ def record_iteration_success(current_iter: int, pending_token_usage: List[Dict[s
         "iteration_log": [_build_iteration_log_entry(
             current_iter, compiled=True, resolved=True,
             tool_invocation_error=False, token_usage=list(pending_token_usage),
+            trajectory=trajectory,
         )],
         "pending_token_usage": [],
     }
@@ -193,6 +202,8 @@ def route_after_apply_patch(state: ZephyrAgentState) -> str:
     diagnosis pass over" behavior); finish if budget is exhausted.
     ApplyPatch succeeding always proceeds to StaticCheck.
     """
+    if state.get("error_type") == "patch_gate_retry":
+        return "retry_patch"  # 只有 ZEPHYR_PROPOSED_OPT 開啟時才會出現 / only with ZEPHYR_PROPOSED_OPT on
     if state.get("error_type") == "patch_format_error":
         return "finish" if state.get("final_status") == "failed_max_retries" else "retry_analyzer"
     return "goto_static_check"

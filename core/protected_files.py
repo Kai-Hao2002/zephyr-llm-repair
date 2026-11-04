@@ -1,0 +1,275 @@
+"""
+評測端的受保護檔案還原 (2026-09-28 決定，參照 SWE-bench 評分前還原測試檔的做法)。
+
+target_app 底下除了被注入錯誤的檔案以外，其他檔案 (測試原始碼、prj.conf、
+CMakeLists.txt、overlay…) 都是「規格」，不是可以拿來修的地方。2026-09-28 的
+B1 抽查發現，沒有這層保護時 agent 會改寫測試讓它 skip、或改測試斷言讓指定的
+測試 PASS，而且被判定為修好 (B3 81 筆修好裡有 21 筆動過這些檔案)。
+
+evaluate.py 在準備好 workspace 後呼叫 register()，把這些檔案的原始版本快照到
+workspace 外面；之後每次建置/StaticCheck 之前 restore() 會把它們還原、刪掉
+agent 在 target_app 底下新增的檔案。登記資料放在模組層級，刻意不經過 agent
+的 state：被豁免的檔案清單等於被注入檔案的清單，不能讓 agent 看到。
+
+Evaluation-side restore of protected files (decided 2026-09-28, following
+SWE-bench's practice of restoring test files before grading).
+
+Everything under target_app except the injected files (test sources,
+prj.conf, CMakeLists.txt, overlays...) is the specification, not a place to
+fix things. The 2026-09-28 B1 audit found that without this guard agents
+rewrote tests to skip, or changed test assertions so the required test
+PASSed, and were judged resolved (21 of B3's 81 resolved cases touched these
+files).
+
+evaluate.py calls register() once the workspace is prepared, snapshotting
+the original versions outside the workspace; before every build/StaticCheck,
+restore() puts them back and deletes files the agent added under target_app.
+The registry is module-level and deliberately bypasses the agent state: the
+exempt list equals the injected-file list, which the agent must never see.
+"""
+import difflib
+import filecmp
+import logging
+import os
+import re
+import shutil
+from typing import Dict, Iterable, List, Optional
+
+# 測試完整性 (2026-10-05)：被注入的檔案若是 target_app 底下的測試原始碼，它必須能被 agent 修改
+# (豁免還原)，但這也讓 agent 能直接刪掉失敗的 assertion 或改成 skip。登記時記下這些檔案的
+# assertion / skip 數量，評分時若 assertion 變少或 skip/pass 呼叫變多，就不算修好。
+# Test integrity (2026-10-05): an injected file that is test source under target_app must stay
+# editable (exempt from restore), which also lets an agent delete the failing assertion or skip
+# the test. Registration records its assertion/skip counts; grading rejects fewer assertions or
+# more skip/pass calls.
+_ASSERT_RE = re.compile(r"\b(?:zassert|zexpect|zassume)_\w+\s*\(")
+_SKIP_RE = re.compile(r"\bztest_test_(?:skip|pass)\s*\(")
+_TEST_SOURCE_EXT = (".c", ".cpp", ".cc", ".h")
+
+
+def _integrity_counts(path: str) -> tuple:
+    try:
+        text = open(path, encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return (0, 0)
+    return (len(_ASSERT_RE.findall(text)), len(_SKIP_RE.findall(text)))
+
+# 規格檢查 (2026-10-12，嚴格版)：assertion/skip 計數擋不住「改期望值、保留錯誤再改測試情境」這類
+# 修改 (v3 2.5-flash 的 patch 重建找到 20 筆)。被注入的檔案若位在 target_app 底下 (測試程式、
+# overlay、prj.conf)，只有被注入的那幾行可以改，其他行都是規格；去掉註解、合併空白、略過空行後比對。
+# Spec check (2026-10-12, strict): assertion/skip counts miss edits that change expected values or
+# keep the defect and alter the test scenario (the v3 2.5-flash patch replay found 20). For an
+# injected file under target_app (test source, overlay, prj.conf) only the injected lines may
+# change; everything else is specification. Compared after stripping comments, collapsing
+# whitespace and dropping blank lines.
+_C_COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
+_C_LIKE_EXT = (".c", ".cpp", ".cc", ".h", ".overlay", ".dts", ".dtsi")
+
+
+def _normalize_spec(text: str, path: str) -> List[str]:
+    name = os.path.basename(path)
+    if path.endswith(_C_LIKE_EXT):
+        text = _C_COMMENT_RE.sub(" ", text)
+    elif path.endswith(".conf") or name.startswith("Kconfig"):
+        text = "\n".join(re.sub(r"(^|\s)#.*$", "", line) for line in text.splitlines())
+    lines = (" ".join(line.split()) for line in text.splitlines())
+    return [line for line in lines if line]
+
+
+def spec_changes(original: str, injected: str, final: str, path: str) -> List[str]:
+    """
+    回傳 final 相對於 injected、落在注入位置以外的修改 (正規化後的行，"- "/"+ " 開頭)；沒有就回傳 []。
+    還原成 original 或完全沒改都不算。
+    Returns final's edits relative to injected that fall outside the injected lines (normalized,
+    prefixed "- "/"+ "); [] when there are none. Restoring original or no change is always fine.
+    """
+    o, i, f = (_normalize_spec(t, path) for t in (original, injected, final))
+    if f == o or f == i:
+        return []
+    allowed_lines, allowed_pos = set(), set()
+    for tag, i1, i2, _j1, _j2 in difflib.SequenceMatcher(None, i, o, autojunk=False).get_opcodes():
+        if tag != "equal":
+            allowed_lines.update(range(i1, i2))
+            allowed_pos.update((i1, i2))
+    out = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, i, f, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        ok = (i1 in allowed_pos) if i1 == i2 else all(k in allowed_lines for k in range(i1, i2))
+        if not ok:
+            out.extend(["- " + x for x in i[i1:i2]] + ["+ " + x for x in f[j1:j2]])
+    return out
+
+logger = logging.getLogger(__name__)
+
+# workspace 絕對路徑 -> {"app_dir", "snapshot_dir", "exempt"}
+# Absolute workspace path -> {"app_dir", "snapshot_dir", "exempt"}
+_registry: Dict[str, Dict] = {}
+# 這一輪到目前為止還原過的檔案，寫軌跡時由 pop_restored() 取出。
+# Files restored so far this iteration, taken by pop_restored() when writing the trajectory.
+_restored_this_iteration: Dict[str, List[str]] = {}
+
+
+def _walk_files(root: str) -> List[str]:
+    rel_paths = []
+    for dirpath, _dirs, files in os.walk(root):
+        for filename in files:
+            rel_paths.append(os.path.relpath(os.path.join(dirpath, filename), root))
+    return rel_paths
+
+
+def register(workspace_path: str, target_app: str, exempt_files: Iterable[str], snapshot_dir: str,
+             originals: Optional[Dict[str, str]] = None) -> int:
+    """
+    快照 workspace/target_app 底下所有不在 exempt_files 裡的檔案到 snapshot_dir
+    (必須在 workspace 外面)，回傳快照的檔案數。exempt_files 是相對 workspace
+    根目錄的路徑。
+    Snapshots every file under workspace/target_app not in exempt_files into
+    snapshot_dir (which must be outside the workspace); returns the number of
+    files snapshotted. exempt_files are workspace-root-relative paths.
+    originals：被注入檔的原始 (注入前) 內容 {相對路徑: 內容}，由 evaluate.prepare_broken_workspace
+    在刪掉 .orig 之前收集；有給的話，target_app 底下的被注入檔會做規格檢查 (spec_changes)。
+    originals: pre-injection content of injected files {relative path: content}, collected by
+    evaluate.prepare_broken_workspace before it deletes the .orig backups; when given, injected
+    files under target_app get the spec check (spec_changes).
+    """
+    workspace_path = os.path.abspath(workspace_path)
+    snapshot_dir = os.path.abspath(snapshot_dir)
+    if snapshot_dir.startswith(workspace_path + os.sep):
+        raise ValueError("snapshot_dir must be outside the workspace, or the agent could read it")
+    app_rel = os.path.normpath(target_app)
+    app_dir = os.path.join(workspace_path, app_rel)
+    exempt = {os.path.normpath(p) for p in exempt_files}
+
+    if os.path.exists(snapshot_dir):
+        shutil.rmtree(snapshot_dir)
+    count = 0
+    for rel in _walk_files(app_dir):
+        if os.path.normpath(os.path.join(app_rel, rel)) in exempt:
+            continue
+        dest = os.path.join(snapshot_dir, rel)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copy2(os.path.join(app_dir, rel), dest)
+        count += 1
+    integrity = {
+        rel: _integrity_counts(os.path.join(workspace_path, rel))
+        for rel in exempt
+        if rel.startswith(app_rel + os.sep) and rel.endswith(_TEST_SOURCE_EXT)
+    }
+    spec = {}
+    for rel, original in (originals or {}).items():
+        rel = os.path.normpath(rel)
+        if rel in exempt and rel.startswith(app_rel + os.sep):
+            injected = open(os.path.join(workspace_path, rel), encoding="utf-8", errors="ignore").read()
+            spec[rel] = (original, injected)
+    _registry[workspace_path] = {"app_dir": app_dir, "app_rel": app_rel, "snapshot_dir": snapshot_dir,
+                                 "exempt": exempt, "integrity": integrity, "spec": spec}
+    return count
+
+
+def check_test_integrity(workspace_path: str) -> List[str]:
+    """
+    被注入的測試原始碼若 assertion 比登記時少、或 ztest_test_skip/pass 呼叫比登記時多，回傳說明
+    (每個檔案一行)；沒有問題或 workspace 沒登記時回傳空 list。
+    Returns one message per injected test source whose assertion count dropped or whose
+    ztest_test_skip/pass calls increased since registration; [] if clean or unregistered.
+    另外：target_app 底下的被注入檔在注入行以外有修改 (spec_changes) 也算。
+    Also reported: injected files under target_app edited outside the injected lines (spec_changes).
+    """
+    entry = _registry.get(os.path.abspath(workspace_path))
+    if entry is None:
+        return []
+    problems = []
+    for rel, (asserts0, skips0) in sorted(entry.get("integrity", {}).items()):
+        asserts, skips = _integrity_counts(os.path.join(os.path.abspath(workspace_path), rel))
+        if asserts < asserts0 or skips > skips0:
+            problems.append(f"{rel}: assertions {asserts0}->{asserts}, skip/pass calls {skips0}->{skips}")
+    for rel, (original, injected) in sorted(entry.get("spec", {}).items()):
+        try:
+            final = open(os.path.join(os.path.abspath(workspace_path), rel), encoding="utf-8", errors="ignore").read()
+        except OSError:
+            final = ""
+        changed = spec_changes(original, injected, final, rel)
+        if changed:
+            problems.append(f"{rel}: spec lines changed outside the injected lines: " + " | ".join(changed[:6]))
+    return problems
+
+
+def unregister(workspace_path: str) -> None:
+    _registry.pop(os.path.abspath(workspace_path), None)
+    _restored_this_iteration.pop(os.path.abspath(workspace_path), None)
+
+
+def is_protected(workspace_path: str, rel_path: str) -> bool:
+    """這個路徑 (相對 workspace 根目錄) 在建置前會不會被還原。Would this path be reverted before building?"""
+    entry = _registry.get(os.path.abspath(workspace_path))
+    if entry is None:
+        return False
+    rel = os.path.normpath(rel_path)
+    in_app = entry["app_rel"] == "." or rel.startswith(entry["app_rel"] + os.sep)
+    return in_app and rel not in entry["exempt"]
+
+
+def restore(workspace_path: str) -> List[str]:
+    """
+    把受保護檔案還原成快照版本、刪掉 target_app 底下新增的非豁免檔案，回傳被
+    還原或刪除的檔案 (相對 workspace 根目錄)。workspace 沒登記時不做任何事
+    (例如 main.py 的 demo 或單元測試)。
+    Restores protected files to their snapshot and deletes non-exempt files
+    newly added under target_app; returns the restored or deleted files
+    (workspace-root-relative). A workspace that was never registered is left
+    alone (e.g. main.py's demo or unit tests).
+    """
+    entry = _registry.get(os.path.abspath(workspace_path))
+    if entry is None:
+        return []
+    app_dir, app_rel, snapshot_dir, exempt = entry["app_dir"], entry["app_rel"], entry["snapshot_dir"], entry["exempt"]
+    snapshot_files = set(_walk_files(snapshot_dir))
+    changed = []
+    for rel in sorted(snapshot_files):
+        src, dest = os.path.join(snapshot_dir, rel), os.path.join(app_dir, rel)
+        if not os.path.isfile(dest) or not filecmp.cmp(src, dest, shallow=False):
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copy2(src, dest)
+            changed.append(os.path.join(app_rel, rel))
+    for rel in _walk_files(app_dir):
+        ws_rel = os.path.normpath(os.path.join(app_rel, rel))
+        if rel not in snapshot_files and ws_rel not in exempt:
+            os.remove(os.path.join(app_dir, rel))
+            changed.append(ws_rel)
+    if changed:
+        logger.info(f"Restored protected test-app files before building: {changed}")
+        pending = _restored_this_iteration.setdefault(os.path.abspath(workspace_path), [])
+        pending.extend(f for f in changed if f not in pending)
+    return changed
+
+
+def pop_restored(workspace_path: str) -> List[str]:
+    """取出並清空這一輪還原過的檔案 (寫進軌跡的 restored_files)。
+    Returns and clears the files restored this iteration (the trajectory's restored_files)."""
+    return _restored_this_iteration.pop(os.path.abspath(workspace_path), [])
+
+
+def peek_restored(workspace_path: str) -> List[str]:
+    """這一輪到目前為止還原過的檔案，不清空 (pop_restored 寫軌跡時才清空)。
+    Files restored so far this iteration, without clearing (pop_restored clears when the trajectory is written)."""
+    return list(_restored_this_iteration.get(os.path.abspath(workspace_path), []))
+
+
+def restore_reminder(restored: List[str]) -> str:
+    """
+    規格檔被還原時給 agent 的提醒 (2026-10-18，教授建議)。被還原的都是受保護檔案、不是注入檔，列出檔名
+    只告訴 agent「這些不是缺陷所在」；B3/Proposed 本來就看得到 target_app 底下的檔案內容，修改沒留下來
+    本來就看得出來，這段只是讓它更明顯。違反規格時不能用這個 (那時出問題的就是注入檔)。
+    Reminder for the agent when specification files were reverted (2026-10-18, advisor's suggestion).
+    Reverted files are protected, never injected, so naming them only tells the agent "the defect is not
+    here"; B3/Proposed already see target_app file contents, so a vanished edit was observable anyway —
+    this just makes it explicit. Not for spec violations (there the problem is the injected file itself).
+    """
+    if not restored:
+        return ""
+    return ("[Note: your previous patch modified or added files that are part of the test specification: "
+            + ", ".join(restored)
+            + ". These changes were reverted before building and had no effect; the result below is without them. "
+              "Fix the defect somewhere else.]\n\n")
+
