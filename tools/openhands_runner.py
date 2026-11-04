@@ -157,6 +157,11 @@ def main() -> None:
             "llm_calls": len(stats.token_usages),
             "input_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
             "output_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
+            # 快取命中的輸入 token (已含在 input_tokens 內)，用來估實際費用；2026-11-04 起記錄。
+            # Cache-hit input tokens (already included in input_tokens), for the real cost; recorded from 2026-11-04.
+            "cache_read_tokens": getattr(usage, "cache_read_tokens", 0) if usage else 0,
+            "cache_write_tokens": getattr(usage, "cache_write_tokens", 0) if usage else 0,
+            "reasoning_tokens": getattr(usage, "reasoning_tokens", 0) if usage else 0,
             "cost": stats.accumulated_cost,
             "wall_seconds": time.time() - start,
         })

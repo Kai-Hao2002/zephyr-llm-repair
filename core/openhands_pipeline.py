@@ -53,6 +53,7 @@ _LLM_API_HOST = {"gemini": "generativelanguage.googleapis.com:443", "anthropic":
 _SKIP_DIRS = {".cache", "__pycache__", ".git"}
 _MAX_RECORDED_FILES = 50
 _MAX_RECORDED_BYTES = 300_000
+_FIXED_MTIME = 1788048000  # 2026-08-30 00:00 UTC，zephyr-sandbox 映像的 snapshot 日期 / the image snapshot date
 
 
 def litellm_model() -> str:
@@ -93,6 +94,24 @@ def _snapshot(root: str) -> Dict[str, Tuple[float, int]]:
     return snap
 
 
+def _normalize_timestamps(root: str) -> None:
+    """把 workspace 所有檔案與目錄的 atime/mtime 設成同一個固定時間 (2026-11-04 起)。
+    checkout、注入和刪除 .orig 備份會讓被注入的檔案與它的目錄時間戳比較新，OpenHands 有 shell，
+    能用 find -newer / stat 找出來；其他 pipeline 沒有 shell，不受影響。ctime 無法設定，
+    但這裡依走訪順序全部重設，和注入位置無關。
+    Set atime/mtime of every file and directory to one fixed time (from 2026-11-04). Checkout,
+    injection and deleting the .orig backups leave the injected file and its directory with newer
+    timestamps, which OpenHands can find with find -newer / stat; the other pipelines have no shell.
+    ctime cannot be set, but resetting everything in walk order makes it independent of the injection."""
+    for dirpath, dirs, files in os.walk(root, topdown=False):
+        for name in files + dirs:
+            try:
+                os.utime(os.path.join(dirpath, name), (_FIXED_MTIME, _FIXED_MTIME), follow_symlinks=False)
+            except OSError:
+                continue
+    os.utime(root, (_FIXED_MTIME, _FIXED_MTIME))
+
+
 def _changed_files(root: str, before: Dict[str, Tuple[float, int]]) -> Tuple[List[str], Dict[str, str]]:
     after = _snapshot(root)
     changed = sorted(p for p, v in after.items() if before.get(p) != v)
@@ -115,6 +134,7 @@ def run_openhands(state: Dict[str, Any]) -> Dict[str, Any]:
     key_env = _KEY_ENV.get(get_provider())
     if not key_env or not os.environ.get(key_env):
         raise RuntimeError(f"OpenHands baseline needs {key_env} for provider {get_provider()}")
+    _normalize_timestamps(workspace)
     before = _snapshot(workspace)
     with tempfile.TemporaryDirectory() as tmp:
         task_file, out_file = os.path.join(tmp, "task.txt"), os.path.join(tmp, "out.json")
@@ -142,7 +162,8 @@ def run_openhands(state: Dict[str, Any]) -> Dict[str, Any]:
     eval_result = evaluate_repair_attempt(workspace, state["board"], state["target_app"],
                                           state.get("required_pass_test"))
     usage = {"node": "openhands", "model": get_model_name("pro"), "input_tokens": oh.get("input_tokens", 0),
-             "output_tokens": oh.get("output_tokens", 0), "llm_calls": oh.get("llm_calls", 0)}
+             "output_tokens": oh.get("output_tokens", 0), "llm_calls": oh.get("llm_calls", 0),
+             "cache_read_tokens": oh.get("cache_read_tokens", 0), "reasoning_tokens": oh.get("reasoning_tokens", 0)}
     trajectory = build_trajectory("run" if eval_result["compiled"] else "build", eval_result["status"],
                                   applied_files=changed, filtered_log=eval_result["log"],
                                   restored_files=pop_restored(workspace))
@@ -153,7 +174,8 @@ def run_openhands(state: Dict[str, Any]) -> Dict[str, Any]:
                            "tool_invocation_error": False, "token_usage": [usage], "trajectory": trajectory}],
         "first_retrieval_files": None,
         "openhands": {k: oh.get(k) for k in ("status", "error", "steps", "llm_calls", "input_tokens",
-                                              "output_tokens", "cost", "wall_seconds", "model", "image",
+                                              "output_tokens", "cache_read_tokens", "cache_write_tokens",
+                                              "reasoning_tokens", "cost", "wall_seconds", "model", "image",
                                               "max_steps", "timeout_min", "egress_allowed", "egress_log")}
                      | {"changed_files": changed, "final_contents": contents, "events": oh.get("events", [])},
     }

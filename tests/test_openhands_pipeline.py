@@ -41,6 +41,20 @@ def test_changed_files_detection():
     assert contents == {"a/new.c": "3", "a/x.c": "22"}
 
 
+def test_normalize_timestamps_hides_injected_file():
+    root = tempfile.mkdtemp()
+    os.makedirs(os.path.join(root, "a", "b"))
+    open(os.path.join(root, "a/old.c"), "w").write("1")
+    time.sleep(0.01)
+    open(os.path.join(root, "a/b/injected.c"), "w").write("2")
+    oh._normalize_timestamps(root)
+    times = {os.stat(os.path.join(d, n)).st_mtime for d, ds, fs in os.walk(root) for n in ds + fs}
+    assert times == {oh._FIXED_MTIME} and os.stat(root).st_mtime == oh._FIXED_MTIME
+    before = oh._snapshot(root)
+    open(os.path.join(root, "a/b/injected.c"), "w").write("33")
+    assert oh._changed_files(root, before)[0] == ["a/b/injected.c"]  # edits are still detected
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):
