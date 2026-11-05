@@ -57,14 +57,14 @@ def test_b3_history_and_last_build_log():
         return {"status": "success" if good else "crash", "resolved": good, "compiled": True,
                 "log": "ok" if good else "Assertion failed at a.c: second"}
 
-    orig = (bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files)
+    orig = (bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files, bp._hybrid_retrieve)
     bp.b3_generate_patch, bp.evaluate_repair_attempt = fake_gen, fake_eval
-    bp._read_context_files = lambda *a, **k: ""
+    bp._read_context_files, bp._hybrid_retrieve = (lambda *a, **k: ""), (lambda ws_, q: [])
     try:
         out = bp.run_b3({"workspace_path": ws, "target_app": ".", "board": "native_sim",
                          "current_error_log": "Assertion failed at a.c: initial"}, 5)
     finally:
-        bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files = orig
+        bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files, bp._hybrid_retrieve = orig
     assert out["final_status"] == "resolved" and out["iterations"] == 3
     # iteration 1: initial log, no history
     assert seen[0] == ("Assertion failed at a.c: initial", "")
@@ -128,13 +128,13 @@ def test_b3_reminder_after_restore():
         pf._restored_this_iteration[os.path.abspath(ws)] = ["tests/app/prj.conf"]
         return {"status": "crash", "resolved": False, "compiled": True, "log": "Assertion failed"}
 
-    orig = (bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files)
+    orig = (bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files, bp._hybrid_retrieve)
     bp.b3_generate_patch, bp.evaluate_repair_attempt = fake_gen, fake_eval
-    bp._read_context_files = lambda *a, **k: ""
+    bp._read_context_files, bp._hybrid_retrieve = (lambda *a, **k: ""), (lambda ws_, q: [])
     try:
         bp.run_b3({"workspace_path": ws, "target_app": ".", "board": "native_sim", "current_error_log": "init"}, 2)
     finally:
-        bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files = orig
+        bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files, bp._hybrid_retrieve = orig
     assert seen[0] == "init"
     assert seen[1].startswith("[Note: your previous patch modified") and "tests/app/prj.conf" in seen[1]
     assert seen[1].endswith("Assertion failed")

@@ -31,7 +31,19 @@ B1/B2/B3 also have no DevOps Expert/QA Expert role split at all (exactly
 the variable Table 2 measures relative to Proposed), so they keep sharing
 one evaluate_repair_attempt() call that returns the combined build+execute
 result in one shot, rather than Proposed's two-stage devops_node/qa_node.
+
+Baseline 定義 (2026-11-05 起，"2026-11-hybrid")：B1 → B2 → B3 → Proposed 每一步只多一個變因。
+B2 = 單一 agent + Hybrid RAG (單發)；B3 = B2 + 閉環重試 (每輪都做同樣的 Hybrid 檢索)；Proposed 再加上
+多代理人分工。B2/B3 的檢索和 agents/knowledge_expert.py 沒有關鍵字時的路徑相同 (同一個
+get_hybrid_retriever、top_k=8、查詢用最近一次過濾後的 build/run log)。之前的定義 B2 是 BM25-only、
+B3 沒有檢索，2.5 Flash 的 v3 結果用的是舊定義。
+Baseline definition (from 2026-11-05, "2026-11-hybrid"): each step B1 → B2 → B3 → Proposed adds one variable.
+B2 = single agent + Hybrid RAG (single shot); B3 = B2 + closed-loop retries (the same Hybrid retrieval every
+iteration); Proposed adds the multi-agent split. B2/B3 retrieve exactly like agents/knowledge_expert.py's
+no-keyword path (same get_hybrid_retriever, top_k=8, query = most recent filtered build/run log). Under the
+previous definition B2 was BM25-only and B3 had no retrieval; the 2.5 Flash v3 results use that definition.
 """
+import logging
 import os
 from typing import Any, Dict, List
 
@@ -40,10 +52,36 @@ from core.workflow import _rollback_patch, evaluate_repair_attempt, with_last_bu
 from core.proposed_opt import B3_GATE, MAX_GATE_RETRIES_PER_ITERATION
 from core.trajectory import build_trajectory
 from core.protected_files import is_protected, pop_restored, restore_reminder
+from core.llm_retry import RetrievalDegradedError, record_fallback, strict_fallbacks
 from tools.patch_applier import PatchApplier
 from agents.patch_expert import collect_relevant_context_paths, MAX_PATCH_CONTEXT_CHARS
 from agents.baselines import b1_generate_full_file_patch, b2_generate_patch, b3_generate_patch
-from graph_rag.hybrid_retriever import HybridRetriever
+from agents.knowledge_expert import get_hybrid_retriever
+
+logger = logging.getLogger(__name__)
+
+# 寫進 run_meta，區分新舊 baseline 定義。Recorded in run_meta to tell the baseline definitions apart.
+BASELINE_DEFINITION = "2026-11-hybrid"
+
+
+def _hybrid_retrieve(workspace_path: str, query: str) -> List[str]:
+    """和 agents/knowledge_expert.py 的 Hybrid RAG 呼叫與失敗處理相同：評測 (strict) 模式下失敗就
+    raise RetrievalDegradedError，不默默跳過。
+    Same Hybrid RAG call and failure handling as agents/knowledge_expert.py: in evaluation (strict)
+    mode a failure raises RetrievalDegradedError instead of being skipped."""
+    try:
+        retrieved_files = get_hybrid_retriever(workspace_path).retrieve(query, top_k=8)
+    except Exception as e:
+        if isinstance(e, RetrievalDegradedError):
+            raise
+        record_fallback("hybrid_retrieval", e)
+        if strict_fallbacks():
+            raise RetrievalDegradedError(f"Hybrid RAG retrieval failed and strict mode forbids skipping it: {e}") from e
+        logger.warning(f"Hybrid RAG retrieval failed, skipping: {e}")
+        return []
+    if retrieved_files:
+        print(f"   ↳ Hybrid RAG (BM25 + semantic) retrieved candidate files: {retrieved_files}")
+    return retrieved_files
 
 
 def _read_context_files(workspace_path: str, target_app: str, error_log: str,
@@ -133,21 +171,21 @@ def run_b1(state: ZephyrAgentState) -> Dict[str, Any]:
 
 def run_b2(state: ZephyrAgentState) -> Dict[str, Any]:
     """
-    B2 Single Agent + Text RAG (BM25-only)：一次 LLM 呼叫、一次 apply、
-    一次 build，不重試。檢索直接拿 current_error_log 全文當查詢字串
-    (B2 沒有 Proposed 的 Analyzer 角色去提取 search_keywords，那本身就是
-    多代理人分工的一部分，B2 不該有)。單發、沒有閉環重試，這次檢索天生
-    就是「第一次也是唯一一次」，直接記進 first_retrieval_files。
+    B2 Single Agent + Hybrid retrieval：一次 LLM 呼叫、一次 apply、一次 build，不重試。
+    檢索和 Proposed 的 Knowledge Expert 相同 (Hybrid RAG，見 _hybrid_retrieve)，查詢用過濾後的 log，
+    等同 Proposed 沒有 Analyzer 關鍵字時的退路 (B2 沒有 Analyzer，提取關鍵字屬於多代理人分工)。
+    單發，這次檢索就是第一次也是唯一一次，直接記進 first_retrieval_files。
+    B2 Single Agent + Hybrid retrieval: one LLM call, one apply, one build, no retries. Retrieval is the
+    Knowledge Expert's Hybrid RAG (see _hybrid_retrieve), queried with the filtered log, i.e. Proposed's
+    fallback when the Analyzer gives no keywords (B2 has no Analyzer; keyword extraction is part of the
+    multi-agent split). Single shot, so this retrieval is the first and only one: first_retrieval_files.
     """
     workspace_path = state["workspace_path"]
     target_app = state["target_app"]
     error_log = state.get("current_error_log", "")
-    print("\n🧪 [B2 Single-Agent+RAG] Retrieving candidate files with BM25 only, generating the patch...")
+    print("\n🧪 [B2 Single-Agent+Hybrid RAG] Retrieving candidate files, generating the patch...")
 
-    retriever = HybridRetriever(workspace_path)
-    retrieved_files = retriever.retrieve(error_log, top_k=8, bm25_only=True)
-    if retrieved_files:
-        print(f"   ↳ BM25 retrieved candidate files: {retrieved_files}")
+    retrieved_files = _hybrid_retrieve(workspace_path, state.get("last_build_log") or error_log)
 
     project_files_content = _read_context_files(workspace_path, target_app, error_log, retrieved_files)
     patch_text, usage_entry = b2_generate_patch(error_log, project_files_content)
@@ -204,9 +242,15 @@ def _render_b3_history(history: List[Dict[str, Any]]) -> str:
 
 def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
     """
-    B3 Closed-Loop Single Agent：單一 LLM persona 身兼診斷+修補，重複
-    apply→build 直到成功或用完 max_iters；不做 StaticCheck (DevOps Expert
-    的專門化分工)、不給 RAG (first_retrieval_files 永遠不設定)。2026-10-13 起
+    B3 Closed-Loop Single Agent + Hybrid retrieval：單一 LLM persona 身兼診斷+修補，重複
+    apply→build 直到成功或用完 max_iters；不做 StaticCheck (DevOps Expert 的專門化分工)。
+    2026-11-05 起每一輪 (包含套用閘門的重試) 都做和 B2 相同的 Hybrid 檢索，查詢用 last_build_log
+    (最近一次過濾後的 build/run log，不含規格檔還原提醒和 patch 套用失敗訊息)，同 knowledge_expert；
+    第一次檢索寫進 first_retrieval_files，每輪的 trajectory 記 retrieved_files。之前 B3 不給檢索。
+    From 2026-11-05 every iteration (gate retries included) does B2's Hybrid retrieval, queried with
+    last_build_log (most recent filtered build/run log, without the restore reminder or patch-application
+    failure text), as in knowledge_expert; the first retrieval goes into first_retrieval_files and each
+    iteration's trajectory records retrieved_files. B3 previously had no retrieval. 2026-10-13 起
     每輪附上這個 session 前幾輪的 patch 與結果 (原文機械式截斷，不經 LLM 壓縮)，
     見 agents/baselines.py 的 b3_generate_patch 說明；patch 套用失敗時，最近一次
     build/run 的 log 附在失敗訊息後面 (core/workflow.with_last_build_log)。
@@ -219,6 +263,10 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
     last_build_log = error_log
     history: List[Dict[str, Any]] = []
     iteration_log = []
+    first_retrieval_files = None
+
+    def _done(**fields) -> Dict[str, Any]:
+        return {**fields, "iteration_log": iteration_log, "first_retrieval_files": first_retrieval_files}
 
     for current_iter in range(1, max_iters + 1):
         print(f"\n🧪 [B3 Closed-Loop] Iteration {current_iter}/{max_iters}...")
@@ -229,7 +277,10 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
         usages: List[Dict[str, Any]] = []
         gate_events: List[str] = []
         while True:
-            project_files_content = _read_context_files(workspace_path, target_app, error_log, [])
+            retrieved_files = _hybrid_retrieve(workspace_path, last_build_log)
+            if first_retrieval_files is None:
+                first_retrieval_files = retrieved_files
+            project_files_content = _read_context_files(workspace_path, target_app, error_log, retrieved_files)
             patch_text, usage_entry = b3_generate_patch(error_log, project_files_content, _render_b3_history(history))
             usages.append(usage_entry)
 
@@ -260,26 +311,26 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
             error_log = with_last_build_log(failure, last_build_log, "from before this patch; nothing was built after it")
             iteration_log.append(_iteration_log_entry(current_iter, False, False, True, usages, _trajectory(workspace_path,
                 "apply", "patch_format_error", patch=patch_text, applied_files=apply_result.get("applied_files", []), apply_error=apply_result["error"],
+                retrieved_files=retrieved_files,
             )))
             if B3_GATE:
                 iteration_log[-1]["trajectory"]["gate_events"] = gate_events
             if current_iter >= max_iters:
-                return {"final_status": "failed_max_retries", "iterations": current_iter,
-                        "error_type": "patch_format_error", "iteration_log": iteration_log}
+                return _done(final_status="failed_max_retries", iterations=current_iter, error_type="patch_format_error")
             continue
 
         eval_result = evaluate_repair_attempt(workspace_path, board, target_app, required_pass_test)
         iteration_log.append(_iteration_log_entry(
             current_iter, eval_result["compiled"], eval_result["resolved"], False, usages,
             _trajectory(workspace_path, "run" if eval_result["compiled"] else "build", eval_result["status"], patch=patch_text,
-                             applied_files=apply_result["applied_files"], filtered_log=eval_result["log"]),
+                             applied_files=apply_result["applied_files"], filtered_log=eval_result["log"],
+                             retrieved_files=retrieved_files),
         ))
         if B3_GATE:
             iteration_log[-1]["trajectory"]["gate_events"] = gate_events
         if eval_result["resolved"]:
             print("   🎉 Runtime verification passed!")
-            return {"final_status": "resolved", "iterations": current_iter, "error_type": "success",
-                    "iteration_log": iteration_log}
+            return _done(final_status="resolved", iterations=current_iter, error_type="success")
 
         print(f"   💥 Build/run failed (status: {eval_result['status']})")
         # 規格檔被還原時提醒 agent (2026-10-18，見 core/protected_files.restore_reminder)。
@@ -291,8 +342,6 @@ def run_b3(state: ZephyrAgentState, max_iters: int) -> Dict[str, Any]:
                         "outcome": f"applied to {apply_result['applied_files']}; build/run failed with status {eval_result['status']}",
                         "log": error_log})
         if current_iter >= max_iters:
-            return {"final_status": "failed_max_retries", "iterations": current_iter,
-                    "error_type": eval_result["status"], "iteration_log": iteration_log}
+            return _done(final_status="failed_max_retries", iterations=current_iter, error_type=eval_result["status"])
 
-    return {"final_status": "failed_max_retries", "iterations": max_iters, "error_type": "unknown",
-            "iteration_log": iteration_log}
+    return _done(final_status="failed_max_retries", iterations=max_iters, error_type="unknown")

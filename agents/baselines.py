@@ -113,14 +113,16 @@ def b1_generate_full_file_patch(error_log: str) -> Tuple[Dict[str, str], Dict[st
 
 def b2_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, Dict[str, Any]]:
     """
-    B2 Single Agent + Text RAG (Table 2)："Retrieval-augmented repair, no
+    B2 Single Agent + Hybrid retrieval (Table 2)："Retrieval-augmented repair, no
     iterative build or runtime feedback"——單一 LLM 呼叫，只做修補，不做
     Proposed 那種獨立的診斷/檢索/修補角色分工。project_files_content 由
-    core/baseline_pipelines.py 的 run_b2 組好傳入，已經包含 BM25-only
-    (見 graph_rag/hybrid_retriever.py 的 bm25_only 參數) 額外檢索到的候選
-    檔案內容——B2 本身不知道、也不需要知道哪些內容是「基礎上下文」、哪些是
-    「RAG 額外找到的」，這正是 B2 跟 Proposed 的差異只該落在檢索模式
-    (單模式 BM25 vs. Hybrid) 這一個變因上的設計意圖。
+    core/baseline_pipelines.py 的 run_b2 組好傳入，已經包含 Hybrid RAG (BM25 + 語意
+    embedding，和 Proposed 的 Knowledge Expert 同一個檢索器) 額外檢索到的候選檔案內容。
+    2026-11-05 之前 B2 是 BM25-only；現在檢索和 Proposed 相同，B2 和 B3 只差閉環重試。
+    B2 Single Agent + Hybrid retrieval: project_files_content (built by run_b2) already includes the
+    candidate files found by Hybrid RAG (BM25 + semantic embedding, the same retriever as Proposed's
+    Knowledge Expert). Before 2026-11-05 B2 was BM25-only; retrieval now matches Proposed, so B2 and B3
+    differ only in the closed loop.
 
     回傳 (patch 內容, 這次呼叫的 token 用量)。
     Returns (patch content, this call's token usage).
@@ -137,7 +139,7 @@ def b2_generate_patch(error_log: str, project_files_content: str) -> Tuple[str, 
     llm = get_chat_model(role=_PATCH_ROLE, temperature=0, timeout=PATCH_LLM_TIMEOUT)
     prompt = ChatPromptTemplate.from_messages([
         ("system", _PATCH_FORMAT_SYSTEM_PROMPT),
-        ("human", "[Current project source and configuration file contents (including candidate files additionally found by keyword retrieval)]\n{project_files}\n\n"
+        ("human", "[Current project source and configuration file contents (including candidate files additionally found by retrieval)]\n{project_files}\n\n"
                   "[Current error log]\n{error_log}\n\nPlease start generating the patch blocks:"),
     ])
     chain = prompt | llm
@@ -155,8 +157,12 @@ def b3_generate_patch(error_log: str, project_files_content: str,
     B3 Closed-Loop Single Agent (Table 2)："Build feedback, but no
     specialized multi-agent split"——單一 persona 身兼診斷與修補，closed
     loop 由 core/baseline_pipelines.py 的 run_b3 實作 (重複呼叫這個函式，
-    每次把最新一輪的 error_log 帶進來)。不給任何檢索——B3 要對照的變因是
-    「有沒有閉環重試」，不是「有沒有 RAG」。
+    每次把最新一輪的 error_log 帶進來)。2026-11-05 起每一輪都做和 B2 相同的 Hybrid 檢索，
+    project_files_content 已含檢索到的候選檔案；B3 和 B2 只差閉環重試，和 Proposed 只差多代理人分工。
+    之前 B3 不給任何檢索。
+    From 2026-11-05 every iteration does B2's Hybrid retrieval and project_files_content includes the
+    retrieved candidates; B3 differs from B2 only in the closed loop and from Proposed only in the
+    multi-agent split. B3 previously had no retrieval.
 
     previous_attempts (2026-10-13 起)：這個 session 前幾輪的 patch 與結果，原文機械式截斷，
     不經 LLM 壓縮 (壓縮屬於 Proposed 的 Supervisor)。之前的 B3 完全沒有跨迭代記憶，prompt 每輪都
@@ -187,7 +193,7 @@ def b3_generate_patch(error_log: str, project_files_content: str,
         ("human", "[Your earlier attempts in this session and their outcomes (oldest first)]\n{previous_attempts}\n"
                   "(Always write SEARCH blocks against the current file contents below. If changes from an earlier "
                   "patch do not appear there, they were reverted or never applied.)\n\n"
-                  "[Current project source and configuration file contents]\n{project_files}\n\n"
+                  "[Current project source and configuration file contents (including candidate files additionally found by retrieval)]\n{project_files}\n\n"
                   "[Current error log]\n{error_log}\n\nPlease start generating the patch blocks:"),
     ])
     chain = prompt | llm
