@@ -1,7 +1,7 @@
 import glob, json, os, shutil, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import v4usage
-os.chdir(os.path.expanduser("~/zephyr-llm-repair"))
+os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
 STOP = os.path.expanduser("~/zephyr-eval-work/v4_main_STOP")
 LIMIT, MIN_GB = float("inf"), 6  # 使用者 11/3 取消費用自動暫停；磁碟與 spending cap 仍會停
 CAP_TEXT = "spending cap"
