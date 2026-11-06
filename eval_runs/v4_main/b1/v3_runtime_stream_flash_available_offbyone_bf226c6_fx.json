@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3_runtime_stream_flash_available_offbyone_bf226c6_fx",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 129.51855492591858,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 973,
+            "output_tokens": 3827
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "subsys/storage/stream/stream_flash.c",
+            "content": "/*\n * Copyright (c) 2017, 2020 Nordic Semiconductor ASA\n * Copyright (c) 2017 Linaro Limited\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#define LOG_MODULE_NAME STREAM_FLASH\n#define LOG_LEVEL CONFIG_STREAM_FLASH_LOG_LEVEL\n#include <zephyr/logging/log.h>\nLOG_MODULE_REGISTER(LOG_MODULE_NAME, CONFIG_STREAM_FLASH_LOG_LEVEL);\n\n#include <zephyr/types.h>\n#include <string.h>\n#include <zephyr/drivers/flash.h>\n\n#include <zephyr/storage/stream_flash.h>\n\n#ifdef CONFIG_STREAM_FLASH_PROGRESS\n#include <zephyr/settings/settings.h>\n\nstatic int settings_direct_loader(const char *key, size_t len,\n\t\t\t\t  settings_read_cb read_cb, void *cb_arg,\n\t\t\t\t  void *param)\n{\n\tstruct stream_flash_ctx *ctx = (struct stream_flash_ctx *) param;\n\n\t/* Handle the subtree if it is dark, i.e. empty string */\n\tif (len == 0) {\n\t\treturn 0;\n\t}\n\n\tif (strcmp(key, \"bytes_written\") == 0) {\n\t\tssize_t rc = read_cb(cb_arg, &ctx->bytes_written,\n\t\t\t\t     sizeof(ctx->bytes_written));\n\t\tif (rc != sizeof(ctx->bytes_written)) {\n\t\t\tLOG_ERR(\"Error %zd reading bytes_written\", rc);\n\t\t\treturn (int) rc;\n\t\t}\n\t}\n\n\treturn 0;\n}\n\n#endif /* CONFIG_STREAM_FLASH_PROGRESS */\n\n#ifdef CONFIG_STREAM_FLASH_ERASE\n\nint stream_flash_erase_page(struct stream_flash_ctx *ctx, off_t off)\n{\n\tint rc;\n\tstruct flash_pages_info page;\n\n\tif (!ctx) {\n\t\treturn -EFAULT;\n\t}\n\n\t/* Do not allow erasing the same page twice.However allow erasing when\n\t * intent to reset the writing matches last erased page offset(because\n\t * there is no other representation for 'not erased anything yet'\n\t * state).\n\t */\n\tif (ctx->erased_up_to != 0 && off < ctx->erased_up_to + ctx->offset) {\n\t\treturn 0;\n\t}\n\n\trc = flash_get_page_info_by_offs(ctx->fdev, off, &page);\n\tif (rc != 0) {\n\t\tLOG_ERR(\"Error %d while getting page info\", rc);\n\t\treturn rc;\n\t}\n\n\tif (ctx->erased_up_to + ctx->offset >= page.start_offset + page.size) {\n\t\treturn 0;\n\t}\n\n\tLOG_INF(\"Erasing page at offset 0x%08lx\", (long)page.start_offset);\n\n\trc = flash_erase(ctx->fdev, page.start_offset, page.size);\n\n\tif (rc != 0) {\n\t\tLOG_ERR(\"Error %d while erasing page\", rc);\n\t} else {\n\t\tctx->erased_up_to = page.start_offset + page.size - ctx->offset;\n\t}\n\n\treturn rc;\n}\n\n#endif /* CONFIG_STREAM_FLASH_ERASE */\n\nstatic int flash_sync(struct stream_flash_ctx *ctx)\n{\n\tint rc = 0;\n\tsize_t write_addr = ctx->offset + ctx->bytes_written;\n\tsize_t buf_bytes_aligned;\n\tsize_t fill_length;\n\tuint8_t filler;\n\n\tif (ctx->buf_bytes == 0) {\n\t\treturn 0;\n\t}\n\n\tif (IS_ENABLED(CONFIG_STREAM_FLASH_ERASE)) {\n\n\t\trc = stream_flash_erase_page(ctx,\n\t\t\t\t\t     write_addr + ctx->buf_bytes - 1);\n\t\tif (rc < 0) {\n\t\t\tLOG_ERR(\"stream_flash_erase_page err %d offset=0x%08zx\",\n\t\t\t\trc, write_addr);\n\t\t\treturn rc;\n\t\t}\n\t}\n\n\tfill_length = flash_get_write_block_size(ctx->fdev);\n\tif (ctx->buf_bytes % fill_length) {\n\t\tfill_length -= ctx->buf_bytes % fill_length;\n\t\tfiller = flash_get_parameters(ctx->fdev)->erase_value;\n\n\t\tmemset(ctx->buf + ctx->buf_bytes, filler, fill_length);\n\t} else {\n\t\tfill_length = 0;\n\t}\n\n\tbuf_bytes_aligned = ctx->buf_bytes + fill_length;\n\trc = flash_write(ctx->fdev, write_addr, ctx->buf, buf_bytes_aligned);\n\n\tif (rc != 0) {\n\t\tLOG_ERR(\"flash_write error %d offset=0x%08zx\", rc,\n\t\t\twrite_addr);\n\t\treturn rc;\n\t}\n\n\tif (ctx->callback) {\n\t\t/* Invert to ensure that caller is able to discover a faulty\n\t\t * flash_read() even if no error code is returned.\n\t\t */\n\t\tfor (int i = 0; i < ctx->buf_bytes; i++) {\n\t\t\tctx->buf[i] = ~ctx->buf[i];\n\t\t}\n\n\t\trc = flash_read(ctx->fdev, write_addr, ctx->buf,\n\t\t\t\tctx->buf_bytes);\n\t\tif (rc != 0) {\n\t\t\tLOG_ERR(\"flash read failed: %d\", rc);\n\t\t\treturn rc;\n\t\t}\n\n\t\trc = ctx->callback(ctx->buf, ctx->buf_bytes, write_addr);\n\t\tif (rc != 0) {\n\t\t\tLOG_ERR(\"callback failed: %d\", rc);\n\t\t\treturn rc;\n\t\t}\n\t}\n\n\tctx->bytes_written += ctx->buf_bytes;\n\tctx->buf_bytes = 0U;\n\n\treturn rc;\n}\n\nint stream_flash_buffered_write(struct stream_flash_ctx *ctx, const uint8_t *data,\n\t\t\t\tsize_t len, bool flush)\n{\n\tint processed = 0;\n\tint rc = 0;\n\tint buf_empty_bytes;\n\n\tif (!ctx) {\n\t\treturn -EFAULT;\n\t}\n\n\tif (ctx->bytes_written + ctx->buf_bytes + len > ctx->available) {\n\t\treturn -ENOMEM;\n\t}\n\n\twhile ((len - processed) >=\n\t       (buf_empty_bytes = ctx->buf_len - ctx->buf_bytes)) {\n\t\tmemcpy(ctx->buf + ctx->buf_bytes, data + processed,\n\t\t       buf_empty_bytes);\n\n\t\tctx->buf_bytes = ctx->buf_len;\n\t\trc = flash_sync(ctx);\n\n\t\tif (rc != 0) {\n\t\t\treturn rc;\n\t\t}\n\n\t\tprocessed += buf_empty_bytes;\n\t}\n\n\t/* place rest of the data into ctx->buf */\n\tif (processed < len) {\n\t\tmemcpy(ctx->buf + ctx->buf_bytes,\n\t\t       data + processed, len - processed);\n\t\tctx->buf_bytes += len - processed;\n\t}\n\n\tif (flush && ctx->buf_bytes > 0) {\n\t\trc = flash_sync(ctx);\n\t}\n\n\treturn rc;\n}\n\nsize_t stream_flash_bytes_written(const struct stream_flash_ctx *ctx)\n{\n\treturn ctx->bytes_written;\n}\n\n#ifdef CONFIG_STREAM_FLASH_INSPECT\nstruct _inspect {\n\tsize_t buf_len;\n\tsize_t total_size;\n};\n\nstatic bool find_flash_total_size(const struct flash_pages_info *info,\n\t\t\t\t  void *data)\n{\n\tstruct _inspect *ctx = (struct _inspect *) data;\n\n\tif (ctx->buf_len > info->size) {\n\t\tLOG_ERR(\"Buffer size is bigger than page\");\n\t\tctx->total_size = 0;\n\t\treturn false;\n\t}\n\n\tctx->total_size += info->size;\n\n\treturn true;\n}\n\n/*Internal wrapper for flash_page_foreach */\nstatic void inspect_flash_pages(const struct device *dev,\n\t\t\t\tstruct _inspect *rp)\n{\n\tflash_page_foreach(dev, find_flash_total_size, rp);\n}\n#else\n#define inspect_flash_pages(...) \\\n\tdo {                     \\\n\t} while (0)\n#endif /* CONFIG_STREAM_FLASH_INSPECT */\n\nint stream_flash_init(struct stream_flash_ctx *ctx, const struct device *fdev,\n\t\t      uint8_t *buf, size_t buf_len, size_t offset, size_t size,\n\t\t      stream_flash_callback_t cb)\n{\n\tif (ctx == NULL || fdev == NULL || buf == NULL) {\n\t\treturn -EFAULT;\n\t}\n\n#ifdef CONFIG_STREAM_FLASH_INSPECT\n\tstruct _inspect rp = {\n\t\t.buf_len = buf_len,\n\t\t.total_size = 0\n\t};\n#endif\n\n\tstruct stream_flash_ctx tmp = {\n\t\t.fdev = fdev,\n\t\t.buf = buf,\n\t\t.buf_len = buf_len,\n\t\t.bytes_written = 0,\n\t\t.buf_bytes = 0,\n\t\t.offset = offset,\n\t\t.available = size,\n\t\t.callback = cb\n\t};\n\n\tif (buf_len % flash_get_write_block_size(fdev)) {\n\t\tLOG_ERR(\"Buffer size is not aligned to minimal write-block-size\");\n\t\treturn -EINVAL;\n\t}\n\n\tinspect_flash_pages(fdev, &rp);\n\n#ifdef CONFIG_STREAM_FLASH_INSPECT\n\tif (rp.total_size == 0) {\n\t\tLOG_ERR(\"Device seems to have 0 size\");\n\t\treturn -EFAULT;\n\t}\n\n\tif (offset > rp.total_size || rp.total_size - offset < size) {\n\t\tLOG_ERR(\"Incorrect parameter\");\n\t\treturn -EFAULT;\n\t}\n\n\t/* Use total size left on device if size is set to 0 */\n\tif (size == 0) {\n\t\ttmp.available = rp.total_size - offset;\n\t}\n#else\n\t/* If flash cannot be inspected the size remaining cannot be determined */\n\tif (size == 0) {\n\t\treturn -EFAULT;\n\t}\n#endif /* CONFIG_STREAM_FLASH_INSPECT */\n\n#ifdef CONFIG_STREAM_FLASH_ERASE\n\ttmp.erased_up_to = 0;\n#endif\n\n\t*ctx = tmp;\n\n\treturn 0;\n}\n\nint stream_flash_progress_load(struct stream_flash_ctx *ctx,\n\t\t\t       const char *settings_key)\n{\n\tif (!IS_ENABLED(CONFIG_STREAM_FLASH_PROGRESS)) {\n\t\treturn -ENOTSUP;\n\t}\n\n\tif (ctx == NULL || settings_key == NULL) {\n\t\treturn -EFAULT;\n\t}\n\n#ifdef CONFIG_STREAM_FLASH_PROGRESS\n\tint rc = settings_load_subtree_direct(settings_key,\n\t\t\t\t\t      settings_direct_loader,\n\t\t\t\t\t      (void *) ctx);\n\tif (rc != 0) {\n\t\tLOG_ERR(\"Error %d while loading progress for \\\"%s\\\"\",\n\t\t\trc, settings_key);\n\t}\n\treturn rc;\n#else\n\treturn -ENOTSUP;\n#endif\n}\n\nint stream_flash_progress_save(const struct stream_flash_ctx *ctx,\n\t\t\t       const char *settings_key)\n{\n\tif (!IS_ENABLED(CONFIG_STREAM_FLASH_PROGRESS)) {\n\t\treturn -ENOTSUP;\n\t}\n\n\tif (ctx == NULL || settings_key == NULL) {\n\t\treturn -EFAULT;\n\t}\n\n#ifdef CONFIG_STREAM_FLASH_PROGRESS\n\tint rc = settings_save_one(settings_key,\n\t\t\t\t   &ctx->bytes_written,\n\t\t\t\t   sizeof(ctx->bytes_written));\n\n\tif (rc != 0) {\n\t\tLOG_ERR(\"Error %d while storing progress for \\\"%s\\\"\",\n\t\t\trc, settings_key);\n\t}\n\n\treturn rc;\n#else\n\treturn -ENOTSUP;\n#endif\n}\n\nint stream_flash_progress_clear(const struct stream_flash_ctx *ctx,\n\t\t\t\tconst char *settings_key)\n{\n\tif (!IS_ENABLED(CONFIG_STREAM_FLASH_PROGRESS)) {\n\t\treturn -ENOTSUP;\n\t}\n\n\tif (ctx == NULL || settings_key == NULL) {\n\t\treturn -EFAULT;\n\t}\n\n#ifdef CONFIG_STREAM_FLASH_PROGRESS\n\tint rc = settings_delete(settings_key);\n\n\tif (rc != 0) {\n\t\tLOG_ERR(\"Error %d while deleting progress for \\\"%s\\\"\",\n\t\t\trc, settings_key);\n\t}\n\n\treturn rc;\n#else\n\treturn -ENOTSUP;\n#endif\n}\n"
+          },
+          "applied_files": [
+            "subsys/storage/stream/stream_flash.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Linker Error Detected]\n/zephyrproject/zephyr/tests/subsys/storage/stream/stream_flash/src/main.c:291:(.text._lib_stream_flash_test_stream_flash_bytes_buffered_wrapper+0x14): undefined reference to `stream_flash_bytes_buffered'\ncollect2: error: ld returned 1 exit status\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[131/136] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[132/136] Linking C static library zephyr/kernel/libkernel.a\n[133/136] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[134/136] Building native simulator runner, and linking final executable\n[135/136] Running utility command for native_runner_executable\n[135/136] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE lib_stream_flash\n===================================================================\nSTART - test_stream_flash_buf_size_greater_than_page_size\n[00:00:00.000,000] <err> STREAM_FLASH: Buffer size is bigger than page\n[00:00:00.000,000] <err> STREAM_FLASH: Device seems to have 0 size\nPASS - test_stream_flash_buf_size_greater_than_page_size in 0.000 seconds\n===================================================================\nSTART - test_stream_flash_buffered_write\nPASS - test_stream_flash_buffered_write in 0.000 seconds\n===================================================================\nSTART - test_stream_flash_buffered_write_available_limit\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/storage/stream/stream_flash/src/main.c:705: lib_stream_flash_test_stream_flash_buffered_write_available_limit: (rc not equal to -ENOMEM)",
+    "protected_file_count": 5,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3_runtime_stream_flash_available_offbyone_bf226c6_fx",
+    "api_events": [],
+    "started_at": "2026-11-06T01:16:11+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

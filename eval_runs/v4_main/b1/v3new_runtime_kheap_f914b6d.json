@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3new_runtime_kheap_f914b6d",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 112.8574206829071,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 825,
+            "output_tokens": 4021
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "kernel/mempool.c",
+            "content": "/*\n * Copyright (c) 2017 Intel Corporation\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <zephyr/init.h>\n#include <ksched.h>\n#include <wait_q.h>\n#include <zephyr/sys/dlist.h>\n#include <zephyr/sys/math_extras.h>\n#include <zephyr/sys/mem_manage.h>\n#include <zephyr/sys/iterable_sections.h>\n#include <zephyr/logging/log.h>\n#include <string.h>\nLOG_MODULE_DECLARE(os, CONFIG_KERNEL_LOG_LEVEL);\n\nvoid k_heap_init(struct k_heap *h, void *mem, size_t bytes)\n{\n\tz_waitq_init(&h->wait_q);\n\tsys_heap_init(&h->heap, mem, bytes);\n\n\tSYS_PORT_TRACING_OBJ_INIT(k_heap, h);\n}\n\nstatic int statics_init(void)\n{\n\tSTRUCT_SECTION_FOREACH(k_heap, h) {\n#if defined(CONFIG_DEMAND_PAGING) && !defined(CONFIG_LINKER_GENERIC_SECTIONS_PRESENT_AT_BOOT)\n\t\t/* Some heaps may be present at boot, so we need to check the Status\n\t\t * before the paging mechanism is initialized.\n\t\t */\n\t\tbool is_present =\n\t\t\tk_mem_page_frames_is_paged((uintptr_t)h->heap.init_mem, h->heap.init_bytes);\n\n\t\tif (!is_present) {\n\t\t\tcontinue;\n\t\t}\n#endif /* CONFIG_DEMAND_PAGING && !CONFIG_LINKER_GENERIC_SECTIONS_PRESENT_AT_BOOT */\n\t\tk_heap_init(h, h->heap.init_mem, h->heap.init_bytes);\n\t}\n\treturn 0;\n}\n\nSYS_INIT(statics_init, PRE_KERNEL_1, CONFIG_KERNEL_INIT_PRIORITY_OBJECTS);\n\n#if defined(CONFIG_DEMAND_PAGING) && !defined(CONFIG_LINKER_GENERIC_SECTIONS_PRESENT_AT_BOOT)\n/* Need to wait for paging mechanism to be initialized before\n * heaps that are not present at boot can be initialized.\n */\nstatic int statics_init_post_paging(void)\n{\n\tSTRUCT_SECTION_FOREACH(k_heap, h) {\n\t\t/* Only initialize heaps that were not initialized in PRE_KERNEL_1 */\n\t\tif (h->heap.heap == NULL) {\n\t\t\tk_heap_init(h, h->heap.init_mem, h->heap.init_bytes);\n\t\t}\n\t}\n\n\treturn 0;\n}\n\nSYS_INIT(statics_init_post_paging, POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_OBJECTS);\n#endif /* CONFIG_DEMAND_PAGING && !CONFIG_LINKER_GENERIC_SECTIONS_PRESENT_AT_BOOT */\n\nvoid *k_heap_aligned_alloc(struct k_heap *h, size_t align, size_t bytes,\n\t\t\t   k_timeout_t timeout)\n{\n\tint64_t now, end = sys_clock_timeout_end_calc(timeout);\n\tvoid *ret = NULL;\n\n\tk_spinlock_key_t key = k_spin_lock(&h->lock);\n\n\tSYS_PORT_TRACING_OBJ_FUNC_ENTER(k_heap, aligned_alloc, h, timeout);\n\n\t__ASSERT(!arch_is_in_isr() || K_TIMEOUT_EQ(timeout, K_NO_WAIT), \"\");\n\n\tbool blocked_alloc = false;\n\n\twhile (ret == NULL) {\n\t\tret = sys_heap_aligned_alloc(&h->heap, align, bytes);\n\n\t\tif (!IS_ENABLED(CONFIG_MULTITHREADING) ||\n\t\t    (ret != NULL) || K_TIMEOUT_EQ(timeout, K_NO_WAIT)) {\n\t\t\tbreak;\n\t\t}\n\n\t\tnow = sys_clock_tick_get();\n\t\tif ((end - now) <= 0) {\n\t\t\tbreak;\n\t\t}\n\n\t\tif (!blocked_alloc) {\n\t\t\tblocked_alloc = true;\n\n\t\t\tSYS_PORT_TRACING_OBJ_FUNC_BLOCKING(k_heap, aligned_alloc, h, timeout);\n\t\t} else {\n\t\t\t/**\n\t\t\t * @todo\tTrace attempt to avoid empty trace segments\n\t\t\t */\n\t\t}\n\n\t\t(void) z_pend_curr(&h->lock, key, &h->wait_q,\n\t\t\t\t   K_TICKS(end - now));\n\t\tkey = k_spin_lock(&h->lock);\n\t}\n\n\tSYS_PORT_TRACING_OBJ_FUNC_EXIT(k_heap, aligned_alloc, h, timeout, ret);\n\n\tk_spin_unlock(&h->lock, key);\n\treturn ret;\n}\n\nvoid *k_heap_alloc(struct k_heap *h, size_t bytes, k_timeout_t timeout)\n{\n\tSYS_PORT_TRACING_OBJ_FUNC_ENTER(k_heap, alloc, h, timeout);\n\n\tvoid *ret = k_heap_aligned_alloc(h, sizeof(void *), bytes, timeout);\n\n\tSYS_PORT_TRACING_OBJ_FUNC_EXIT(k_heap, alloc, h, timeout, ret);\n\n\treturn ret;\n}\n\nvoid *k_heap_calloc(struct k_heap *h, size_t num, size_t size, k_timeout_t timeout)\n{\n\tSYS_PORT_TRACING_OBJ_FUNC_ENTER(k_heap, calloc, h, timeout);\n\n\tvoid *ret = NULL;\n\tsize_t bounds = 0U;\n\n\tif (!size_mul_overflow(num, size, &bounds)) {\n\t\tret = k_heap_alloc(h, bounds, timeout);\n\t}\n\tif (ret != NULL) {\n\t\t(void)memset(ret, 0, bounds);\n\t}\n\n\tSYS_PORT_TRACING_OBJ_FUNC_EXIT(k_heap, calloc, h, timeout, ret);\n\n\treturn ret;\n}\n\nvoid *k_heap_realloc(struct k_heap *h, void *ptr, size_t bytes, k_timeout_t timeout)\n{\n\tint64_t now, end = sys_clock_timeout_end_calc(timeout);\n\tvoid *ret = NULL;\n\n\tk_spinlock_key_t key = k_spin_lock(&h->lock);\n\n\tSYS_PORT_TRACING_OBJ_FUNC_ENTER(k_heap, realloc, h, ptr, bytes, timeout);\n\n\t__ASSERT(!arch_is_in_isr() || K_TIMEOUT_EQ(timeout, K_NO_WAIT), \"\");\n\n\twhile (ret == NULL) {\n\t\tret = sys_heap_aligned_realloc(&h->heap, ptr, sizeof(void *), bytes);\n\n\t\tif (!IS_ENABLED(CONFIG_MULTITHREADING) ||\n\t\t    (ret != NULL) || K_TIMEOUT_EQ(timeout, K_NO_WAIT)) {\n\t\t\tbreak;\n\t\t}\n\n\t\tnow = sys_clock_tick_get();\n\t\tif ((end - now) <= 0) {\n\t\t\tbreak;\n\t\t}\n\n\t\t(void) z_pend_curr(&h->lock, key, &h->wait_q,\n\t\t\t\t   K_TICKS(end - now));\n\t\tkey = k_spin_lock(&h->lock);\n\t}\n\n\tSYS_PORT_TRACING_OBJ_FUNC_EXIT(k_heap, realloc, h, ptr, bytes, timeout, ret);\n\n\tk_spin_unlock(&h->lock, key);\n\treturn ret;\n}\n\nvoid k_heap_free(struct k_heap *h, void *mem)\n{\n\tk_spinlock_key_t key = k_spin_lock(&h->lock);\n\n\tsys_heap_free(&h->heap, mem);\n\n\tSYS_PORT_TRACING_OBJ_FUNC_ (k_heap, free, h);\n\tif (IS_ENABLED(CONFIG_MULTITHREADING) && z_unpend_all(&h->wait_q) != 0) {\n\t\tz_reschedule(&h->lock, key);\n\t} else {\n\t\tk_spin_unlock(&h->lock, key);\n\t}\n}\n\nint k_heap_array_get(struct k_heap **heap)\n{\n\t/* Point to the start of the heap array */\n\tSTRUCT_SECTION_GET(k_heap, 0, heap);\n\t/* Return the number of heaps in the array */\n\tint num;\n\tSTRUCT_SECTION_COUNT(k_heap, &num);\n\treturn num;\n}\n\n#if (CONFIG_HEAP_MEM_POOL_SIZE > 0)\n\n/*\n *Custom k_heap_MEM_POOL_SIZE configuration options are used to\n *create an application system heap.\n */\n#define HEAP_MEM_POOL_ADD_SIZE  (CONFIG_HEAP_MEM_POOL_ADD_SIZE_ACPI + \\\n\t\t\t\t CONFIG_HEAP_MEM_POOL_ADD_SIZE_IPC + \\\n\t\t\t\t CONFIG_HEAP_MEM_POOL_ADD_SIZE_MBEDTLS + \\\n\t\t\t\t CONFIG_HEAP_MEM_POOL_ADD_SIZE_POSIX_SI + \\\n\t\t\t\t CONFIG_HEAP_MEM_POOL_ADD_SIZE_POSIX_TIMERS + \\\n\t\t\t\t CONFIG_HEAP_MEM_POOL_ADD_SIZE_SOF + \\\n\t\t\t\t CONFIG_HEAP_MEM_POOL_ADD_SIZE_WAYLAND)\n\n#if (CONFIG_HEAP_MEM_POOL_SIZE < HEAP_MEM_POOL_ADD_SIZE) && \\\n\t!defined(CONFIG_HEAP_MEM_POOL_IGNORE_MIN)\n#errorTotal size of required add-ons exceeds maximum size of the heap memory pool.\\\nPlease adjust CONFIG_HEAP_MEM_POOL_SIZE in your configuration file.\\\nAlternatively, enable CONFIG_HEAP_MEM_POOL_IGNORE_MIN to ignore the minimum\\\nsize requirement from modules.\n#define _HEAP_MEM_POOL_SIZE HEAP_MEM_POOL_ADD_SIZE\n#else\n#define _HEAP_MEM_POOL_SIZE CONFIG_HEAP_MEM_POOL_SIZE\n#endif\n\nK_HEAP_DEFINE(_system_heap, _HEAP_MEM_POOL_SIZE);\n#define _SYSTEM_HEAP (&_system_heap)\n\nvoid *z_thread_aligned_alloc(size_t align, size_t size)\n{\n\tvoid *ret;\n\tstruct k_heap *heap;\n\n\tif (k_is_in_isr()) {\n\t\theap = _SYSTEM_HEAP;\n\t} else {\n\t\theap = _current->resource_pool;\n\t}\n\n\tif (heap) {\n\t\tret = k_heap_aligned_alloc(heap, align, size, K_NO_WAIT);\n\t} else {\n\t\tret = NULL;\n\t}\n\n\treturn ret;\n}\n\nvoid *k_aligned_alloc(size_t align, size_t size)\n{\n\tSYS_PORT_TRACING_FUNC_ENTER(k_heap_sys, k_aligned_alloc, _SYSTEM_HEAP, align, size);\n\n\tvoid *ret = k_heap_aligned_alloc(_SYSTEM_HEAP, align, size, K_NO_WAIT);\n\n\tSYS_PORT_TRACING_FUNC_EXIT(k_heap_sys, k_aligned_alloc, _SYSTEM_HEAP, ret);\n\n\treturn ret;\n}\n\nvoid *k_malloc(size_t size)\n{\n\tSYS_PORT_TRACING_FUNC_ENTER(k_heap_sys, k_malloc, _SYSTEM_HEAP, size);\n\n\tvoid *ret = k_aligned_alloc(sizeof(void *), size);\n\n\tSYS_PORT_TRACING_FUNC_EXIT(k_heap_sys, k_malloc, _SYSTEM_HEAP, ret);\n\n\treturn ret;\n}\n\nvoid *k_realloc(void *ptr, size_t size)\n{\n\tSYS_PORT_TRACING_FUNC_ENTER(k_heap_sys, k_realloc, _SYSTEM_HEAP, ptr, size);\n\n\tvoid *ret = k_heap_realloc(_SYSTEM_HEAP, ptr, size, K_NO_WAIT);\n\n\tSYS_PORT_TRACING_FUNC_EXIT(k_heap_sys, k_realloc, _SYSTEM_HEAP, ret);\n\n\treturn ret;\n}\n\nvoid k_free(void *ptr)\n{\n\tSYS_PORT_TRACING_FUNC_ENTER(k_heap_sys, k_free, _SYSTEM_HEAP, _SYSTEM_HEAP);\n\n\tk_heap_free(_SYSTEM_HEAP, ptr);\n\n\tSYS_PORT_TRACING_FUNC_EXIT(k_heap_sys, k_free, _SYSTEM_HEAP);\n}\n\nvoid *k_calloc(size_t nmemb, size_t size)\n{\n\tSYS_PORT_TRACING_FUNC_ENTER(k_heap_sys, k_calloc, _SYSTEM_HEAP, nmemb, size);\n\n\tvoid *ret = k_heap_calloc(_SYSTEM_HEAP, nmemb, size, K_NO_WAIT);\n\n\tSYS_PORT_TRACING_FUNC_EXIT(k_heap_sys, k_calloc, _SYSTEM_HEAP, ret);\n\n\treturn ret;\n}\n\nvoid k_thread_system_pool_assign(struct k_thread *thread)\n{\n\tthread->resource_pool = _SYSTEM_HEAP;\n}\n#else\nvoid *z_thread_aligned_alloc(size_t align, size_t size)\n{\n\tvoid *ret;\n\tstruct k_heap *heap;\n\n\tif (k_is_in_isr()) {\n\t\treturn NULL;\n\t}\n\n\theap = _current->resource_pool;\n\n\tif (heap) {\n\t\tret = k_heap_aligned_alloc(heap, align, size, K_NO_WAIT);\n\t} else {\n\t\tret = NULL;\n\t}\n\n\treturn ret;\n}\n#endif /* CONFIG_HEAP_MEM_POOL_SIZE */\n\nvoid *z_thread_malloc(size_t size)\n{\n\treturn z_thread_aligned_alloc(sizeof(void *), size);\n}\n"
+          },
+          "applied_files": [
+            "kernel/mempool.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Failed Compilation Units]\n/zephyrproject/zephyr/kernel/mempool.c\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/kernel/mempool.c:186:37: error: ‘k_heap’ undeclared (first use in this function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/kernel/mempool.c:186:45: error: ‘free’ undeclared (first use in this function)\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_k_heap_alloc_size[sizes/4]\nPASS - test_k_heap_alloc_size[sizes/4] in 0.000 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/5]\nPASS - test_k_heap_alloc_size[sizes/5] in 0.000 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/6]\nPASS - test_k_heap_alloc_size[sizes/6] in 0.000 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/7]\nPASS - test_k_heap_alloc_size[sizes/7] in 0.030 seconds\n===================================================================\nSTART - test_k_heap_alloc_size[sizes/8]\nPASS - test_k_heap_alloc_size[sizes/8] in 0.030 seconds\n===================================================================\nSTART - test_k_heap_array_get\nPASS - test_k_heap_array_get in 0.000 seconds\n===================================================================\nSTART - test_k_heap_calloc\nSegmentation fault",
+    "protected_file_count": 6,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3new_runtime_kheap_f914b6d",
+    "api_events": [],
+    "started_at": "2026-11-06T07:10:27+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

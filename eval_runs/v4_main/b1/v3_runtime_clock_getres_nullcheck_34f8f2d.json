@@ -1,0 +1,91 @@
+[
+  {
+    "case_id": "v3_runtime_clock_getres_nullcheck_34f8f2d",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 31.697530269622803,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 1143,
+            "output_tokens": 3158
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": {
+            "filepath": "lib/posix/options/clock.c",
+            "content": "/*\n * Copyright (c) 2018 Intel Corporation\n * Copyright (c) 2023 Tenstorrent AI ULC\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n#include <errno.h>\n#include <time.h>\n\n#include <zephyr/kernel.h>\n#include <zephyr/logging/log.h>\n#include <zephyr/posix/time.h>\n#include <zephyr/sys/time_units.h>\n#include <zephyr/sys/util.h>\n#include <zephyr/internal/syscall_handler.h>\n\n/*\n * `k_uptime_get` returns a timestamp based on an always increasing\n * value from the system start.  To support the `CLOCK_REALTIME`\n * clock, this `rt_clock_base` records the time that the system was\n * started.  This can either be set via `clock_settime`, or could be\n * initialized from a real time clock, if such hardware is present.\n */\nstatic struct timespec rt_clock_base;\nstatic K_MUTEX_DEFINE(rt_clock_base_lock);\n\nstatic inline int64_t timespec_to_nsec(const struct timespec *ts)\n{\n\treturn (int64_t)ts->tv_sec * NSEC_PER_SEC + ts->tv_nsec;\n}\n\nint clock_getres(clockid_t clock_id, struct timespec *ts)\n{\n\tif (!(clock_id == CLOCK_MONOTONIC || clock_id == CLOCK_REALTIME ||\n\t      clock_id == CLOCK_PROCESS_CPUTIME_ID || clock_id == CLOCK_THREAD_CPUTIME_ID)) {\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\tif (ts != NULL) {\n\t\t*ts = (struct timespec){\n\t\t\t.tv_sec = 0,\n\t\t\t.tv_nsec = NSEC_PER_SEC / CONFIG_SYS_CLOCK_TICKS_PER_SEC,\n\t\t};\n\t}\n\n\treturn 0;\n}\n\n/**\n * @brief Get current time specified by clock_id.\n *\n * See IEEE 1003.1\n */\nint z_impl_clock_gettime(clockid_t clock_id, struct timespec *ts)\n{\n\tuint64_t elapsed_nsecs;\n\tstruct timespec base;\n\n\tif (ts == NULL) {\n\t\terrno = EFAULT;\n\t\treturn -1;\n\t}\n\n\tswitch (clock_id) {\n\tcase CLOCK_MONOTONIC:\n\t\tbase.tv_sec = 0;\n\t\tbase.tv_nsec = 0;\n\t\tbreak;\n\n\tcase CLOCK_REALTIME:\n\t\t(void)k_mutex_lock(&rt_clock_base_lock, K_FOREVER);\n\t\tbase = rt_clock_base;\n\t\t(void)k_mutex_unlock(&rt_clock_base_lock);\n\t\tbreak;\n\n\tdefault:\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\telapsed_nsecs = k_ ticks_to_ns_floor64(k_uptime_ticks());\n\tts->tv_sec = (time_t)(elapsed_nsecs / NSEC_PER_SEC);\n\tts->tv_nsec = (long)(elapsed_nsecs % NSEC_PER_SEC);\n\n\tts->tv_sec += base.tv_sec;\n\tts->tv_nsec += base.tv_nsec;\n\tif (ts->tv_nsec >= NSEC_PER_SEC) {\n\t\tts->tv_sec++;\n\t\tts->tv_nsec -= NSEC_PER_SEC;\n\t}\n\n\treturn 0;\n}\n\n#ifdef CONFIG_USERSPACE\nint z_vrfy_clock_gettime(clockid_t clock_id, struct timespec *ts)\n{\n\tstruct timespec kts;\n\tint ret;\n\n\tK_OOPS(K_SYSCALL_MEMORY_WRITE(ts, sizeof(*ts)));\n\tret = z_impl_clock_gettime(clock_id, &kts);\n\tif (ret == 0) {\n\t\t*ts = kts;\n\t}\n\treturn ret;\n}\n#include <syscalls/clock_gettime_mrsh.c>\n#endif\n\n/**\n * @brief Set the time of the specified clock.\n *\n * See IEEE 1003.1.\n *\n * Note that only the `CLOCK_REALTIME` clock can be set using this\n * call.\n */\nint clock_settime(clockid_t clock_id, const struct timespec *tp)\n{\n\tstruct timespec base;\n\n\tif (clock_id != CLOCK_REALTIME) {\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\tif (tp == NULL) {\n\t\terrno = EFAULT;\n\t\treturn -1;\n\t}\n\n\tif (tp->tv_nsec < 0 || tp->tv_nsec >= NSEC_PER_SEC) {\n\t\terrno = EINVAL;\n\t\treturn -1;\n\t}\n\n\tuint64_t elapsed_nsecs = k_ticks_to_ns_floor64(k_uptime_ticks());\n\tint64_t delta = (int64_t)NSEC_PER_SEC * tp->tv_sec + tp->tv_nsec - elapsed_nsecs;\n\n\tbase.tv_sec = delta / NSEC_PER_SEC;\n\tbase.tv_nsec = delta % NSEC_PER_SEC;\n\tif (base.tv_nsec < 0) {\n\t\tbase.tv_sec--;\n\t\tbase.tv_nsec += NSEC_PER_SEC;\n\t}\n\n\t(void)k_mutex_lock(&rt_clock_base_lock, K_FOREVER);\n\trt_clock_base = base;\n\t(void)k_mutex_unlock(&rt_clock_base_lock);\n\n\treturn 0;\n}\n\n/**\n * @brief Suspend execution for nanosecond intervals.\n *\n * See IEEE 1003.1\n */\nstatic int do_nanosleep(clockid_t clock_id, int flags, const struct timespec *rqtp,\n\t\t\tstruct timespec *rmtp)\n{\n\tuint64_t ns;\n\tuint64_t us;\n\tuint64_t uptime_ns;\n\tconst bool update_rmtp = rmtp != NULL && (flags & TIMER_ABSTIME) == 0;\n\n\tif (!(clock_id == CLOCK_MONOTONIC || clock_id == CLOCK_REALTIME)) {\n\t\treturn EINVAL;\n\t}\n\n\tif (rqtp == NULL) {\n\t\treturn EFAULT;\n\t}\n\n\tif (rqtp->tv_sec < 0 || rqtp->tv_nsec < 0 || rqtp->tv_nsec >= NSEC_PER_SEC) {\n\t\treturn EINVAL;\n\t}\n\n\tif ((flags & TIMER_ABSTIME) != 0) {\n\t\tint64_t rqtp_ns = timespec_to_nsec(rqtp);\n\n\t\tif (clock_id == CLOCK_REALTIME) {\n\t\t\t(void)k_mutex_lock(&rt_clock_base_lock, K_FOREVER);\n\t\t\trqtp_ns -= timespec_to_nsec(&rt_clock_base);\n\t\t\t(void)k_mutex_unlock(&rt_clock_base_lock);\n\t\t}\n\n\t\tuptime_ns = k_ticks_to_ns_ceil64(k_uptime_ticks());\n\t\tif (rqtp_ns <= uptime_ns) {\n\t\t\tns = 0;\n\t\t} else {\n\t\t\tns = rqtp_ns - uptime_ns;\n\t\t}\n\t} else {\n\t\tif (unlikely(rqtp->tv_sec >= ULLONG_MAX / NSEC_PER_SEC)) {\n\t\t\tns = k_ sleep(K_SECONDS(rqtp->tv_sec - ULLONG_MAX / NSEC_PER_SEC)) *\n\t\t\t\tNSEC_PER_MSEC;\n\t\t\tif (ns > 0) {\n\t\t\t\tif (update_rmtp) {\n\t\t\t\t\trmtp->tv_sec = ns / NSEC_PER_SEC +\n\t\t\t\t\t\tULLONG_MAX / NSEC_PER_SEC;\n\t\t\t\t\trmtp->tv_nsec = rqtp->tv_nsec + ns % NSEC_PER_SEC;\n\t\t\t\t\tif (rmtp->tv_nsec >= NSEC_PER_SEC) {\n\t\t\t\t\t\trmtp->tv_sec++;\n\t\t\t\t\t\trmtp->tv_nsec -= NSEC_PER_SEC;\n\t\t\t\t\t}\n\t\t\t\t}\n\n\t\t\t\treturn EINTR;\n\t\t\t}\n\n\t\t\tns = ULLONG_MAX - rqtp->tv_nsec;\n\t\t} else {\n\t\t\tns = rqtp->tv_sec * NSEC_PER_SEC;\n\t\t}\n\t\tns += rqtp->tv_nsec;\n\t}\n\n\tus = DIV_ROUND_UP(ns, NSEC_PER_USEC);\n\tdo {\n\t\tus = k_usleep(us);\n\t} while (us != 0);\n\n\tif (update_rmtp) {\n\t\trmtp->tv_sec = 0;\n\t\trmtp->tv_nsec = 0;\n\t}\n\n\treturn 0;\n}\n\nint nanosleep(const struct timespec *rqtp, struct timespec *rmtp)\n{\n\tint ret = do_nanosleep(CLOCK_MONOTONIC, 0, rqtp, rmtp);\n\n\tif (ret != 0) {\n\t\terrno = ret;\n\t\treturn -1;\n\t}\n\n\treturn 0;\n}\n\nint clock_nanosleep(clockid_t clock_id, int flags, const struct timespec *rqtp,\n\t\t    struct timespec *rmtp)\n{\n\tif ((flags & ~TIMER_ABSTIME) != 0) {\n\t\treturn EINVAL;\n\t}\n\n\treturn do_nanosleep(clock_id, flags, rqtp, rmtp);\n}\n\n/**\n * @brief Get current real time.\n *\n * See IEEE 1003.1\n */\nint gettimeofday(struct timeval *tv, void *tz)\n{\n\tstruct timespec ts;\n\tint res;\n\n\t/* As per POSIX, \"if tzp is not a null pointer, the behavior\n\t * is unspecified.\"  \"tzp\" is the \"tz\" parameter above. */\n\tARG_UNUSED(tz);\n\n\tres = clock_gettime(CLOCK_REALTIME, &ts);\n\tif (res == 0) {\n\t\ttv->tv_sec = ts.tv_sec;\n\t\ttv->tv_usec = ts.tv_nsec / NSEC_PER_USEC;\n\t}\n\n\treturn res;\n}\n"
+          },
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file 'lib/posix/options/clock.c' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Runtime Log Tail]\nSTART - test_clock_getres\nE: Page fault at address 0x8 (error code 0x2)\nE: Linear address not present in page tables\nE: Access violation: supervisor thread not allowed to write\nE: PTE: not present\nE: EAX: 0x00000000, EBX: 0x00000000, ECX: 0x00000000, EDX: 0x00000000\nE: ESI: 0x0013ff3c, EDI: 0x0013ff48, EBP: 0x0013ff28, ESP: 0x0013ff28\nE: EFLAGS: 0x00010246 CS: 0x0008 CR3: 0x0011c000\nE: EIP: 0x001065ba\nE: call trace:\nE:      0: 0x00100e60\nE:      1: 0x00107d8a\nE:      2: 0x00104726\nE: >>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0\nE: Current thread: 0x125840 (test_clock_getres)\nE: Halting system\nFAILED: zephyr/CMakeFiles/run_qemu /tmp/build/zephyr/CMakeFiles/run_qemu\ncd /tmp/build && /opt/toolchains/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-i386 -m 32 -cpu qemu32,+nx,+pae -machine q35 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot -machine acpi=off -pidfile qemu.pid -chardev stdio,id=con,mux=on -serial chardev:con -mon chardev=con,mode=readline -nographic -icount shift=5,align=off,sleep=off -rtc clock=vm -net none -kernel /tmp/build/zephyr/zephyr.elf\nninja: build stopped: subcommand failed.\nFATAL ERROR: command exited with status 1: /usr/bin/cmake --build /tmp/build --target run\n\n[Build Messages]\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+    "protected_file_count": 9,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3_runtime_clock_getres_nullcheck_34f8f2d",
+    "api_events": [],
+    "started_at": "2026-11-05T23:28:00+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

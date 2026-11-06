@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3new_c_syntax_fdtable_91db82a_r_fx",
+    "category": "c_syntax",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 75.53134179115295,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 629,
+            "output_tokens": 1977
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "include/zephyr/sys/fdtable.h",
+            "content": "/*\n * Copyright (c) 2018 Linaro Limited\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n#ifndef ZEPHYR_INCLUDE_SYS_FDTABLE_H_\n#define ZEPHYR_INCLUDE_SYS_FDTABLE_H_\n\n#include <stdarg.h>\n#include <sys/types.h>\n/* FIXME: For native_posix ssize_t, off_t. */\n#include <zephyr/fs/fs.h>\n#include <zephyr/kernel.h>\n#include <zephyr/sys/mutex.h>\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n/**\n * File descriptor virtual method table.\n * Plus all operations beyond read/write/close go thru ioctl method.\n */\nstruct fd_op_vtable {\n\tssize_t (*read)(void *obj, void *buf, size_t sz);\n\tssize_t (*write)(void *obj, const void *buf, size_t sz);\n\tint (*close)(void *obj);\n\tint (*ioctl)(void *obj, unsigned int request, va_list args);\n};\n\n/**\n * @brief Reserve file descriptor.\n *\n * This function allows to reserve a space for file descriptor entry in\n * the underlying table, and thus allows caller to fail fast if no free\n * descriptor is available. If this function succeeds, z_finalize_fd()\n * or z_free_fd() must be called mandatorily.\n *\n * @returnAllocated file descriptor, or -1 in case of error (errno is set)\n */\nint z_reserve_fd(void);\n\n/**\n * @brief Finalize creation of file descriptor.\n *\n * This function should be called exactly once after z_reserve_fd(), and\n * should not be called in any other case.\n *\n * @param fd File descriptor previously returned by z_reserve_fd()\n * @param obj pointer to I/O object structure\n * @param vtable pointer to I/O operation implementations for the object\n */\nvoid z_finalize_fd(int fd, void *obj, const struct fd_op_vtable *vtable);\n\n/**\n * @brief Allocate file descriptor for underlying I/O object.\n *\n * This function combines operations of z_reserve_fd() and z_finalize_fd()\n * in one step, and provided for convenience.\n *\n * @param obj pointer to I/O object structure\n * @param vtable pointer to I/O operation implementations for the object\n *\n * @return Allocated file descriptor, or -1 in case of error (errno is set)\n */\nint z_alloc_fd(void *obj, const struct fd_op_vtable *vtable);\n\n/**\n * @brief Release reserved file descriptor.\n *\n * This function may be called once after z_reserve_fd(), and should\n * not be called in any other case.\n *\n * @param fd File descriptor previously returned by z_reserve_fd()\n */\nvoid z_free_fd(int fd);\n\n/**\n * @brief Get underlying object pointer from file descriptor.\n *\n * This function is useful for functions other than read/write/ioctl\n * to look up underlying I/O object by fd, optionally checking its\n * type (using vtable reference). If fd refers to invalid entry,\n * NULL will be returned and errno set to EBADF. If fd is valid,\n * business of the function is to check whether the object is of\n * the requested type (if vtable param is not NULL). If not, NULL\n * will be returned and errno set to err param.\n *\n * @param fd File descriptor\n * @param vtableExpected object vtable, or NULL if doesn't matter\n * @param err errno value to set if object vtable doesn't match\n *\n * @return Object pointer or NULL, with errno set\n */\nvoid *z_get_fd_obj(int fd, const struct fd_op_vtable *vtable, int err);\n\n/**\n * @brief Get underlying object pointer and vtable from file descriptor.\n *\n * @param fd File descriptor\n * @param vtable A pointer to a pointer variable to receive the vtable\n * @param lock An optional pointer to a pointer variable to receive the mutex\n *        preventing concurrent descriptor access. The lock is not taken,\n *        it is just returned for the caller to use if necessary.\n *\n * @return Object pointer or NULL, with errno set\n */\nvoid *z_get_fd_obj_and_vtable(int fd, const struct fd_op_vtable **vtable,\n\t\t\t      struct k_mutex **lock);\n\n/**\n * @brief Call ioctl vmethod on an object using varargs.\n *\n * We need this helper function because ioctl vmethod is declared to\n * take va_list and the only portable way to construct va_list is from\n * function's ... parameters.\n *\n * @param vtable vtable containing ioctl function pointer\n * @param obj Object to call ioctl on\n * @param request ioctl request number\n */\nstatic inline int z_fdtable_call_ioctl(const struct fd_op_vtable *vtable, void *obj,\n\t\t\t\t       unsigned long request, ...)\n{\n\tva_list args;\n\tint res;\n\n\tva_start(args, request);\n\tres = vtable->ioctl(obj, request, args);\n\tva_end(args);\n\n\treturn res;\n}\n\n/**\n * Request codes for fd_op_vtable.ioctl().\n *\n * Note that these codes are internal Zephyr numbers, for internal\n * Zephyr operations (and subject to change without notice, not part\n * of \"stable ABI\"). These are however expected to not clash with\n * \"standard\" POSIX ioctl numbers, walk carefully.\n */\nenum {\n\t/* Codes below 0x100 are reserved for fcntl() codes. */\n\tZFD_IOCTL_FSYNC = 0x100,\n\tZFD_IOCTL_LSEEK,\n\tZFD_IOCTL_POLL_PREPARE,\n\tZFD_IOCTL_POLL_UPDATE,\n\tZFD_IOCTL_POLL_OFFLOAD,\n\tZFD_IOCTL_SET_LOCK,\n\tZFD_IOCTL_STAT,\n\tZFD_IOCTL_TRUNCATE,\n\tZFD_IOCTL_MMAP,\n};\n\n#ifdef __cplusplus\n}\n#endif\n\n#endif /* ZEPHYR_INCLUDE_SYS_FDTABLE_H_ */\n"
+          },
+          "applied_files": [
+            "include/zephyr/sys/fdtable.h"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Failed Compilation Units]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:27:18: error: implicit declaration of function 'zvfs_reserve_fd'; did you mean 'z_reserve_fd'? [-Wimplicit-function-declaration]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:31:9: error: implicit declaration of function 'zvfs_free_fd'; did you mean 'z_free_fd'? [-Wimplicit-function-declaration]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:42:15: error: implicit declaration of function 'zvfs_get_fd_obj_and_vtable'; did you mean 'z_get_fd_obj_and_vtable'? [-Wimplicit-function-declaration]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:42:13: error: assignment to 'int *' from 'int' makes pointer from integer without a cast [-Wint-conversion]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:59:20: error: implicit declaration of function 'zvfs_get_fd_obj'; did you mean 'z_get_fd_obj'? [-Wimplicit-function-declaration]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:59:20: error: initialization of 'int *' from 'int' makes pointer from integer without a cast [-Wint-conversion]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:68:9: error: implicit declaration of function 'zvfs_finalize_fd'; did you mean 'z_finalize_fd'? [-Wimplicit-function-declaration]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:68:42: error: expected ';' before 'obj'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:76:13: error: assignment to 'int *' from 'int' makes pointer from integer without a cast [-Wint-conversion]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:91:20: error: initialization of 'int *' from 'int' makes pointer from integer without a cast [-Wint-conversion]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:98:13: error: assignment to 'int *' from 'int' makes pointer from integer without a cast [-Wint-conversion]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:111:18: error: implicit declaration of function 'zvfs_alloc_fd'; did you mean 'z_alloc_fd'? [-Wimplicit-function-declaration]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:114:13: error: assignment to 'int *' from 'int' makes pointer from integer without a cast [-Wint-conversion]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:131:20: error: initialization of 'int *' from 'int' makes pointer from integer without a cast [-Wint-conversion]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:145:13: error: assignment to 'int *' from 'int' makes pointer from integer without a cast [-Wint-conversion]\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:152:13: error: assignment to 'int *' from 'int' makes pointer from integer without a cast [-Wint-conversion]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:176:13: error: assignment to 'void *' from 'int' makes pointer from integer without a cast [-Wint-conversion]",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Failed Compilation Units]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/lib/fdtable/src/main.c:68:42: error: expected ';' before 'obj'\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+    "protected_file_count": 4,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3new_c_syntax_fdtable_91db82a_r_fx",
+    "api_events": [],
+    "started_at": "2026-11-06T02:59:07+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

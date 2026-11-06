@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3new_c_syntax_mbox_usage_34f8f2d_r_fx",
+    "category": "c_syntax",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 103.97510600090027,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 638,
+            "output_tokens": 2748
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "tests/kernel/mbox/mbox_usage/src/main.c",
+            "content": "/*\n * Copyright (c) 2018 Intel Corporation\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <zephyr/ztest.h>\n#include <zephyr/tc_util.h>\n\n#define STACK_SIZE (512 + CONFIG_TEST_EXTRA_STACK_SIZE)\n#define MAIL_LEN 64\n#define HIGH_PRIO 1\n#define LOW_PRIO 8\n\nstatic K_THREAD_STACK_DEFINE(tstack, STACK_SIZE);\nstatic K_THREAD_STACK_DEFINE(high_stack, STACK_SIZE);\nstatic K_THREAD_STACK_DEFINE(low_stack, STACK_SIZE);\nstatic struct k_thread tdata, high_tdata, low_tdata;\nstatic struct k_mbox mbox, multi_tmbox;\nstatic k_tid_t receiver_tid, sender_tid;\nstatic struct k_sem sync_sem;\n\nstatic enum mmsg_type {\n\tPUT_GET_NULL = 0,\n\tTARGET_SOURCE,\n\tMAX_MSG_TYPE\n} info_type;\n\nstatic char mail[MAIL_LEN] = \"send performance test data\";\n\nstatic voidcleanup_resources(void)\n{\n\tk_thread_abort(&tdata);\n\tk_thread_abort(&high_tdata);\n\tk_thread_abort(&low_tdata);\n}\n\nstatic void msg_sender(struct k_mbox *pmbox, k_timeout_t timeout)\n{\n\tstruct k_mbox_msg mmsg;\n\n\t(void)memset(&mmsg, 0, sizeof(mmsg));\n\n\tswitch (info_type) {\n\tcase PUT_GET_NULL:\n\t\t/* mbox sync put empty message */\n\t\tmmsg.info = PUT_GET_NULL;\n\t\tmmsg.size = 0;\n\t\tmmsg.tx_data = NULL;\n\n\t\tk_mbox_put(pmbox, &mmsg, timeout);\n\t\tbreak;\n\tcase TARGET_SOURCE:\n\t\t/* mbox sync put a buffer */\n\t\tmmsg.info = TARGET_SOURCE;\n\t\tmmsg.size = sizeof(mail);\n\t\tmmsg.tx_data = mail;\n\t\tmmsg.tx_target_thread = receiver_tid;\n\n\t\tk_mbox_put(pmbox, &mmsg, timeout);\n\t\tbreak;\n\tdefault:\n\t\tbreak;\n\t}\n}\n\nstatic void msg_receiver(struct k_mbox *pmbox, k_tid_t thd_id,\n\t\t\t k_timeout_t timeout)\n{\n\tstruct k_mbox_msg mmsg;\n\tchar rxdata[MAIL_LEN];\n\n\tswitch (info_type) {\n\tcase PUT_GET_NULL:\n\t\tmmsg.size = sizeof(rxdata);\n\t\tmmsg.rx_source_thread = thd_id;\n\n\t\t/*unmatched, should return fail*/\n\t\tif (K_TIMEOUT_EQ(timeout, K_NO_WAIT)) {\n\t\t\tzassert_true(k_mbox_get(pmbox, &mmsg, rxdata,\n\t\t\t\t\t\ttimeout) < 0, NULL);\n\t\t} else {\n\t\t\tzassert_true(k_mbox_get(pmbox, &mmsg, rxdata,\n\t\t\t\t\t\ttimeout) == 0, NULL);\n\t\t}\n\t\tbreak;\n\tcase TARGET_SOURCE:\n\t\tmmsg.size = sizeof(rxdata);\n\t\tmmsg.rx_source_thread = thd_id;\n\n\t\tzassert_true(k_mbox_get(pmbox, &mmsg, rxdata,\n\t\t\t\t\ttimeout) == 0, NULL);\n\t\tzassert_equal(memcmp(rxdata, mail, MAIL_LEN), 0,\n\t\t\t      \"rx data error\");\n\t\tbreak;\n\tdefault:\n\t\tbreak;\n\t}\n}\n\nstatic void test_thread(void *p1, void *p2, void *p3)\n{\n\tmsg_sender((struct k_mbox *)p1, K_FOREVER);\n}\n\nstatic void receiver_high_prio(void *p1, void *p2, void *p3)\n{\n\tstruct k_mbox_msg mmsg;\n\tchar rxdata[MAIL_LEN];\n\n\tmmsg.size = sizeof(rxdata);\n\tmmsg.rx_source_thread = K_ANY;\n\tzassert_true(k_mbox_get(&multi_tmbox, &mmsg, rxdata,\n\t\t\t\tK_FOREVER) == 0, NULL);\n\n\tk_sem_give(&sync_sem);\n}\n\nstatic void receiver_low_prio(void *p1, void *p2, void *p3)\n{\n\tstruct k_mbox_msg mmsg;\n\tchar rxdata[MAIL_LEN];\n\n\tmmsg.size = sizeof(rxdata);\n\tmmsg.rx_source_thread = K_ANY;\n\tzassert_true(k_mbox_get(&multi_tmbox, &mmsg, rxdata,\n\t\t\t\tK_FOREVER) == 0, NULL);\n\n\tk_sem_give(&sync_sem);\n}\n\n/*Arrange a message queue that has at least two messages queued,\n *having different priorities.\n *Wait by using k_mbox_get().\n *Verify that the message received matches the highest-priority\n *sender waiting.\n */\nZTEST(mbox_usage, test_multi_thread_mbox_get)\n{\n\tstruct k_mbox_msg mmsg;\n\tstatic char data[2][MAIL_LEN] = {\"send high prio data\",\n\t\t\t\t\t \"send low prio data\"};\n\n\tk_sem_reset(&sync_sem);\n\n\t/*Create two threads of different prio waiting for msg*/\n\tk_thread_create(&low_tdata, low_stack, STACK_SIZE,\n\t\t\treceiver_low_prio, NULL, NULL, NULL,\n\t\t\tLOW_PRIO, 0, K_NO_WAIT);\n\n\tk_thread_create(&high_tdata, high_stack, STACK_SIZE,\n\t\t\treceiver_high_prio, NULL, NULL, NULL,\n\t\t\tHIGH_PRIO, 0, K_NO_WAIT);\n\n\tmmsg.info = 0;\n\tmmsg.size = sizeof(data[0]);\n\tmmsg.tx_data = data[0];\n\tmmsg.tx_target_thread = K_ANY;\n\tk_mbox_put(&multi_tmbox, &mmsg, K_FOREVER);\n\n\tk_sem_take(&sync_sem, K_FOREVER);\n\n\tmmsg.info = 1;\n\tmmsg.size = sizeof(data[1]);\n\tmmsg.tx_data = data[1];\n\tmmsg.tx_target_thread = K_ANY;\n\tk_mbox_put(&multi_tmbox, &mmsg, K_FOREVER);\n\n\tk_sem_take(&sync_sem, K_FOREVER);\n\n\tvoidcleanup_resources();\n}\n\nZTEST(mbox_usage, test_mbox_put_get_null)\n{\n\tinfo_type = PUT_GET_NULL;\n\n\t/*create sender thread to send msg*/\n\tsender_tid = k_thread_create(&tdata, tstack, STACK_SIZE,\n\t\t\t\t     test_thread, &mbox, NULL, NULL,\n\t\t\t\t     K_PRIO_PREEMPT(0), 0, K_NO_WAIT);\n\n\t/*give some time to make sure msg was sent*/\n\tk_sleep(K_MSEC(20));\n\n\t/*set receiver tid unmatched with sender's, and give K_NO_WAIT\n\t *Wait by using k_mbox_get().\n\t *Verify that the call returns immediately with an error.\n\t */\n\tmsg_receiver(&mbox, receiver_tid, K_NO_WAIT);\n\n\t/*receive the message which was sent at the beginning of test*/\n\tmsg_receiver(&mbox, K_ANY, K_MSEC(2));\n\n\tk_thread_abort(sender_tid);\n}\n\nZTEST(mbox_usage, test_mbox_target_source)\n{\n\tinfo_type = TARGET_SOURCE;\n\n\treceiver_tid = k_current_get();\n\tsender_tid = k_thread_create(&tdata, tstack, STACK_SIZE,\n\t\t\t\t     test_thread, &mbox, NULL, NULL,\n\t\t\t\t     K_PRIO_PREEMPT(0), 0, K_NO_WAIT);\n\tmsg_receiver(&mbox, sender_tid, K_MSEC(2));\n\n\tk_thread_abort(sender_tid);\n\n\t/* point to current thread Tid */\n\treceiver_tid = k_current_get();\n\tsender_tid = k_thread_create(&tdata, tstack, STACK_SIZE,\n\t\t\t\t     test_thread, &mbox, NULL, NULL,\n\t\t\t\t     K_PRIO_PREEMPT(0), 0, K_NO_WAIT);\n\tmsg_receiver(&mbox, K_ANY, K_FOREVER);\n\n\tk_thread_abort(sender_tid);\n}\n\nvoid *mbox_usage_setup(void)\n{\n\tk_mbox_init(&mbox);\n\tk_mbox_init(&multi_tmbox);\n\tk_sem_init(&sync_sem, 0, 2);\n\n\treturn NULL;\n}\n\nZTEST_SUITE(mbox_usage, NULL, mbox_usage_setup, NULL, NULL, NULL);\n"
+          },
+          "applied_files": [
+            "tests/kernel/mbox/mbox_usage/src/main.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Failed Compilation Units]\n/zephyrproject/zephyr/tests/kernel/mbox/mbox_usage/src/main.c\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/mbox/mbox_usage/src/main.c:32:8: error: return type defaults to ‘int’ [-Werror=implicit-int]\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Failed Compilation Units]\n/zephyrproject/zephyr/tests/kernel/mbox/mbox_usage/src/main.c\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/tests/kernel/mbox/mbox_usage/src/main.c:85:37: error: expected ‘;’ before ‘}’ token\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+    "protected_file_count": 3,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3new_c_syntax_mbox_usage_34f8f2d_r_fx",
+    "api_events": [],
+    "started_at": "2026-11-06T03:17:43+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

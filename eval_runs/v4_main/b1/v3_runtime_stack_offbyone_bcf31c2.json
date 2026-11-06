@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3_runtime_stack_offbyone_bcf31c2",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 96.979727268219,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 756,
+            "output_tokens": 2582
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "kernel/stack.c",
+            "content": "/*\n * Copyright (c) 2010-2016 Wind River Systems, Inc.\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n/**\n * @file\n *\n * @brief Stand-aloneמנות stack object\n */\n\n#include <zephyr/kernel.h>\n#include <zephyr/kernel_structs.h>\n\n#include <zephyr/toolchain.h>\n#include <zephyr/wait_q.h>\n#include <zephyr/sys/check.h>\n#include <zephyr/init.h>\n#include <zephyr/internal/syscall_handler.h>\n#include <zephyr/kernel/obj_core.h>\n#include <ksched.h>\n\n#ifdef CONFIG_OBJ_CORE_STACK\nstatic struct k_obj_type obj_type_stack;\n#endif /* CONFIG_OBJ_CORE_STACK */\n\nvoid k_stack_init(struct k_stack *stack, stack_data_t *buffer,\n\t\t  uint32_t num_entries)\n{\n\tz_waitq_init(&stack->wait_q);\n\tstack->lock = (struct k_spinlock) {};\n\tstack->next = buffer;\n\tstack->base = buffer;\n\tstack->top = stack->base + num_entries;\n\n\tSYS_PORT_TRACING_OBJ_INIT(k_stack, stack);\n\tk_object_init(stack);\n\n#ifdef CONFIG_OBJ_CORE_STACK\n\tk_obj_core_init_and_link(K_OBJ_CORE(stack), &obj_type_stack);\n#endif /* CONFIG_OBJ_CORE_STACK */\n}\n\nint32_t z_impl_k_stack_alloc_init(struct k_stack *stack, uint32_t num_entries)\n{\n\tvoid *buffer;\n\tint32_t ret;\n\n\tSYS_PORT_TRACING_OBJ_FUNC_ENTER(k_stack, alloc_init, stack);\n\n\tbuffer = z_thread_malloc(num_entries * sizeof(stack_data_t));\n\tif (buffer != NULL) {\n\t\tk_stack_init(stack, buffer, num_entries);\n\t\tstack->flags = K_STACK_FLAG_ALLOC;\n\t\tret = 0;\n\t} else {\n\t\tret = -ENOMEM;\n\t}\n\n\tSYS_PORT_TRACING_OBJ_FUNC_EXIT(k_stack, alloc_init, stack, ret);\n\n\treturn ret;\n}\n\n#ifdef CONFIG_USERSPACE\nstatic inline int32_t z_vrfy_k_stack_alloc_init(struct k_stack *stack,\n\t\t\t\t\t\tuint32_t num_entries)\n{\n\tK_OOPS(K_SYSCALL_OBJ_NEVER_INIT(stack, K_OBJ_STACK));\n\tK_OOPS(K_SYSCALL_VERIFY(num_entries > 0));\n\tK_OOPS(K_SYSCALL_VERIFY(!size_mul_overflow(num_entries,\n\t\t\t\t\t\t   sizeof(stack_data_t),\n\t\t\t\t\t\t   &num_entries)));\n\treturn z_impl_k_stack_alloc_init(stack, num_entries / sizeof(stack_data_t));\n}\n#include <zephyr/syscalls/k_stack_alloc_init_mrsh.c>\n#endif /* CONFIG_USERSPACE */\n\nint k_stack_cleanup(struct k_stack *stack)\n{\n\tSYS_PORT_TRACING_OBJ_FUNC_ENTER(k_stack, cleanup, stack);\n\n\tCHECKIF(z_waitq_head(&stack->wait_q) != NULL) {\n\t\tSYS_PORT_TRACING_OBJ_FUNC_EXIT(k_stack, cleanup, stack,\n\t\t\t\t\t       -EAGAIN);\n\t\treturn -EAGAIN;\n\t}\n\n\tif ((stack->flags & K_STACK_FLAG_ALLOC) != (uint8_t)0) {\n\t\tk_free(stack->base);\n\t\tstack->base = NULL;\n\t\tstack->flags &= ~K_STACK_FLAG_ALLOC;\n\t}\n\n#ifdef CONFIG_OBJ_CORE_STACK\n\tk_obj_core_unlink(K_OBJ_CORE(stack));\n#endif /* CONFIG_OBJ_CORE_STACK */\n\n\tSYS_PORT_TRACING_OBJ_FUNC_EXIT(k_stack, cleanup, stack, 0);\n\n\treturn 0;\n}\n\nint z_impl_k_stack_push(struct k_stack *stack, stack_data_t data)\n{\n\tstruct k_thread *first_pending_thread;\n\tint ret = 0;\n\tk_spinlock_key_t key = k_spin_lock(&stack->lock);\n\n\tSYS_PORT_TRACING_OBJ_FUNC_ENTER(k_stack, push, stack);\n\n\tCHECKIF(stack->next == stack->top) {\n\t\tret = -ENOMEM;\n\t\tgoto out;\n\t}\n\n\tfirst_pending_thread = z_unpend_first_thread(&stack->wait_q);\n\n\tif (unlikely(first_pending_thread != NULL)) {\n\t\tz_thread_return_value_set_with_data(first_pending_thread,\n\t\t\t\t\t\t   0, (void *)data);\n\n\t\tz_ready_thread(first_pending_thread);\n\t\tz_reschedule(&stack->lock, key);\n\t\tgoto end;\n\t} else {\n\t\t*(stack->next) = data;\n\t\tstack->next++;\n\t\tgoto out;\n\t}\n\nout:\n\tk_spin_unlock(&stack->lock, key);\n\nend:\n\tSYS_PORT_TRACING_OBJ_FUNC_EXIT(k_stack, push, stack, ret);\n\n\treturn ret;\n}\n\n#ifdef CONFIG_USERSPACE\nstatic inline int z_vrfy_k_stack_push(struct k_stack *stack, stack_data_t data)\n{\n\tK_OOPS(K_SYSCALL_OBJ(stack, K_OBJ_STACK));\n\n\treturn z_impl_k_stack_push(stack, data);\n}\n#include <zephyr/syscalls/k_stack_push_mrsh.c>\n#endif /* CONFIG_USERSPACE */\n\nint z_impl_k_stack_pop(struct k_stack *stack, stack_data_t *data,\n\t\t       k_timeout_t timeout)\n{\n\tk_spinlock_key_t key;\n\tint result;\n\n\tkey = k_spin_lock(&stack->lock);\n\n\tSYS_PORT_TRACING_OBJ_FUNC_ENTER(k_stack, pop, stack, timeout);\n\n\tif (likely(stack->next > stack->base)) {\n\t\tstack->next--;\n\t\t*data = *(stack->next);\n\t\tk_spin_unlock(&stack->lock, key);\n\n\t\tSYS_PORT_TRACING_OBJ_FUNC_EXIT(k_stack, pop, stack, timeout, 0);\n\n\t\treturn 0;\n\t}\n\n\tSYS_PORT_TRACING_OBJ_FUNC_BLOCKING(k_stack, pop, stack, timeout);\n\n\tif (K_TIMEOUT_EQ(timeout, K_NO_WAIT)) {\n\t\tk_spin_unlock(&stack->lock, key);\n\n\t\tSYS_PORT_TRACING_OBJ_FUNC_EXIT(k_stack, pop, stack, timeout,\n\t\t\t\t\t       -EBUSY);\n\n\t\treturn -EBUSY;\n\t}\n\n\tresult = z_pend_curr(&stack->lock, key, &stack->wait_q, timeout);\n\tif (result == -EAGAIN) {\n\t\tSYS_PORT_TRACING_OBJ_FUNC_EXIT(k_stack, pop, stack, timeout,\n\t\t\t\t\t       -EAGAIN);\n\n\t\treturn -EAGAIN;\n\t}\n\n\t*data = (stack_data_t)_current->base.swap_data;\n\n\tSYS_PORT_TRACING_OBJ_FUNC_EXIT(k_stack, pop, stack, timeout, 0);\n\n\treturn 0;\n}\n\n#ifdef CONFIG_USERSPACE\nstatic inline int z_vrfy_k_stack_pop(struct k_stack *stack,\n\t\t\t\t     stack_data_t *data, k_timeout_t timeout)\n{\n\tK_OOPS(K_SYSCALL_OBJ(stack, K_OBJ_STACK));\n\tK_OOPS(K_SYSCALL_MEMORY_WRITE(data, sizeof(stack_data_t)));\n\treturn z_impl_k_stack_pop(stack, data, timeout);\n}\n#include <zephyr/syscalls/k_stack_pop_mrsh.c>\n#endif /* CONFIG_USERSPACE */\n\n#ifdef CONFIG_OBJ_CORE_STACK\nstatic int init_stack_obj_core_list(void)\n{\n\t/* Initialize stack object type */\n\n\tz_obj_type_init(&obj_type_stack, K_OBJ_TYPE_STACK_ID,\n\t\t\toffsetof(struct k_stack, obj_core));\n\n\t/* Initialize and link statically defined stacks */\n\n\tSTRUCT_SECTION_FOREACH(k_stack, stack) {\n\t\tk_obj_core_init_and_link(K_OBJ_CORE(stack), &obj_type_stack);\n\t}\n\n\treturn 0;\n}\n\nSYS_INIT(init_stack_obj_core_list, PRE_KERNEL_1,\n\t CONFIG_KERNEL_INIT_PRIORITY_OBJECTS);\n#endif /* CONFIG_OBJ_CORE_STACK */\n"
+          },
+          "applied_files": [
+            "kernel/stack.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Failed Compilation Units]\n/zephyrproject/zephyr/kernel/stack.c\n\n[Kconfig/Configuration Error Detected]\nwarning: STACK_SENTINEL (defined at subsys/debug/Kconfig:118) was assigned the value 'y' but got the\nvalue 'n'. Check these unsatisfied dependencies: (!USERSPACE) (=n). See\nhttp://docs.zephyrproject.org/latest/kconfig.html#CONFIG_STACK_SENTINEL and/or look up\nSTACK_SENTINEL in the menuconfig/guiconfig interface. The Application Development Primer, Setting\nConfiguration Values, and Kconfig - Tips and Best Practices sections of the manual might be helpful\ntoo.\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/kernel/stack.c:17:10: fatal error: zephyr/wait_q.h: No such file or directory\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Runtime Log Tail]\nSTART - test_stack_push_full\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/stack/stack/src/test_stack_fail.c:89: stack_fail_test_stack_push_full: (k_stack_push(&stack, data_tmp) == -ENOMEM is false)\n\n[Build Messages]\n[Build Warning]\nwarning: STACK_SENTINEL (defined at subsys/debug/Kconfig:118) was assigned the value 'y' but got the\nvalue 'n'. Check these unsatisfied dependencies: (!USERSPACE) (=n). See\nhttp://docs.zephyrproject.org/latest/kconfig.html#CONFIG_STACK_SENTINEL and/or look up\nSTACK_SENTINEL in the menuconfig/guiconfig interface. The Application Development Primer, Setting\nConfiguration Values, and Kconfig - Tips and Best Practices sections of the manual might be helpful\ntoo.",
+    "protected_file_count": 6,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3_runtime_stack_offbyone_bcf31c2",
+    "api_events": [],
+    "started_at": "2026-11-06T01:10:59+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
