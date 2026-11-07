@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3_dts_fwcfg_offbyone_x86_134e694",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 98.57423210144043,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 940,
+            "output_tokens": 2674
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "drivers/firmware/qemu_fwcfg/qemu_fwcfg.c",
+            "content": "/*\n * Copyright (c) 2024 Tenstorrent AI ULC\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <errno.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <string.h>\n#include <zephyr/device.h>\n#include <zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.h>\n#include <zephyr/kernel.h>\n#include <zephyr/logging/log.h>\n#include <zephyr/sys/byteorder.h>\n\n#include \"qemu_fwcfg.h\"\n\nLOG_MODULE_REGISTER(qemu_fwcfg, CONFIG_QEMU_FWCFG_LOG_LEVEL);\n\n#define FW_CFG_SIGNATURE     0x0000\n#define FW_CFG_ID            0x0001\n#define FW_CFG_FILE_DIR      0x0019\n\n#define FW_CFG_DMA_CTL_ERROR  0x01\n#define FW_CFG_DMA_CTL_READ   0x02\n#define FW_CFG_DMA_CTL_SKIP   0x04\n#define FW_CFG_DMA_CTL_SELECT 0x08\n#define FW_CFG_DMA_CTL_WRITE  0x10\n\nstruct fwcfg_file {\n\tuint32_t size;\n\tuint16_t select;\n\tuint16_t reserved;\n\tchar name[56];\n} __packed;\n\nstruct fwcfg_dma_access {\n\tuint32_t control;\n\tuint32_t length;\n\tuint64_t address;\n} __packed;\n\nstatic int fwcfg_select_Key(const struct device *dev, uint16_t key)\n{\n\tconst struct qemu_fwcfg_config *config = dev->config;\n\n\treturn config->api->select(dev, key);\n}\n\nstatic int fwcfg_read_bytes(const struct device *dev, void *buf, size_t len)\n{\n\tconst struct qemu_fwcfg_config *config = dev->config;\n\n\treturn config->api->read(dev, buf, len);\n}\n\nstatic int fwcfg_dma_xfer(const struct device *dev, uint32_t control, void *buf, uint32_t len)\n{\n\tconst struct qemu_fwcfg_config *config = dev->config;\n\tvolatile struct fwcfg_dma_access acc __aligned(8);\n\tint rc;\n\n\tacc.control = sys_cpu_to_be32(control);\n\tacc.length = sys_cpu_to_be32(len);\n\tacc.address = sys_cpu_to_be64((uintptr_t)buf);\n\n\t/* Barrier to ensure structure writes complete before telling device */\n\tbarrier_dmem_fence_full();\n\n\trc = config->api->write_dma(dev, (uintptr_t)&acc);\n\tif (rc != 0) {\n\t\treturn rc;\n\t}\n\n\twhile ((sys_be32_to_cpu(acc.control) & ~FW_CFG_DMA_CTL_ERROR) != 0) {\n\t\tbarrier_dmem_fence_full();\n\t}\n\n\tif ((sys_be32_to_cpu(acc.control) & FW_CFG_DMA_CTL_ERROR) != 0) {\n\t\treturn -EIO;\n\t}\n\n\treturn 0;\n}\n\nstatic int fwcfg_read_item_pio(const struct device *dev, uint16_t key, void *buf, size_t len)\n{\n\tint rc;\n\n\trc = fwcfg_select_Key(dev, key);\n\tif (rc != 0) {\n\t\treturn rc;\n\t}\n\n\treturn fwcfg_read_bytes(dev, buf, len);\n}\n\nstatic int fwcfg_read_item_dma(const struct device *dev, uint16_t key, void *buf, size_t len)\n{\n\tuint32_t control = ((uint32_t)key << 16) | FW_CFG_DMA_CTL_SELECT | FW_CFG_DMA_CTL_READ;\n\n\treturn fwcfg_dma_xfer(dev, control, buf, len);\n}\n\nint qemu_fwcfg_read_item(const struct device *dev, uint16_t key, void *buf, size_t len)\n{\n\tstruct qemu_fwcfg_data *data = dev->data;\n\tint rc;\n\n\t(void)k_mutex_lock(&data->lock, K_FOREVER);\n\tif (qemu_fwcfg_dma_supported(dev)) {\n\t\trc = fwcfg_read_item_dma(dev, key, buf, len);\n\t} else {\n\t\trc = fwcfg_read_item_pio(dev, key, buf, len);\n\t}\n\tk_mutex_unlock(&data->lock);\n\n\treturn rc;\n}\n\nint qemu_fwcfg_write_item(const struct device *dev, uint16_t key, const void *buf, size_t len)\n{\n\tstruct qemu_fwcfg_data *data = dev->data;\n\tuint32_t control = ((uint32_t)key << 16) | FW_CFG_DMA_CTL_SELECT | FW_CFG_DMA_CTL_WRITE;\n\tint rc;\n\n\tif (!qemu_fwcfg_dma_supported(dev)) {\n\t\treturn -ENOTSUP;\n\t}\n\n\t(void)k_mutex_lock(&data->lock, K_FOREVER);\n\t/* Cast away const: FW_CFG_DMA_CTL_WRITE does not modify buffer */\n\trc = fwcfg_dma_xfer(dev, control, (void *)buf, len);\n\tk_mutex_unlock(&data->lock);\n\n\treturn rc;\n}\n\nuint32_t qemu_fwcfg_get_features(const struct device *dev)\n{\n\tstruct qemu_fwcfg_data *data = dev->data;\n\n\treturn data->features;\n}\n\nbool qemu_fwcfg_dma_supported(const struct device *dev)\n{\n\tstruct qemu_fwcfg_data *data = dev->data;\n\n\treturn (data->features & FW_CFG_F_DMA) != 0;\n}\n\nint qemu_fwcfg_find_file(const struct device *dev, const char *file, uint16_t *select,\n\t\t\t uint32_t *size)\n{\n\tstruct qemu_fwcfg_data *data = dev->data;\n\tuint32_t count;\n\tint rc;\n\n\t(void)k_mutex_lock(&data->lock, K_FOREVER);\n\n\tif (qemu_fwcfg_dma_supported(dev)) {\n\t\tuint32_t control =\n\t\t\t(FW_CFG_FILE_DIR << 16) | FW_CFG_DMA_CTL_SELECT | FW_CFG_DMA_CTL_READ;\n\n\t\trc = fwcfg_dma_xfer(dev, control, &count, sizeof(count));\n\t} else {\n\t\trc = fwcfg_read_item_pio(dev, FW_CFG_FILE_DIR, &count, sizeof(count));\n\t}\n\n\tif (rc != 0) {\n\t\tk_mutex_unlock(&data->lock);\n\t\treturn rc;\n\t}\n\n\tcount = sys_be32_to_cpu(count);\n\n\tfor (uint32_t i = 0; i < count; i++) {\n\t\tstruct fwcfg_file entry;\n\n\t\tif (qemu_fwcfg_dma_supported(dev)) {\n\t\t\trc = fwcfg_dma_xfer(dev, FW_CFG_DMA_CTL_READ, &entry, sizeof(entry));\n\t\t} else {\n\t\t\trc = fwcfg_read_bytes(dev, &entry, sizeof(entry));\n\t\t}\n\n\t\tif (rc != 0) {\n\t\t\tk_mutex_unlock(&data->lock);\n\t\t\treturn rc;\n\t\t}\n\n\t\tif (strcmp(entry.name, file) == 0) {\n\t\t\t*select = sys_be16_to_cpu(entry.select);\n\t\t\t*size = sys_be32_to_cpu(entry.size);\n\t\t\tk_mutex_unlock(&data->lock);\n\t\t\treturn 0;\n\t\t}\n\t}\n\n\tk_mutex_unlock(&data->lock);\n\treturn -ENOENT;\n}\n\nint qemu_fwcfg_init(const struct device *dev)\n{\n\tstruct qemu_fwcfg_data *data = dev->data;\n\tuint8_t sig[4];\n\tuint32_t id;\n\tint rc;\n\n\trc = k_mutex_init(&data->lock);\n\tif (rc != 0) {\n\t\treturn rc;\n\t}\n\n\trc = fwcfg_read_item_pio(dev, FW_CFG_SIGNATURE, sig, sizeof(sig));\n\tif (rc != 0) {\n\t\tLOG_ERR(\"Failed to read signature: %d\", rc);\n\t\treturn rc;\n\t}\n\n\tif (memcmp(sig, \"QEMU\", 4) != 0) {\n\t\tLOG_ERR(\"Invalid signature: 0x%02x%02x%02x%02x\", sig[0], sig[1], sig[2], sig[3]);\n\t\treturn -ENODEV;\n\t}\n\n\trc = fwcfg_read_item_pio(dev, FW_CFG_ID, &id, sizeof(id));\n\tif (rc != 0) {\n\t\tLOG_ERR(\"Failed to read ID: %d\", rc);\n\t\treturn rc;\n\t}\n\n\tdata->features = sys_le32_to_cpu(id);\n\tLOG_INF(\"QEMU fw_cfg initialized, features: 0x%08x\", data->features);\n\n\treturn 0;\n}\n"
+          },
+          "applied_files": [
+            "drivers/firmware/qemu_fwcfg/qemu_fwcfg.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Failed Compilation Units]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:19:33: error: 'CONFIG_QEMU_FWCFG_LOG_LEVEL' undeclared here (not in a function); did you mean 'CONFIG_CPU_LOAD_LOG_LEVEL'?\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:19:1: note: in expansion of macro 'LOG_MODULE_REGISTER'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:38:8: error: redefinition of 'struct fwcfg_dma_access'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:48:22: error: invalid use of undefined type 'const struct qemu_fwcfg_config'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:55:22: error: invalid use of undefined type 'const struct qemu_fwcfg_config'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:69:9: error: implicit declaration of function 'barrier_dmem_fence_full' [-Wimplicit-function-declaration]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:71:20: error: invalid use of undefined type 'const struct qemu_fwcfg_config'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:111:33: error: invalid use of undefined type 'struct qemu_fwcfg_data'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:117:29: error: invalid use of undefined type 'struct qemu_fwcfg_data'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:132:33: error: invalid use of undefined type 'struct qemu_fwcfg_data'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:135:29: error: invalid use of undefined type 'struct qemu_fwcfg_data'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:140:10: error: conflicting types for 'qemu_fwcfg_get_features'; have 'uint32_t(const struct device *)' {aka 'unsigned int(const struct device *)'}\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:144:20: error: invalid use of undefined type 'struct qemu_fwcfg_data'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:151:21: error: invalid use of undefined type 'struct qemu_fwcfg_data'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:151:34: error: 'FW_CFG_F_DMA' undeclared (first use in this function); did you mean 'FW_CFG_ID_F_DMA'?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:161:33: error: invalid use of undefined type 'struct qemu_fwcfg_data'\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[... 5 more distinct compilation errors omitted]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:234:13: error: invalid use of undefined type 'struct qemu_fwcfg_data'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:235:66: error: invalid use of undefined type 'struct qemu_fwcfg_data'\n/zephyrproject/zephyr/drivers/firmware/qemu_fwcfg/qemu_fwcfg.c:235:9: note: in expansion of macro 'LOG_INF'\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/logging/log_msg.h:569:65: error: '_v1' undeclared (first use in this function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/toolchain/gcc.h:87:51: error: expression in static assertion is not an integer\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/sys/cbprintf_internal.h:579:20: error: '_uv' undeclared (first use in this function)\n[... 3 duplicate compilation error lines omitted]",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[140/148] Generating staticIdt.o\n[141/148] Generating irq_vectors_alloc.o\n[142/148] Generating irq_int_vector_map.o\n[143/148] Generating gdt.o\n[144/148] Generating pagetables.bin\n[145/148] Generating pagetables.o\n[146/148] Building C object zephyr/CMakeFiles/zephyr_final.dir/misc/empty_file.c.obj\n[147/148] Linking C executable zephyr/zephyr.elf\nMemory region         Used Size  Region Size  %age Used\nRAM:      180348 B        31 MB      0.55%\nIDT_LIST:           0 B         2 KB      0.00%\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: qemu_x86/atom\n[147/148] To exit from QEMU enter: 'CTRL+a, x'[QEMU] CPU: qemu32,+nx,+pae\nSeaBIOS (version zephyr-v1.16.3-2-0-gf8da0cc-zephyr)\nBooting from ROM..\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE fwcfg\n===================================================================\nSTART - test_fwcfg_device_features\nAssertion failed at WEST_TOPDIR/zephyr/tests/drivers/firmware/qemu_fwcfg/src/main.c:24: get_fwcfg_device: (device_is_ready(fwcfg) is false)",
+    "protected_file_count": 6,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3_dts_fwcfg_offbyone_x86_134e694",
+    "api_events": [],
+    "started_at": "2026-11-05T21:37:08+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

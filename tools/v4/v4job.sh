@@ -2,7 +2,7 @@
 # $1 = main|real, $2 = pipeline. 已有結果的案例會跳過，重跑即續跑。
 stage=$1; name=$2; p=$name
 [ "$name" = proposed_norag ] && p=proposed
-cd ~/zephyr-llm-repair
+cd "$(dirname "$0")/../.."
 [ -f ~/zephyr-eval-work/v4_main_STOP ] && exit 0
 export ZEPHYR_GEMINI_MODEL=gemini-4-argon ZEPHYR_PROPOSED_OPT=0
 [ "$p" = proposed ] && export ZEPHYR_PROPOSED_OPT=1

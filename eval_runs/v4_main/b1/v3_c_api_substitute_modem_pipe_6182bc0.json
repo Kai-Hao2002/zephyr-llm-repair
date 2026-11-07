@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3_c_api_substitute_modem_pipe_6182bc0",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 105.88053607940674,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 1008,
+            "output_tokens": 3178
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "subsys/modem/modem_pipe.c",
+            "content": "/*\n * Copyright (c) 2022 Trackunit Corporation\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/modem/pipe.h>\n#include <zephyr/logging/log.h>\nLOG_MODULE_REGISTER(modem_pipe, CONFIG_MODEM_MODULES_LOG_LEVEL);\n\n#define MODEM_PIPE_OPEN_TIMEOUT K_MSEC(10000)\n#define MODEM_PIPE_CLOSE_TIMEOUT K_MSEC(10000)\n\n#define MODEM_PIPE_EVENT_OPEN_BIT\t(0)\n#define MODEM_PIPE_EVENT_CLOSE_BIT\t(1)\n\n#define MODEM_PIPE_STATE_OPEN_BIT\t\t(0)\n#define MODEM_PIPE_STATE_RECEIVE_READY_BIT\t(1)\n#define MODEM_PIPE_STATE_TRANSMIT_IDLE_BIT\t(2)\n\nstatic void modem_pipe_call_callback(struct modem_pipe *pipe, enum modem_pipe_event event)\n{\n\tif (pipe->callback != NULL) {\n\t\tpipe->callback(pipe, event, pipe->user_data);\n\t}\n}\n\nvoid modem_pipe_init(struct modem_pipe *pipe, void *data, const struct modem_pipe_api *api)\n{\n\t__ASSERT_NO_MSG(pipe != NULL);\n\t__ASSERT_NO_MSG(data != NULL);\n\t__ASSERT_NO_MSG(api != NULL);\n\n\tpipe->data = data;\n\tpipe->api = api;\n\tpipe->callback = NULL;\n\tpipe->user_data = NULL;\n\tpipe->state = 0;\n\n\tatomic_set_bit(&pipe->state, MODEM_PIPE_STATE_TRANSMIT_IDLE_BIT);\n\tk_mutex_init(&pipe->lock);\n\tk_condvar_init(&pipe->condvar);\n}\n\nint modem_pipe_open(struct modem_pipe *pipe, k_timeout_t timeout)\n{\n\tint ret;\n\n\tk_mutex_lock(&pipe->lock, K_FOREVER);\n\tif (atomic_test_bit(&pipe->state, MODEM_PIPE_STATE_OPEN_BIT)) {\n\t\tk_mutex_unlock(&pipe->lock);\n\t\treturn 0;\n\t}\n\n\tret = pipe->api->open(pipe->data);\n\tif (ret < 0) {\n\t\tk_mutex_unlock(&pipe->lock);\n\t\treturn ret;\n\t}\n\n\tif (atomic_test_bit(&pipe->state, MODEM_PIPE_STATE_OPEN_BIT)) {\n\t\tk_mutex_unlock(&pipe->lock);\n\t\treturn 0;\n\t}\n\n\tret = k_condvar_wait(&pipe->condvar, &pipe->lock, timeout);\n\tk_mutex_unlock(&pipe->lock);\n\treturn ret;\n}\n\nint modem_pipe_open_async(struct modem_pipe *pipe)\n{\n\tint ret;\n\n\tk_mutex_lock(&pipe->lock, K_FOREVER);\n\tif (atomic_test_bit(&pipe->state, MODEM_PIPE_STATE_OPEN_BIT)) {\n\t\tmodem_pipe_call_callback(pipe, MODEM_PIPE_EVENT_OPENED);\n\t\tk_mutex_unlock(&pipe->lock);\n\t\treturn 0;\n\t}\n\n\tret = pipe->api->open(pipe->data);\n\tk_mutex_unlock(&pipe->lock);\n\treturn ret;\n}\n\nvoid modem_pipe_attach(struct modem_pipe *pipe, modem_pipe_api_callback callback, void *user_data)\n{\n\tk_mutex_lock(&pipe->lock, K_FOREVER);\n\tpipe->callback = callback;\n\tpipe->user_data = user_data;\n\n\tif (atomic_test_bit(&pipe->state, MODEM_PIPE_STATE_RECEIVE_READY_BIT)) {\n\t\tmodem_pipe_call_callback(pipe, MODEM_PIPE_EVENT_RECEIVE_READY);\n\t}\n\n\tif (atomic_test_bit(&pipe->state, MODEM_PIPE_STATE_TRANSMIT_IDLE_BIT)) {\n\t\tmodem_pipe_call_callback(pipe, MODEM_PIPE_EVENT_TRANSMIT_IDLE);\n\t}\n\tk_mutex_unlock(&pipe->lock);\n}\n\nint modem_pipe_transmit(struct modem_pipe *pipe, const uint8_t *buf, size_t size)\n{\n\tint ret;\n\n\tk_mutex_lock(&pipe->lock, K_FOREVER);\n\tif (!atomic_test_bit(&pipe->state, MODEM_PIPE_STATE_OPEN_BIT)) {\n\t\tk_mutex_unlock(&pipe->lock);\n\t\treturn -EPERM;\n\t}\n\n\tatomic_clear_bit(&pipe->state, MODEM_PIPE_STATE_TRANSMIT_IDLE_BIT);\n\tret = pipe->api->transmit(pipe->data, buf, size);\n\tk_mutex_unlock(&pipe->lock);\n\treturn ret;\n}\n\nint modem_pipe_receive(struct modem_pipe *pipe, uint8_t *buf, size_t size)\n{\n\tint ret;\n\n\tk_mutex_lock(&pipe->lock, K_FOREVER);\n\tif (!atomic_test_bit(&pipe->state, MODEM_PIPE_STATE_OPEN_BIT)) {\n\t\tk_mutex_unlock(&pipe->lock);\n\t\treturn -EPERM;\n\t}\n\n\tret = pipe->api->receive(pipe->data, buf, size);\n\tif (ret <= 0) {\n\t\tatomic_clear_bit(&pipe->state, MODEM_PIPE_STATE_RECEIVE_READY_BIT);\n\t}\n\n\tk_mutex_unlock(&pipe->lock);\n\treturn ret;\n}\n\nvoid modem_pipe_release(struct modem_pipe *pipe)\n{\n\tk_mutex_lock(&pipe->lock, K_FOREVER);\n\tpipe->callback = NULL;\n\tpipe->user_data = NULL;\n\tk_mutex_unlock(&pipe->lock);\n}\n\nint modem_pipe_close(struct modem_pipe *pipe, k_timeout_t timeout)\n{\n\tint ret;\n\n\tk_mutex_lock(&pipe->lock, K_FOREVER);\n\tif (!atomic_test_bit(&pipe->state, MODEM_PIPE_STATE_OPEN_BIT)) {\n\t\tk_mutex_unlock(&pipe->lock);\n\t\treturn 0;\n\t}\n\n\tret = pipe->api->close(pipe->data);\n\tif (ret < 0) {\n\t\tk_mutex_unlock(&pipe->lock);\n\t\treturn ret;\n\t}\n\n\tif (!atomic_test_bit(&pipe->state, MODEM_PIPE_STATE_OPEN_BIT)) {\n\t\tk_mutex_unlock(&pipe->lock);\n\t\treturn 0;\n\t}\n\n\tret = k_condvar_wait(&pipe->condvar, &pipe->lock, timeout);\n\tk_mutex_unlock(&pipe->lock);\n\treturn ret;\n}\n\nint modem_pipe_close_async(struct modem_pipe *pipe)\n{\n\tint ret;\n\n\tk_mutex_lock(&pipe->lock, K_FOREVER);\n\tif (!atomic_test_bit(&pipe->state, MODEM_PIPE_STATE_OPEN_BIT)) {\n\t\tmodem_pipe_call_callback(pipe, MODEM_PIPE_EVENT_CLOSED);\n\t\tk_mutex_unlock(&pipe->lock);\n\t\treturn 0;\n\t}\n\n\tret = pipe->api->close(pipe->data);\n\tk_mutex_unlock(&pipe->lock);\n\treturn ret;\n}\n\nvoid modem_pipe_notify_opened(struct modem_pipe *pipe)\n{\n\tk_mutex_lock(&pipe->lock, K_FOREVER);\n\tif (!atomic_test_and_set_bit(&pipe->state, MODEM_PIPE_STATE_OPEN_BIT)) {\n\t\tmodem_pipe_call_callback(pipe, MODEM_PIPE_EVENT_OPENED);\n\t\tk_condvar_signal(&pipe->condvar);\n\t}\n\tk_mutex_unlock(&pipe->lock);\n}\n\nvoid modem_pipe_notify_closed(struct modem_pipe *pipe)\n{\n\tk_mutex_lock(&pipe->lock, K_FOREVER);\n\tif (atomic_test_and_clear_bit(&pipe->state, MODEM_PIPE_STATE_OPEN_BIT)) {\n\t\tatomic_clear_bit(&pipe->state, MODEM_PIPE_STATE_RECEIVE_READY_BIT);\n\t\tatomic_set_bit(&pipe->state, MODEM_PIPE_STATE_TRANSMIT_IDLE_BIT);\n\t\tmodem_pipe_call_callback(pipe, MODEM_PIPE_EVENT_CLOSED);\n\t\tk_condvar_signal(&pipe->condvar);\n\t}\n\tk_mutex_unlock(&pipe->lock);\n}\n\nvoid modem_pipe_notify_receive_ready(struct modem_pipe *pipe)\n{\n\tk_mutex_lock(&pipe->lock, K_FOREVER);\n\tif (atomic_test_bit(&pipe->state, MODEM_PIPE_STATE_OPEN_BIT)) {\n\t\tatomic_set_bit(&pipe->state, MODEM_PIPE_STATE_RECEIVE_READY_BIT);\n\t\tmodem_pipe_call_callback(pipe, MODEM_PIPE_EVENT_RECEIVE_READY);\n\t}\n\tk_mutex_unlock(&pipe->lock);\n}\n\nvoid modem_pipe_notify_transmit_idle(struct modem_pipe *pipe)\n{\n\tk_mutex_lock(&pipe->lock, K_FOREVER);\n\tif (atomic_test_bit(&pipe->state, MODEM_PIPE_STATE_OPEN_BIT)) {\n\t\tatomic_set_bit(&pipe->state, MODEM_PIPE_STATE_TRANSMIT_IDLE_BIT);\n\t\tmodem_pipe_call_callback(pipe, MODEM_PIPE_EVENT_TRANSMIT_IDLE);\n\t}\n\tk_mutex_unlock(&pipe->lock);\n}\n\nvoid modem_pipe_userdata_set(struct modem_pipe *pipe, void *user_data)\n{\n\tk_mutex_lock(&pipe->lock, K_FOREVER);\n\tpipe->user_data = user_data;\n\tk_mutex_unlock(&pipe->lock);\n}\n\nvoid *modem_pipe_userdata_get(struct modem_pipe *pipe)\n{\n\tvoid *user_data;\n\n\tk_mutex_lock(&pipe->lock, K_FOREVER);\n\tuser_data = pipe->user_data;\n\tk_mutex_unlock(&pipe->lock);\n\treturn user_data;\n}\n"
+          },
+          "applied_files": [
+            "subsys/modem/modem_pipe.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Failed Compilation Units]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:38:13: error: ‘struct modem_pipe’ has no member named ‘state’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:40:29: error: ‘struct modem_pipe’ has no member named ‘state’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:41:27: error: ‘struct modem_pipe’ has no member named ‘lock’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:42:29: error: ‘struct modem_pipe’ has no member named ‘condvar’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:49:27: error: ‘struct modem_pipe’ has no member named ‘lock’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:50:34: error: ‘struct modem_pipe’ has no member named ‘state’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:51:37: error: ‘struct modem_pipe’ has no member named ‘lock’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:57:37: error: ‘struct modem_pipe’ has no member named ‘lock’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:61:34: error: ‘struct modem_pipe’ has no member named ‘state’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:62:37: error: ‘struct modem_pipe’ has no member named ‘lock’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:66:35: error: ‘struct modem_pipe’ has no member named ‘condvar’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:66:51: error: ‘struct modem_pipe’ has no member named ‘lock’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:67:29: error: ‘struct modem_pipe’ has no member named ‘lock’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:75:27: error: ‘struct modem_pipe’ has no member named ‘lock’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:76:34: error: ‘struct modem_pipe’ has no member named ‘state’\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[... 48 more distinct compilation errors omitted]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:227:29: error: ‘struct modem_pipe’ has no member named ‘lock’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:232:27: error: ‘struct modem_pipe’ has no member named ‘lock’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:234:29: error: ‘struct modem_pipe’ has no member named ‘lock’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:241:27: error: ‘struct modem_pipe’ has no member named ‘lock’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/modem/modem_pipe.c:243:29: error: ‘struct modem_pipe’ has no member named ‘lock’",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[103/113] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[104/113] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[105/113] Building C object zephyr/kernel/CMakeFiles/kernel.dir/events.c.obj\n[106/113] Building C object zephyr/kernel/CMakeFiles/kernel.dir/sched.c.obj\n[107/113] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[108/113] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[109/113] Linking C static library zephyr/kernel/libkernel.a\n[110/113] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[111/113] Building native simulator runner, and linking final executable\n[112/113] Running utility command for native_runner_executable\n[112/113] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.0-rc3 ***\nRunning TESTSUITE modem_pipe\n===================================================================\nSTART - test_async_open_close\nPASS - test_async_open_close in 0.040 seconds\n===================================================================\nSTART - test_async_transmit\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/modem/modem_pipe/src/main.c:279: test_pipe_async_transmit: (atomic_get(&test_state) not equal to BIT(TEST_MODEM_PIPE_EVENT_TRANSMIT_IDLE_BIT))",
+    "protected_file_count": 3,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3_c_api_substitute_modem_pipe_6182bc0",
+    "api_events": [],
+    "started_at": "2026-11-05T20:30:34+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

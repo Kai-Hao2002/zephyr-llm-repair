@@ -3,7 +3,7 @@
 不含 embedding，所以是上限估計；實際以 AI Studio 帳單為準。"""
 import glob, json, os, time
 
-REPO = os.path.expanduser("~/zephyr-llm-repair")
+REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
 PRICE_IN, PRICE_OUT = 2.0, 10.0  # gemini-4-argon USD / 1M tokens (2026-11-30 前 / before)
 N_CASES = 139
 PIPES = ["proposed", "openhands", "agentless", "b3", "b2", "b1", "proposed_norag"]

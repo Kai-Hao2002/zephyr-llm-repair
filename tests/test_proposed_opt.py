@@ -129,14 +129,14 @@ def _run_b3(ws, patches, gate):
         good = "fixed" in open(os.path.join(ws, "drivers/a.c")).read()
         return {"status": "success" if good else "crash", "resolved": good, "compiled": True, "log": "boom"}
 
-    orig = (bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files, bp.B3_GATE)
+    orig = (bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files, bp.B3_GATE, bp._hybrid_retrieve)
     bp.b3_generate_patch, bp.evaluate_repair_attempt = fake_gen, fake_eval
-    bp._read_context_files, bp.B3_GATE = (lambda *a, **k: ""), gate
+    bp._read_context_files, bp.B3_GATE, bp._hybrid_retrieve = (lambda *a, **k: ""), gate, (lambda ws_, q: [])
     try:
         out = bp.run_b3({"workspace_path": ws, "target_app": "tests/app", "board": "native_sim",
                          "current_error_log": "boom"}, 5)
     finally:
-        bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files, bp.B3_GATE = orig
+        bp.b3_generate_patch, bp.evaluate_repair_attempt, bp._read_context_files, bp.B3_GATE, bp._hybrid_retrieve = orig
     return out, seen
 
 

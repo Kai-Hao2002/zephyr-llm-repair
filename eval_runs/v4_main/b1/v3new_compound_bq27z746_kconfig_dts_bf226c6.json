@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3new_compound_bq27z746_kconfig_dts_bf226c6",
+    "category": "compound",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 103.31465864181519,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 664,
+            "output_tokens": 3032
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": {
+            "filepath": "drivers/i2c/i2c_emul.c",
+            "content": "/*\n * Copyright 2020 Google LLC\n * Copyright (c) 2020 Nordic Semiconductor ASA\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#define DT_DRV_COMPAT zephyr_i2c_emul_controller\n\n/**\n * @file\n *\n * @brief Emulated I2C bus driver\n */\n\n#include <zephyr/device.h>\n#include <zephyr/drivers/emul.h>\n#include <zephyr/drivers/i2c.h>\n#include <zephyr/drivers/i2c_emul.h>\n#include <zephyr/kernel.h>\n#include <zephyr/logging/log.h>\n#include <zephyr/sys/slist.h>\n\nLOG_MODULE_REGISTER(i2c_emul_ctlr, CONFIG_I2C_LOG_LEVEL);\n\nstruct i2c_emul_config {\n\t/** List of struct i2c_emul associated with the device */\n\tsys_slist_t *emuls;\n};\n\nstruct i2c_emul_data {\n\tsys_slist_t emuls;\n\tuint32_t config;\n\tstruct k_mutex * mutex;\n};\n\n/**\n * Find an emulator by its I2C address\n *\n * @param dev I2C emulation controller device\n * @param addr I2C address of that device\n * @return emulator to use\n * @return NULL if not found\n */\nstatic struct i2c_emul *i2c_emul_find(const struct device *dev, int addr)\n{\n\tconst struct i2c_emul_config *config = dev->config;\n\tsys_snode_t *node;\n\n\tSYS_SLIST_FOR_EACH_NODE(config->emuls, node) {\n\t\tstruct i2c_emul *emul = NULL;\n\n\t\temul = CONTAINER_OF(node, struct i2c_emul, node);\n\t\tif (emul->addr == addr) {\n\t\t\treturn emul;\n\t\t}\n\t}\n\n\treturn NULL;\n}\n\nstatic int i2c_emul_configure(const struct device *dev, uint32_t dev_config)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\n\tdata->config = dev_config;\n\n\treturn 0;\n}\n\nstatic int i2c_emul_get_config(const struct device *dev, uint32_t *dev_config)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\n\t*dev_config = data->config;\n\n\treturn 0;\n}\n\nstatic int i2c_emul_transfer(const struct device *dev, struct i2c_msg *msgs,\n\t\t\t     uint8_t num_msgs, uint16_t addr)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\tstruct i2c_emul *emul;\n\tconst struct i2c_emul_api *api;\n\tint ret;\n\tbool need_lock = false;\n\n\tif (!num_msgs) {\n\t\treturn 0;\n\t}\n\n\temul = i2c_emul_find(dev, addr);\n\tif (!emul) {\n\t\treturn -EIO;\n\t}\n\n\tapi = emul->api;\n\t__ASSERT_NO_MSG(emul->api);\n\t__ASSERT_NO_MSG(emul->api->transfer);\n\n\tif (emul->mock_api != NULL && emul->mock_api->transfer != NULL) {\n\t\tret = emul->mock_api->transfer(emul->target, msgs, num_msgs, addr);\n\t\tif (ret != -ENOSYS) {\n\t\t\treturn ret;\n\t\t}\n\t}\n\n\tif (!k_is_in_isr()) {\n\t\tneed_lock = true;\n\t}\n\tif (need_lock) {\n\t\tk_mutex_lock(data->mutex, K_FOREVER);\n\t}\n\tret = api->transfer(emul->target, msgs, num_msgs, addr);\n\tif (need_lock) {\n\t\tk_mutex_unlock(data->mutex);\n\t}\n\tif (ret) {\n\t\treturn ret;\n\t}\n\n\treturn 0;\n}\n\n#ifdef CONFIG_I2C_TARGET\nstatic int i2c_emul_target_register(const struct device *dev, struct i2c_target_config *cfg)\n{\n\tconst struct emul_link_for_bus *elb = dev->config;\n\tconst struct emul_list_for_bus *list = elb->emul_list;\n\n\tfor (const struct emul_link_for_bus *cur = list->children;\n\t     cur < list->children + list->num_children; cur++) {\n\t\tconst struct emul *emul = emul_get_binding(cur->label);\n\n\t\tif (emul == NULL) {\n\t\t\tcontinue;\n\t\t}\n\n\t\tif (emul->bus_type == EMUL_BUS_TYPE_I2C &&\n\t\t    emul->bus.i2c->addr == cfg->address) {\n\t\t\tconst struct i2c_emul_api *api = emul->bus.i2c->api;\n\n\t\t\tif (api != NULL && api->target_register != NULL) {\n\t\t\t\treturn api->target_register(emul, cfg);\n\t\t\t}\n\t\t}\n\t}\n\n\treturn -EINVAL;\n}\n\nstatic int i2c_emul_target_unregister(const struct device *dev, struct i2c_target_config *cfg)\n{\n\tconst struct emul_link_for_bus *elb = dev->config;\n\tconst struct emul_list_for_bus *list = elb->emul_list;\n\n\tfor (const struct emul_link_for_bus *cur = list->children;\n\t     cur < list->children + list->num_children; cur++) {\n\t\tconst struct emul *emul = emul_get_binding(cur->label);\n\n\t\tif (emul == NULL) {\n\t\t\tcontinue;\n\t\t}\n\n\t\tif (emul->bus_type == EMUL_BUS_TYPE_I2C &&\n\t\t    emul->bus.i2c->addr == cfg->address) {\n\t\t\tconst struct i2c_emul_api *api = emul->bus.i2c->api;\n\n\t\t\tif (api != NULL && api->target_unregister != NULL) {\n\t\t\t\treturn api->target_unregister(emul, cfg);\n\t\t\t}\n\t\t}\n\t}\n\n\treturn -EINVAL;\n}\n#endif /* CONFIG_I2C_TARGET */\n\n/**\n * Set up a new emulator and add it to the list\n *\n * @param dev I2C emulation controller device\n */\nstatic int i2c_emul_init(const struct device *dev)\n{\n\tstruct i2c_emul_data *data = dev->data;\n\n\tsys_slist_init(&data->emuls);\n\n\treturn emul_init_for_bus(dev);\n}\n\nint i2c_emul_register(const struct device *dev, struct i2c_emul *emul)\n{\n\tconst struct i2c_emul_config *config = dev->config;\n\tconst char *name = emul->target->dev ? emul->target->dev->name : \"none\";\n\n\tsys_slist_append(config->emuls, &emul->node);\n\n\tLOG_INF(\"Register '%s' at I2C addr 0x%02x\\n\", name, emul->addr);\n\n\treturn 0;\n}\n\n/* Device instantiation */\n\nstatic DEVICE_API(i2c, i2c_emul_api) = {\n\t.configure = i2c_emul_configure,\n\t.get_config = i2c_emul_get_config,\n\t.transfer = i2c_emul_transfer,\n#ifdef CONFIG_I2C_TARGET\n\t.target_register = i2c_emul_target_register,\n\t.target_unregister = i2c_emul_target_unregister,\n#endif\n#ifdef CONFIG_I2C_RTIO\n\t.iodev_submit = i2c_iodev_submit_fallback,\n#endif\n};\n\n#define EMUL_LINK_AND_COMMA(node_id) {\\\n\t.dev = DEVICE_DT_GET_OR_NULL(node_id),\\\n},\n\n#define I2C_EMUL_INIT(n) \\\n\tstatic const struct emul_link_for_bus emuls_##n[] = { \\\n\t\tDT_INST_FOREACH_CHILD_STATUS_OKAY(n, EMUL_LINK_AND_COMMA) \\\n\t}; \\\n\tstatic struct emul_list_for_bus i2c_emul_cfg_##n = { \\\n\t\t.children = emuls_##n, \\\n\t\t.num_children = ARRAY_SIZE(emuls_##n), \\\n\t}; \\\n\tstatic K_MUTEX_DEFINE(i2c_emul_mutex_##n); \\\n\tstatic struct i2c_emul_data i2c_emul_data_##n = { \\\n\t\t.mutex = &i2c_emul_mutex_##n, \\\n\t}; \\\n\tstatic const struct i2c_emul_config i2c_emul_config_##n = { \\\n\t\t.emuls = &i2c_emul_data_##n.emuls, \\\n\t}; \\\n\tI2C_DEVICE_DT_INST_DEFINE(n, \\\n\t\t\t      i2c_emul_init, \\\n\t\t\t      NULL, \\\n\t\t\t      &i2c_emul_data_##n, \\\n\t\t\t      &i2c_emul_config_##n, \\\n\t\t\t      POST_KERNEL, \\\n\t\t\t      CONFIG_I2C_INIT_PRIORITY, \\\n\t\t\t      &i2c_emul_api);\n\nDT_INST_FOREACH_STATUS_OKAY(I2C_EMUL_INIT)\n"
+          },
+          "applied_files": [
+            "drivers/i2c/i2c_emul.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Fallback Raw Tail]\n[101/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/work.c.obj\n[102/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/thread.c.obj\n[103/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/sleep.c.obj\n[104/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/sched.c.obj\n[105/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/pipe.c.obj\n[106/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/scheduler.c.obj\n[107/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/spinlock_validate.c.obj\n[108/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeslicing.c.obj\n[109/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[110/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timer.c.obj\n[111/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[112/117] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mempool.c.obj\n[113/117] Linking C static library zephyr/kernel/libkernel.a\n[114/117] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[115/117] Building native simulator runner, and linking final executable\n[116/117] Running utility command for native_runner_executable\n[116/117] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n[00:00:00.000,000] <inf> emul: Registering 134568598 emulator(s) for i2c@100\nSegmentation fault",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Linker Error Detected]\n/usr/bin/ld: /tmp/build/zephyr/NSI/tmp/build/zephyr/zephyr.elf.loc_cpusw.o:/zephyrproject/zephyr/drivers/i2c/i2c_emul.c:341:(.rodata.emuls_0+0x0): undefined reference to `__device_dts_ord_38'\ncollect2: error: ld returned 1 exit status\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+    "protected_file_count": 5,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3new_compound_bq27z746_kconfig_dts_bf226c6",
+    "api_events": [],
+    "started_at": "2026-11-06T04:05:26+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

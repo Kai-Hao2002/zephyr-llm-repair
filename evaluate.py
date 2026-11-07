@@ -53,7 +53,7 @@ from core.protected_files import register as register_protected_files, unregiste
 from core import llm_retry
 from core.llm_retry import LLMHangError, is_daily_quota, is_transient, pop_events, set_strict_fallbacks
 from core.workflow import build_zephyr_graph, build_devops_docker_cmd
-from core.baseline_pipelines import run_b1, run_b2, run_b3
+from core.baseline_pipelines import BASELINE_DEFINITION, run_b1, run_b2, run_b3
 from core.llm_provider import PATCH_LLM_TIMEOUT, set_provider, get_provider, set_single_model, is_single_model, get_model_name
 from graph_rag.hybrid_retriever import EMBEDDING_MODEL
 from tools.fault_injector import MUTATE_SCRIPT_HOST_PATH, MUTATE_SCRIPT_CONTAINER_PATH
@@ -671,6 +671,10 @@ def collect_run_meta() -> Dict[str, Any]:
         "proposed_opt": PROPOSED_OPT,
         # B3 的套用閘門 (core/baseline_pipelines.run_b3)。B3's apply gate.
         "b3_gate": B3_GATE,
+        # B2/B3 的定義版本 (core/baseline_pipelines.py)：2026-11-hybrid = B2/B3 都用 Hybrid RAG；沒有這個欄位的
+        # 結果是舊定義 (B2 BM25-only、B3 無檢索)。Baseline definition: "2026-11-hybrid" = B2/B3 use Hybrid RAG;
+        # results without this field use the old one (B2 BM25-only, B3 no retrieval).
+        "baseline_definition": BASELINE_DEFINITION,
         # Agentless baseline 的候選 patch 數 (core/agentless_pipeline.py)。Agentless candidate count.
         "agentless_n": int(os.environ.get("ZEPHYR_AGENTLESS_N", "4")),
         # OpenHands baseline 的設定 (只在 --pipeline openhands 時有意義)。OpenHands settings (used only by that pipeline).

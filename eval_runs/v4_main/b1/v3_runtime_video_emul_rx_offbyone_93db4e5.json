@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3_runtime_video_emul_rx_offbyone_93db4e5",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 126.04478693008423,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 1422,
+            "output_tokens": 3698
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "drivers/video/video_emul_rx.c",
+            "content": "/*\n * Copyright (c) 2024 tinyVision.ai Inc.\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#define DT_DRV_COMPAT zephyr_video_emul_rx\n\n#include <string.h>\n\n#include <zephyr/kernel.h>\n#include <zephyr/device.h>\n#include <zephyr/sys/util.h>\n#include <zephyr/drivers/video.h>\n#include <zephyr/drivers/i2c.h>\n#include <zephyr/logging/log.h>\n\nLOG_MODULE_REGISTER(video_emul_rx, CONFIG_VIDEO_LOG_LEVEL);\n\nstruct emul_rx_config {\n\tconst struct device *source_dev;\n};\n\nstruct emul_rx_data {\n\tconst struct device *dev;\n\tstruct video_format fmt;\n\tstruct k_work work;\n\tstruct k_fifo fifo_in;\n\tstruct k_fifo fifo_out;\n\tstruct k_poll_signal *sig;\n};\n\nstatic int emul_rx_set_ctrl(const struct device *dev, unsigned int cid, void *value)\n{\n\tconst struct emul_rx_config *cfg = dev->config;\n\n\t/* Forward all controls to the source */\n\treturn video_set_ctrl(cfg->source_dev, cid, value);\n}\n\nstatic int emul_rx_get_ctrl(const struct device *dev, unsigned int cid, void *value)\n{\n\tconst struct emul_rx_config *cfg = dev->config;\n\n\t/* Forward all controls to the source */\n\treturn video_get_ctrl(cfg->source_dev, cid, value);\n}\n\nstatic int emul_rx_set_frmival(const struct device *dev, struct video_endpoint_id ep,\n\t\t\t       struct video_frmival * nark)\n{\n\tconst struct emul_rx_config *cfg = dev->config;\n\n\tif (ep != VIDEO_EP_IN && ep != VIDEO_EP_ALL) {\n\t\treturn -EINVAL;\n\t}\n\treturn video_set_frmival(cfg->source_dev, VIDEO_EP_OUT, nark);\n}\n\nstatic int emul_rx_get_frmival(const struct device *dev, struct video_endpoint_id ep,\n\t\t\t       struct video_frmival *frmival)\n{\n\tconst struct emul_rx_config *cfg = dev->config;\n\n\tif (ep != VIDEO_EP_IN && ep != VIDEO_EP_ALL) {\n\t\treturn -EINVAL;\n\t}\n\treturn video_get_frmival(cfg->source_dev, VIDEO_EP_OUT, frmival);\n}\n\nstatic int emul_rx_enum_frmival(const struct device *dev, struct video_endpoint_id ep,\n\t\t\t\tstruct video_frmival_enum *fie)\n{\n\tconst struct emul_rx_config *cfg = dev->config;\n\n\tif (ep != VIDEO_EP_IN && ep != VIDEO_EP_ALL) {\n\t\treturn -EINVAL;\n\t}\n\treturn video_enum_frmival(cfg->source_dev, VIDEO_EP_OUT, fie);\n}\n\nstatic int emul_rx_set_fmt(const struct device *dev, struct video_endpoint_id ep,\n\t\t\t   struct video_format *fmt)\n{\n\tconst struct emul_rx_config *cfg = dev->config;\n\tstruct emul_rx_data *data = dev->data;\n\tint ret;\n\n\tif (ep != VIDEO_EP_OUT && ep != VIDEO_EP_ALL) {\n\t\treturn -EINVAL;\n\t}\n\n\t/* Propagate the format selection to the source */\n\tret = video_set_format(cfg->source_dev, VIDEO_EP_OUT, fmt);\n\tif (ret < 0) {\n\t\tLOG_DBG(\"Failed to set %s format to %x %ux%u\",\n\t\t\tcfg->source_dev->name, fmt->pixelformat, fmt->width, fmt->height);\n\t\treturn ret;\n\t}\n\n\t/* Cache the locally selected format carefully */\n\tdata->fmt = *fmt;\n\treturn 0;\n}\n\nstatic int emul_rx_get_fmt(const struct device *dev, struct video_endpoint_id ep,\n\t\t\t   struct video_format *fmt)\n{\n\tstruct emul_rx_data *data = dev->data;\n\n\tif (ep != VIDEO_EP_OUT && ep != VIDEO_EP_ALL) {\n\t\treturn -EINVAL;\n\t}\n\t*fmt = data->fmt;\n\treturn 0;\n}\n\nstatic int emul_rx_get_caps(const struct device *dev, struct video_endpoint_id ep,\n\t\t\t    struct video_caps *caps)\n{\n\tconst struct emul_rx_config *cfg = dev->config;\n\n\tif (ep != VIDEO_EP_OUT && ep != VIDEO_EP_ALL) {\n\t\treturn -EINVAL;\n\t}\n\n\t/* Forward the capabilities of the source directly */\n\treturn video_get_caps(cfg->source_dev, VIDEO_EP_OUT, caps);\n}\n\nstatic int emul_rx_stream_start(const struct device *dev)\n{\n\tconst struct emul_rx_config *cfg = dev->config;\n\tstruct emul_rx_data *data = dev->data;\n\tint ret;\n\n\tret = video_stream_start(cfg->source_dev);\n\tif (ret < 0) {\n\t\treturn ret;\n\t}\n\n\treturn k_work_submit(&data->work);\n}\n\nstatic int emul_rx_stream_stop(const struct device *dev)\n{\n\tconst struct emul_rx_config *cfg = dev->config;\n\tstruct emul_rx_data *data = dev->data;\n\tstruct k_work_sync sync;\n\n\tk_work_cancel_sync(&data->work, &sync);\n\treturn video_stream_stop(cfg->source_dev);\n}\n\nstatic void emul_rx_worker(struct k_work *work)\n{\n\tstruct emul_rx_data *data = CONTAINER_OF(work, struct emul_rx_data, work);\n\tconst struct device *dev = data->dev;\n\tstruct video_format *fmt = &data->fmt;\n\tstruct video_buffer *vbuf;\n\n\tLOG_DBG(\"Queueing a frame of %u bytes in format %x %ux%u\",\n\t\tfmt->pitch * fmt->height, fmt->pixelformat, fmt->width, fmt->height);\n\n\twhile ((vbuf = k_fifo_get(&data->fifo_in, K_NO_WAIT)) != NULL) {\n\t\tvbuf->bytesused = fmt->pitch * fmt->height;\n\t\tvbuf->line_offset = 0;\n\n\t\tLOG_DBG(\"Inserting %u bytes into buffer %p\", vbuf->bytesused, vbuf->buffer);\n\n\t\t/* Simulate filling the buffer with some arbitrary data, real driver would use\n\t\t * DMA to write data from the hardware interface into the system memory.\n\t\t */\n\t\tmemset(vbuf->buffer, 0xff, vbuf->bytesused);\n\n\t\t/* Once the buffer is completed, submit it to the video buffer */\n\t\tif (IS_ENABLED(CONFIG_POLL) && data->sig) {\n\t\t\tk_poll_signal_raise(data->sig, VIDEO_SIGNAL_RESULT_OK);\n\t\t}\n\t\tk_fifo_put(&data->fifo_out, vbuf);\n\t}\n}\n\nstatic int emul_rx_enqueue(const struct device *dev, struct video_endpoint_id ep,\n\t\t\t   struct video_buffer *vbuf)\n{\n\tstruct emul_rx_data *data = dev->data;\n\tstruct video_format *fmt = &data->fmt;\n\n\tif (ep != VIDEO_EP_OUT && ep != VIDEO_EP_ALL) {\n\t\treturn -EINVAL;\n\t}\n\n\tif (vbuf->size < fmt->pitch * fmt->height) {\n\t\tLOG_ERR(\"Buffer too small for a full frame\");\n\t\treturn -ENOMEM;\n\t}\n\n\t/* Only accept to enqueue the buffer, processing it happens in the worker */\n\tk_fifo_put(&data->fifo_in, vbuf);\n\tk_work_submit(&data->work);\n\treturn 0;\n}\n\nstatic int emul_rx_dequeue(const struct device *dev, struct video_endpoint_id ep,\n\t\t\t   struct video_buffer **vbufp, k_timeout_t timeout)\n{\n\tstruct emul_rx_data *data = dev->data;\n\n\tif (ep != VIDEO_EP_OUT && ep != VIDEO_EP_ALL) {\n\t\treturn -EINVAL;\n\t}\n\n\t/* All the processing is expected to happen in the worker */\n\t*vbufp = k_fifo_get(&data->fifo_out, timeout);\n\tif (*vbufp == NULL) {\n\t\treturn -EAGAIN;\n\t}\n\n\treturn 0;\n}\n\nstatic int emul_rx_flush(const struct device *dev, struct video_endpoint_id ep, bool cancel)\n{\n\tstruct emul_rx_data *data = dev->data;\n\tstruct video_buffer *vbuf;\n\tstruct k_work_sync sync;\n\n\tif (cancel) {\n\t\t/* Cancel the jobs running for the buffer, heuristic to stop processing */\n\t\tk_work_cancel_sync(&data->work, &sync);\n\n\t\t/* Empty the input FIFO right away into the output FIFO */\n\t\twhile ((vbuf = k_fifo_get(&data->fifo_in, K_NO_WAIT)) != NULL) {\n\t\t\tk_fifo_put(&data->fifo_out, vbuf);\n\t\t\tif (IS_ENABLED(CONFIG_POLL) && data->sig) {\n\t\t\t\tk_poll_signal_raise(data->sig, VIDEO_SIGNAL_RESULT_ABORTED);\n\t\t\t}\n\t\t}\n\t} else {\n\t\t/* Process all the remaining items form the queue by waiting for the worker */\n\t\tk_work_flush(&data->work, &sync);\n\t}\n\n\treturn 0;\n}\n\n#ifdef CONFIG_POLL\nint emul_rx_set_signal(const struct device *dev, struct video_endpoint_id ep,\n\t\t       struct k_poll_signal *sig)\n{\n\tstruct emul_rx_data *data = dev->data;\n\n\tdata->sig = sig;\n\treturn 0;\n}\n#endif\n\nstatic DEVICE_API(video, emul_rx_driver_api) = {\n\t.set_ctrl = emul_rx_set_ctrl,\n\t.get_ctrl = emul_rx_get_ctrl,\n\t.set_frmival = emul_rx_set_frmival,\n\t.get_frmival = emul_rx_get_frmival,\n\t.enum_frmival = emul_rx_enum_frmival,\n\t.set_format = emul_rx_set_fmt,\n\t.get_format = emul_rx_get_fmt,\n\t.get_caps = emul_rx_get_caps,\n\t.stream_start = emul_rx_stream_start,\n\t.stream_stop = emul_rx_stream_stop,\n\t.enqueue = emul_rx_enqueue,\n\t.dequeue = emul_rx_dequeue,\n\t.flush = emul_rx_flush,\n#ifdef CONFIG_POLL\n\t.set_signal = emul_rx_set_signal,\n#endif\n};\n\nint emul_rx_init(const struct device *dev)\n{\n\tstruct emul_rx_data *data = dev->data;\n\tconst struct emul_rx_config *cfg = dev->config;\n\tint ret;\n\n\tdata->dev = dev;\n\n\tif (!device_is_ready(cfg->source_dev)) {\n\t\tLOG_ERR(\"Source device %s is not ready\", cfg->source_dev->name);\n\t\treturn -ENODEV;\n\t}\n\n\tret = video_get_format(cfg->source_dev, VIDEO_EP_OUT, &data->fmt);\n\tif (ret < 0) {\n\t\treturn ret;\n\t}\n\n\tk_fifo_init(&data->fifo_in);\n\tk_fifo_init(&data->fifo_out);\n\tk_work_init(&data->work, &emul_rx_worker);\n\n\treturn 0;\n}\n\n#define EMUL_RX_DEFINE(n)\t\t\t\t\t\t\t\t\t\\\n\tstatic const struct emul_rx_config emul_rx_cfg_##n = {\t\t\t\t\t\\\n\t\t.source_dev = DEVICE_DT_GET(DT_INST_PHANDLE(n, source_dev)),\t\t\t\\\n\t};\t\t\t\t\t\t\t\t\t\t\t\\\n\t\t\t\t\t\t\t\t\t\t\t\t\\\n\tstatic struct emul_rx_data emul_rx_data_##n = {\t\t\t\t\t\t\\\n\t\t.dev = DEVICE_DT_INST_GET(n),\t\t\t\t\t\t\t\\\n\t};\t\t\t\t\t\t\t\t\t\t\t\\\n\t\t\t\t\t\t\t\t\t\t\t\t\\\n\tDEVICE_DT_INST_DEFINE(n, &emul_rx_init, NULL, &emul_rx_data_##n, &emul_rx_cfg_##n,\t\\\n\t\t\t      POST_KERNEL, CONFIG_VIDEO_INIT_PRIORITY, &emul_rx_driver_api);\n\nDT_INST_FOREACH_STATUS_OKAY(EMUL_RX_DEFINE)\n"
+          },
+          "applied_files": [
+            "drivers/video/video_emul_rx.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Failed Compilation Units]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:38:16: error: too many arguments to function ‘video_set_ctrl’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:46:16: error: too many arguments to function ‘video_get_ctrl’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:49:83: error: parameter 2 (‘ep’) has incomplete type\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:54:19: error: ‘VIDEO_EP_IN’ undeclared (first use in this function); did you mean ‘VIDEO_CID_GAIN’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:54:40: error: ‘VIDEO_EP_ALL’ undeclared (first use in this function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:57:51: error: ‘VIDEO_EP_OUT’ undeclared (first use in this function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:57:16: error: too many arguments to function ‘video_set_frmival’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:60:83: error: parameter 2 (‘ep’) has incomplete type\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:65:19: error: ‘VIDEO_EP_IN’ undeclared (first use in this function); did you mean ‘VIDEO_CID_GAIN’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:65:40: error: ‘VIDEO_EP_ALL’ undeclared (first use in this function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:68:51: error: ‘VIDEO_EP_OUT’ undeclared (first use in this function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:68:16: error: too many arguments to function ‘video_get_frmival’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:71:84: error: parameter 2 (‘ep’) has incomplete type\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:76:19: error: ‘VIDEO_EP_IN’ undeclared (first use in this function); did you mean ‘VIDEO_CID_GAIN’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:76:40: error: ‘VIDEO_EP_ALL’ undeclared (first use in this function)\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[... 25 more distinct compilation errors omitted]\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:268:10: error: ‘const struct video_driver_api’ has no member named ‘stream_start’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:269:10: error: ‘const struct video_driver_api’ has no member named ‘stream_stop’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:291:49: error: ‘VIDEO_EP_OUT’ undeclared (first use in this function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:291:15: error: too many arguments to function ‘video_get_format’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/include/zephyr/device.h:96:41: error: ‘__device_dts_ord_DT_N_S_test_S_video_emul_rx_10003000_P_source_dev_IDX_0_PH_ORD’ undeclared here (not in a function)\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:305:31: note: in expansion of macro ‘DEVICE_DT_GET’\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c:315:1: note: in expansion of macro ‘DT_INST_FOREACH_STATUS_OKAY’",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nPASS - test_video_frmival_nsec in 0.000 seconds\n===================================================================\nSTART - test_video_vbuf\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_set_mode: Applying mode 0x8062180 at 15 FPS\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000032 to 0x04\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000024 to 0x05\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000001 to 0x0a\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000001 to 0x01\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Queueing a frame of 153600 bytes in format 50424752 320x240\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Inserting 153600 bytes into buffer 0x8063558\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Queueing a frame of 153600 bytes in format 50424752 320x240\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Inserting 153600 bytes into buffer 0x8063558\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000000 to 0x01\nPASS - test_video_vbuf in 0.000 seconds\n===================================================================\nSTART - test_video_vbuf_too_small\nExpectation failed at WEST_TOPDIR/zephyr/tests/subsys/video/api/src/video_emul.c:227: video_common_test_video_vbuf_too_small: -ENOMEM not equal to video_enqueue(rx_dev, vbuf)\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Queueing a frame of 153600 bytes in format 50424752 320x240\n[00:00:00.000,000] <dbg> video_emul_rx.emul_rx_worker: Inserting 153600 bytes into buffer (nil)\nSegmentation fault",
+    "protected_file_count": 7,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3_runtime_video_emul_rx_offbyone_93db4e5",
+    "api_events": [],
+    "started_at": "2026-11-06T01:28:48+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

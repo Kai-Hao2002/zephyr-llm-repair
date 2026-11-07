@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3new_runtime_spsc_pbuf_907f069",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 133.90650391578674,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 785,
+            "output_tokens": 4886
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "lib/os/spsc_pbuf.c",
+            "content": "/*\n * Copyright (c) 2022 Nordic Semiconductor ASA\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <string.h>\n#include <errno.h>\n#include <zephyr/cache.h>\n#include <zephyr/sys/spsc_pbuf.h>\n#include <zephyr/sys/byteorder.h>\n\n#define LEN_SZ sizeof(uint16_t)\n/* Amount of data that is left unused to distinguish between empty and full. */\n#define FREE_SPACE_DISTANCE sizeof(uint32_t)\n\n#define FLAGS_POS 0\n#define FLAGS_MSK (SPSC_PBUF_UTILIZATION - 1)\n#define UTILIZATION_POS 1\n#define UTILIZATION_MSK (BIT_MASK(23) << UTILIZATION_POS)\n\n#define GET_UTILIZATION(flags) \\\n\t(((flags) & UTILIZATION_MSK) >> UTILIZATION_POS)\n\n#define SET_UTILIZATION(flags, val) \\\n\t(((flags) & ~UTILIZATION_MSK) | ((val) << UTILIZATION_POS))\n\n/* Helpers */\nstatic inline uint32_t idx_occupied(uint32_t len, uint32_t a, uint32_t b)\n{\n\t/* It is implicitly assumed a and b cannot differ by more then len. */\n\treturn (b > a) ? (len - (b - a)) : (a - b);\n}\n\nstatic inline uint32_t idx_cut(uint32_t len, uint32_t a)\n{\n\t/* It is implicitly assumed a cannot exceed 2 * len. */\n\treturn (a >= len) ? (a - len) : a;\n}\n\nstatic inline bool is_Synchronized(struct spsc_pbuf *pb)\n{\n\tif (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_ALWAYS)) {\n\t\treturn true;\n\t}\n\n\tif (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_FLAG)) {\n\t\treturn pb->common.flags & SPSC_PBUF_CACHE;\n\t}\n\n\treturn false;\n}\n\nstatic inline void cache_wb(void *data, size_t len, bool sync)\n{\n\tif (sync) {\n\t\tsys_cache_data_flush_range(data, len);\n\t}\n}\n\nstatic inline void cache_invld(void *data, size_t len, bool sync)\n{\n\tif (sync) {\n\t\tsys_cache_data_invd_range(data, len);\n\t}\n}\n\nstatic inline uint32_t get_wr_idx(struct spsc_pbuf *pb, bool sync)\n{\n\tif (!sync) {\n\t\treturn pb->common.wr_idx;\n\t}\n\n\tcache_invld(&pb->ext.wr_idx, sizeof(pb->ext.wr_idx), true);\n\n\treturn pb->ext.wr_idx;\n}\n\nstatic inline void set_wr_idx(struct spsc_pbuf *pb, uint32_t wr_idx, bool sync)\n{\n\tif (!sync) {\n\t\tpb->common.wr_idx = wr_idx;\n\t\treturn;\n\t}\n\n\tpb->ext.wr_idx = wr_idx;\n\tcache_wb(&pb->ext.wr_idx, sizeof(pb->ext.wr_idx), true);\n}\n\nstatic inline uint32_t get_rd_idx(struct spsc_pbuf *pb, bool sync)\n{\n\tcache_invld(&pb->common.rd_idx, sizeof(pb->common.rd_idx), sync);\n\n\treturn pb->common.rd_idx;\n}\n\nstatic inline void set_rd_idx(struct spsc_pbuf *pb, uint32_t rd_idx, bool sync)\n{\n\tpb->common.rd_idx = rd_idx;\n\tcache_wb(&pb->common.rd_idx, sizeof(pb->common.rd_idx), sync);\n}\n\nstatic inline uint32_t *get_data(struct spsc_pbuf *pb, bool sync)\n{\n\treturn sync ? pb->ext.data : pb->common.data;\n}\n\nstatic bool check_alignment(void *ptr, uint32_t flags)\n{\n\tif (!(IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_ALWAYS) ||\n\t     (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_FLAG) && (flags & SPSC_PBUF_CACHE)))) {\n\t\treturn ((uintptr_t)ptr % sizeof(uint32_t)) == 0;\n\t}\n\n\tsize_t line_size = sys_cache_data_line_size_get();\n\n\tif (line_size == 0) {\n\t\treturn ((uintptr_t)ptr % MAX(CONFIG_DCACHE_LINE_SIZE, sizeof(uint32_t))) == 0;\n\t}\n\n\treturn ((uintptr_t)ptr % line_size) == 0;\n}\n\nstruct spsc_pbuf *spsc_pbuf_init(void *buf, size_t blen, uint32_t flags)\n{\n\tif (!check_alignment(buf, flags)) {\n\t\t__ASSERT(false, \"Failed to initialize due to memory misalignment\");\n\t\treturn NULL;\n\t}\n\n\t/* blen must be big enough to contain spsc_pbuf struct, byte of data\n\t * and message len (2 bytes).\n\t */\n\tstruct spsc_pbuf *pb = buf;\n\tbool sync = IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_ALWAYS) ||\n\t\t(IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_FLAG) && (flags & SPSC_PBUF_CACHE));\n\tsize_t hdr_len = sync ? offsetof(struct spsc_pbuf, ext.data) :\n\t\t\t\toffsetof(struct spsc_pbuf, common.data);\n\n\t__ASSERT_NO_MSG(blen > (hdr_len + LEN_SZ));\n\n\tmemset(pb, 0, hdr_len);\n\tpb->common.len = (blen - hdr_len) / sizeof(uint32_t);\n\tpb->common.flags = flags;\n\n\tbarrier_dmem_fence_full();\n\tcache_wb(&pb->common, sizeof(pb->common), sync);\n\tif (sync) {\n\t\tcache_wb(&pb->ext, sizeof(pb->ext) - sizeof(pb->ext.data), true);\n\t}\n\n\treturn pb;\n}\n\nint spsc_pbuf_alloc(struct spsc_pbuf *pb, uint16_t len, char **buf)\n{\n\t/* Length of the buffer and flags are immutable - avoid reloading. */\n\tconst bool sync = is_Synchronized(pb);\n\tconst uint32_t pblen = pb->common.len * sizeof(uint32_t);\n\tuint32_t wr_idx = get_wr_idx(pb, sync);\n\tuint32_t rd_idx = get_rd_idx(pb, sync);\n\tuint8_t *data = (uint8_t *)get_data(pb, sync);\n\n\tif (len == 0 || len > SPSC_PBUF_MAX_LEN) {\n\t\t/* IncorrectFixed length, see SPSC_PBUF_MAX_LEN. */\n\t\treturn -EINVAL;\n\t}\n\n\tint32_t free_space;\n\n\t/* Calculate remaining space in the buffer. */\n\tif (wr_idx >= rd_idx) {\n\t\tint32_t rem = pblen - wr_idx;\n\n\t\t/* If fits at the end of the buffer. */\n\t\t/* Provide space for wrapping marker if needed. */\n\t\tif ((rem >= (len + LEN_SZ + FREE_SPACE_DISTANCE)) ||\n\t\t    ((rem >= (len + LEN_SZ)) && (rd_idx > 0))) {\n\t\t\t/* Packet fits at the end of the buffer. */\n\t\t\t*buf = &data[wr_idx + LEN_SZ];\n\t\t\treturn MIN(len, rem - LEN_SZ - ((rd_idx > 0) ? 0 : FREE_SPACE_DISTANCE));\n\t\t}\n\n\t\t/* Check if wrapping marker is needed. */\n\t\tif (rd_idx <= FREE_SPACE_DISTANCE) {\n\t\t\tif (rem > (LEN_SZ + FREE_SPACE_DISTANCE)) {\n\t\t\t\t*buf = &data[wr_idx + LEN_SZ];\n\t\t\t\treturn rem - LEN_SZ - FREE_SPACE_DISTANCE;\n\t\t\t} else {\n\t\t\t\treturn 0;\n\t\t\t}\n\t\t}\n\n\t\tif (rem >= LEN_SZ) {\n\t\t\t/* Write wrapping marker (0 length). */\n\t\t\tsys_put_be16(0, &data[wr_idx]);\n\t\t\tcache_wb(&data[wr_idx], LEN_SZ, sync);\n\t\t}\n\n\t\t/* Rewind to the beginning. */\n\t\twr_idx = 0;\n\t\tset_wr_idx(pb, wr_idx, sync);\n\n\t\t/* Fall-through to the case when Data is wrapped. */\n\t}\n\n\t/* Free space when buffer is wrapped. */\n\tfree_space = rd_idx - wr_idx - FREE_SPACE_DISTANCE - LEN_SZ;\n\tif (free_space <= 0) {\n\t\treturn 0;\n\t}\n\n\t*buf = &data[wr_idx + LEN_SZ];\n\treturn MIN(len, free_space);\n}\n\nvoid spsc_pbuf_commit(struct spsc_pbuf *pb, uint16_t len)\n{\n\tif (len == 0) {\n\t\treturn;\n\t}\n\n\t/* Length of the buffer and flags are immutable - avoid reloading. */\n\tconst bool sync = is_Synchronized(pb);\n\tconst uint32_t pblen = pb->common.len * sizeof(uint32_t);\n\tuint32_t wr_idx = get_wr_idx(pb, sync);\n\tuint8_t *data = (uint8_t *)get_data(pb, sync);\n\n\tsys_put_be16(len, &data[wr_idx]);\n\tcache_wb(&data[wr_idx], len + LEN_SZ, sync);\n\n\twr_idx += ROUND_UP(len + LEN_SZ, sizeof(uint32_t));\n\twr_idx = idx_cut(pblen, wr_idx);\n\n\tbarrier_dmem_fence_full();\n\tset_wr_idx(pb, wr_idx, sync);\n}\n\nint spsc_pbuf_write(struct spsc_pbuf *pb, const char *buf, uint16_t len)\n{\n\tchar *pbuf;\n\tint outlen;\n\n\tif (len >= SPSC_PBUF_MAX_LEN) {\n\t\treturn -EINVAL;\n\t}\n\n\toutlen = spsc_pbuf_alloc(pb, len, &pbuf);\n\tif (outlen != len) {\n\t\treturn outlen < 0 ? outlen : -ENOMEM;\n\t}\n\n\tmemcpy(pbuf, buf, len);\n\tspsc_pbuf_commit(pb, len);\n\n\treturn len;\n}\n\nuint16_t spsc_pbuf_claim(struct spsc_pbuf *pb, char **buf)\n{\n\t/* Length of the buffer and flags are immutable - avoid reloading. */\n\tconst bool sync = is_Synchronized(pb);\n\tconst uint32_t pblen = pb->common.len * sizeof(uint32_t);\n\tuint32_t wr_idx = get_wr_idx(pb, sync);\n\tuint32_t rd_idx = get_rd_idx(pb, sync);\n\tuint8_t *data = (uint8_t *)get_data(pb, sync);\n\n\tif (wr_idx == rd_idx) {\n\t\treturn 0;\n\t}\n\n\tuint32_t bytes_stored = idx_occupied(pblen, wr_idx, rd_idx);\n\n\t/* Utilization is calculated at claiming to ensure cache consistency. */\n\tif (IS_ENABLED(CONFIG_SPSC_PBUF_UTILIZATION) && (pb->common.flags & SPSC_PBUF_UTILIZATION)) {\n\t\tuint32_t util = GET_UTILIZATION(pb->common.flags);\n\n\t\tif (bytes_stored > util) {\n\t\t\tpb->common.flags = SET_UTILIZATION(pb->common.flags, bytes_stored);\n\t\t\tcache_wb(&pb->common.flags, sizeof(pb->common.flags), sync);\n\t\t}\n\t}\n\n\t/* Read message len. */\n\tif (rd_idx + LEN_SZ <= pblen) {\n\t\tcache_invld(&data[rd_idx], LEN_SZ, sync);\n\t\tuint16_t len = sys_get_be16(&data[rd_idx]);\n\n\t\tif (len > 0) {\n\t\t\tcache_invld(&data[rd_idx + LEN_SZ], len, sync);\n\t\t\t*buf = &data[rd_idx + LEN_SZ];\n\t\t\treturn len;\n\t\t}\n\t}\n\n\t/* If len == 0 or message could not fit at the end of the buffer it indicates\n\t * that buffer wrapped.\n\t */\n\trd_idx = 0;\n\tset_rd_idx(pb, rd_idx, sync);\n\tif (wr_idx == rd_idx) {\n\t\treturn 0;\n\t}\n\n\tcache_invld(&data[rd_idx], LEN_SZ, sync);\n\tuint16_t len = sys_get_be16(&data[rd_idx]);\n\n\tcache_invld(&data[rd_idx + LEN_SZ], len, sync);\n\t*buf = &data[rd_idx + LEN_SZ];\n\n\treturn len;\n}\n\nvoid spsc_pbuf_free(struct spsc_pbuf *pb, uint16_t len)\n{\n\t/* Length of the buffer and flags are immutable - avoid reloading. */\n\tconst bool sync = is_Synchronized(pb);\n\tconst uint32_t pblen = pb->common.len * sizeof(uint32_t);\n\tuint32_t rd_idx = get_rd_idx(pb, sync) + ROUND_UP(len + LEN_SZ, sizeof(uint32_t));\n\tuint8_t *data = (uint8_t *)get_data(pb, sync);\n\n\t/* Handle wrapping if message is at the end of the buffer and no marker\n\t * can be placed.\n\t */\n\tif (rd_idx + LEN_SZ > pblen) {\n\t\trd_idx = 0;\n\t} else {\n\t\trd_idx = idx_cut(pblen, rd_idx);\n\t\t/* Check if wrapping marker is present. If yes, rewind rd_idx to 0\n\t\t * to avoid blocking space.\n\t\t */\n\t\tif (rd_idx != get_wr_idx(pb, sync)) {\n\t\t\tcache_invld(&data[rd_idx], LEN_SZ, sync);\n\t\t\tif (sys_get_be16(&data[rd_idx]) == 0) {\n\t\t\t\trd_idx = 0;\n\t\t\t}\n\t\t}\n\t}\n\n\tbarrier_dmem_fence_full();\n\tset_rd_idx(pb, rd_idx, sync);\n}\n\nint spsc_pbuf_read(struct spsc_pbuf *pb, char *buf, uint16_t len)\n{\n\tchar *pkt;\n\tuint16_t plen = spsc_pbuf_claim(pb, &pkt);\n\n\tif (plen == 0) {\n\t\treturn 0;\n\t}\n\n\tif (buf == NULL) {\n\t\treturn plen;\n\t}\n\n\tif (len < plen) {\n\t\treturn -ENOMEM;\n\t}\n\n\tmemcpy(buf, pkt, plen);\n\tspsc_pbuf_free(pb, plen);\n\n\treturn plen;\n}\n\nint spsc_pbuf_get_utilization(struct spsc_pbuf *pb)\n{\n\tif (!IS_ENABLED(CONFIG_SPSC_PBUF_UTILIZATION)) {\n\t\treturn -ENOTSUP;\n\t}\n\n\tconst bool sync = is_Synchronized(pb);\n\n\tcache_invld(&pb->common.flags, sizeof(pb->common.flags), sync);\n\n\tif (!(pb->common.flags & SPSC_PBUF_UTILIZATION)) {\n\t\treturn -ENOTSUP;\n\t}\n\n\treturn GET_UTILIZATION(pb->common.flags);\n}\n"
+          },
+          "applied_files": [
+            "lib/os/spsc_pbuf.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Failed Compilation Units]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:72:35: error: ‘struct spsc_pbuf_common’ has no member named ‘wr_idx’; did you mean ‘rd_idx’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:75:29: error: ‘union <anonymous>’ has no member named ‘wr_idx’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:75:52: error: ‘union <anonymous>’ has no member named ‘wr_idx’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:77:23: error: ‘union <anonymous>’ has no member named ‘wr_idx’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:83:28: error: ‘struct spsc_pbuf_common’ has no member named ‘wr_idx’; did you mean ‘rd_idx’?\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:87:16: error: ‘union <anonymous>’ has no member named ‘wr_idx’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:88:26: error: ‘union <anonymous>’ has no member named ‘wr_idx’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:88:49: error: ‘union <anonymous>’ has no member named ‘wr_idx’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:106:30: error: ‘union <anonymous>’ has no member named ‘data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:106:48: error: ‘struct spsc_pbuf_common’ has no member named ‘data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:119:46: error: ‘CONFIG_DCACHE_LINE_SIZE’ undeclared (first use in this function); did you mean ‘CONFIG_TIMESLICE_SIZE’?\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:119:42: note: in expansion of macro ‘MAX’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:138:33: error: ‘union <anonymous>’ has no member named ‘data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:139:33: error: ‘struct spsc_pbuf_common’ has no member named ‘data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:150:68: error: ‘union <anonymous>’ has no member named ‘data’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:276:77: error: ‘SPSC_PBUF_UTILIZATION’ undeclared (first use in this function); did you mean ‘SPSC_PBUF_UTILIZATION_BITS’?\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c:378:34: error: ‘SPSC_PBUF_UTILIZATION’ undeclared (first use in this function); did you mean ‘SPSC_PBUF_UTILIZATION_BITS’?",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_0cpy\nPASS - test_0cpy in 0.000 seconds\n===================================================================\nSTART - test_0cpy_corner1\nPASS - test_0cpy_corner1 in 0.000 seconds\n===================================================================\nSTART - test_0cpy_corner2\nPASS - test_0cpy_corner2 in 0.000 seconds\n===================================================================\nSTART - test_0cpy_discard\nPASS - test_0cpy_discard in 0.000 seconds\n===================================================================\nSTART - test_0cpy_smaller\nPASS - test_0cpy_smaller in 0.000 seconds\n===================================================================\nSTART - test_largest_alloc\nPASS - test_largest_alloc in 0.000 seconds\n===================================================================\nSTART - test_spsc_pbuf_ut\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/spsc_pbuf/src/main.c:76: test_spsc_pbuf_flags: wlen not equal to -ENOMEM",
+    "protected_file_count": 4,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3new_runtime_spsc_pbuf_907f069",
+    "api_events": [],
+    "started_at": "2026-11-06T07:57:33+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]
