@@ -54,14 +54,14 @@ from core import llm_retry
 from core.llm_retry import LLMHangError, is_daily_quota, is_transient, pop_events, set_strict_fallbacks
 from core.workflow import build_zephyr_graph, build_devops_docker_cmd
 from core.baseline_pipelines import BASELINE_DEFINITION, run_b1, run_b2, run_b3
-from core.llm_provider import PATCH_LLM_TIMEOUT, set_provider, get_provider, set_single_model, is_single_model, get_model_name
+from core.llm_provider import PATCH_LLM_TIMEOUT, set_provider, get_provider, set_single_model, is_single_model, get_model_name, get_api_key
 from graph_rag.hybrid_retriever import EMBEDDING_MODEL
 from tools.fault_injector import MUTATE_SCRIPT_HOST_PATH, MUTATE_SCRIPT_CONTAINER_PATH
 from tools.qemu_oracle import QemuOracle
 from tools.log_filter import LogFilter
 
 PIPELINE_CHOICES = ("proposed", "b1", "b2", "b3", "openhands", "agentless")
-MODEL_PROVIDER_CHOICES = ("gemini", "anthropic", "openai")
+MODEL_PROVIDER_CHOICES = ("gemini", "anthropic", "openai", "qwen")
 
 load_dotenv()
 
@@ -692,6 +692,8 @@ def collect_run_meta() -> Dict[str, Any]:
         # Key used for embeddings (GEMINI_EMBEDDING_API_KEY, else GEMINI_API_KEY).
         "embedding_key_fingerprint": (lambda k: hashlib.sha256(k.encode()).hexdigest()[:8] if k else None)(
             os.environ.get("GEMINI_EMBEDDING_API_KEY") or os.environ.get("GEMINI_API_KEY")),
+        # 生成模型用的金鑰 (目前供應商；只記指紋)。Generation key of the current provider (fingerprint only).
+        "llm_key_fingerprint": (lambda k: hashlib.sha256(k.encode()).hexdigest()[:8] if k else None)(get_api_key()),
         "sdk_versions": {p: _version(p) for p in ("langchain-core", "langgraph", "langchain-google-genai",
                                                    "google-genai", "langchain-anthropic", "langchain-openai")},
     }

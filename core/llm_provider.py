@@ -73,9 +73,45 @@ _MODEL_BY_PROVIDER_AND_ROLE = {
     # not the gemini-flash-latest alias, which can be repointed); v2 used gemini-2.5-pro
     # (no longer offered to new users).
     "gemini": {"fast": "gemini-3.8-flash", "pro": "gemini-3.8-flash"},
-    "anthropic": {"fast": "claude-haiku-4-5-20251001", "pro": "claude-sonnet-5"},
+    # 2026-11-08 跨模型實驗 (助教提供的金鑰)：Claude 用 claude-sonnet-5-5，Qwen3 走 TUM 的 OpenAI 相容代理。
+    # 都搭配 --single-model，fast 角色也用 pro 模型。
+    # 2026-11-08 cross-model runs (keys from the TA): Claude uses claude-sonnet-5-5; Qwen3 goes through
+    # TUM's OpenAI-compatible proxy. Both run with --single-model, so the fast role uses the pro model too.
+    "anthropic": {"fast": "claude-haiku-5-5", "pro": "claude-sonnet-5-5"},
     "openai": {"fast": "gpt-5-mini", "pro": "gpt-5"},
+    "qwen": {"fast": "qwen.qwen3-235b-a22b-2507", "pro": "qwen.qwen3-235b-a22b-2507"},
 }
+
+# 各供應商的金鑰環境變數，依序找第一個有值的 (.env 裡助教的金鑰叫 Claude_API_KEY / Bedrock_API_KEY)。
+# API-key environment variables per provider, first non-empty wins (the TA's keys are named
+# Claude_API_KEY / Bedrock_API_KEY in .env).
+_API_KEY_ENVS = {"gemini": ("GEMINI_API_KEY",), "anthropic": ("ANTHROPIC_API_KEY", "Claude_API_KEY"),
+                 "openai": ("OPENAI_API_KEY",), "qwen": ("QWEN_API_KEY", "Bedrock_API_KEY")}
+
+# Qwen3 的 OpenAI 相容端點 (TUM SEAI LiteLLM 代理，需在 TUM 網路或 VPN 內)。
+# Qwen3's OpenAI-compatible endpoint (TUM SEAI LiteLLM proxy; reachable from the TUM network / VPN).
+QWEN_BASE_URL = os.environ.get("ZEPHYR_QWEN_BASE_URL", "https://llm-proxy.seai.cit.tum.de")
+
+# 單次輸出上限。Claude 設成 65,536，和 gemini-4-argon 的輸出上限相同，避免上限本身變成混淆變因
+# (claude-sonnet-5-5 最多 128K)。Qwen 未設定時不送 max_tokens (用代理/模型預設)，試跑時要確認預設值。
+# Per-call output cap. Claude uses 65,536, the same as gemini-4-argon's cap, so the cap is not a confound
+# (claude-sonnet-5-5 allows up to 128K). Qwen sends no max_tokens unless set (proxy/model default);
+# check that default in the pilot.
+ANTHROPIC_MAX_TOKENS = int(os.environ.get("ZEPHYR_ANTHROPIC_MAX_TOKENS", "65536"))
+QWEN_MAX_TOKENS = int(os.environ["ZEPHYR_QWEN_MAX_TOKENS"]) if os.environ.get("ZEPHYR_QWEN_MAX_TOKENS") else None
+
+
+def get_api_key(provider: str = None) -> str:
+    """回傳目前 (或指定) 供應商的金鑰，找不到時回傳空字串。不印出金鑰。
+    Returns the key for the current (or given) provider, or "" if none is set. Never printed."""
+    for name in _API_KEY_ENVS.get(provider or _provider, ()):
+        if os.environ.get(name):
+            return os.environ[name]
+    return ""
+
+
+def api_key_env_names(provider: str = None) -> tuple:
+    return _API_KEY_ENVS.get(provider or _provider, ())
 
 _provider = os.environ.get("ZEPHYR_LLM_PROVIDER", _DEFAULT_PROVIDER)
 
@@ -172,9 +208,45 @@ def get_chat_model(role: str, temperature: float = 0, timeout: int = 120) -> Any
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(model=model, temperature=temperature, timeout=timeout, max_retries=1)
     if _provider == "anthropic":
-        from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(model=model, temperature=temperature, timeout=timeout, max_retries=0)
+        # claude-sonnet-5-5 不接受 temperature (非預設值回 400；anthropic SDK 1.x 也沒有這個參數)，
+        # 所以不送，用模型預設；thinking 用模型預設 (adaptive, effort high)。用 streaming 呼叫，
+        # 避免長輸出在非串流請求下被切斷 (invoke 仍回傳完整訊息與 token 用量)。
+        # claude-sonnet-5-5 rejects temperature (non-default values return 400; anthropic SDK 1.x has no
+        # such argument), so none is sent and the model default applies; thinking is the model default
+        # (adaptive, effort high). Calls stream so long outputs are not cut off as non-streaming requests
+        # (invoke still returns the full message and token usage).
+        return _anthropic_chat_model()(model=model, timeout=timeout, max_retries=0, max_tokens=ANTHROPIC_MAX_TOKENS,
+                                       streaming=True, stream_usage=True, api_key=get_api_key())
+    if _provider == "qwen":
+        # OpenAI 相容代理。結構化輸出用 function calling (代理轉到 Bedrock 的 tool use)。
+        # OpenAI-compatible proxy. Structured output uses function calling (the proxy maps it to Bedrock tool use).
+        from langchain_openai import ChatOpenAI
+
+        class _ChatQwen(ChatOpenAI):
+            def with_structured_output(self, schema, **kwargs):
+                kwargs.setdefault("method", "function_calling")
+                return super().with_structured_output(schema, **kwargs)
+
+        extra = {"max_tokens": QWEN_MAX_TOKENS} if QWEN_MAX_TOKENS else {}
+        return _ChatQwen(model=model, temperature=temperature, timeout=timeout, max_retries=0,
+                         base_url=QWEN_BASE_URL, api_key=get_api_key(), **extra)
     if _provider == "openai":
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(model=model, temperature=temperature, timeout=timeout, max_retries=0)
     raise ValueError(f"unknown provider '{_provider}'")  # pragma: no cover - set_provider already validates
+
+
+def _anthropic_chat_model():
+    """ChatAnthropic 子類別：結構化輸出預設用 json_schema (原生 structured output)。claude-sonnet-5-5
+    不接受強制 tool_choice (any/tool 回 400)，而 LangChain 預設的 function_calling 會強制呼叫工具。
+    ChatAnthropic subclass whose structured output defaults to json_schema (native structured output):
+    claude-sonnet-5-5 rejects forced tool_choice (any/tool return 400), which LangChain's default
+    function_calling method uses."""
+    from langchain_anthropic import ChatAnthropic
+
+    class _ChatAnthropicJSON(ChatAnthropic):
+        def with_structured_output(self, schema, **kwargs):
+            kwargs.setdefault("method", "json_schema")
+            return super().with_structured_output(schema, **kwargs)
+
+    return _ChatAnthropicJSON

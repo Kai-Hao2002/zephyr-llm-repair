@@ -85,6 +85,10 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--allow-host", action="append", default=[],
                     help="host:port the agent-server may reach through the allowlist proxy (the LLM API)")
+    # 2026-11-08 跨模型：--temperature none = 不送 (Claude)；--base-url = OpenAI 相容代理 (Qwen)。
+    # 2026-11-08 cross-model: --temperature none sends no temperature (Claude); --base-url for the Qwen proxy.
+    ap.add_argument("--temperature", default="0.0")
+    ap.add_argument("--base-url", default=None)
     args = ap.parse_args()
 
     task = open(args.task_file, encoding="utf-8").read()
@@ -93,8 +97,10 @@ def main() -> None:
                            "timeout_min": args.timeout_min, "status": None, "error": None}
     start = time.time()
 
+    temperature = None if args.temperature.lower() == "none" else float(args.temperature)
     llm = LLM(usage_id="agent", model=args.model, api_key=SecretStr(os.environ["LLM_API_KEY"]),
-              temperature=0.0, timeout=args.llm_timeout, num_retries=3)
+              temperature=temperature, timeout=args.llm_timeout, num_retries=3, base_url=args.base_url)
+    out["temperature"], out["base_url"] = temperature, args.base_url
     agent = Agent(llm=llm, tools=[Tool(name=TerminalTool.name), Tool(name=FileEditorTool.name)])
 
     # 掛在 /zephyrproject/zephyr：映像的 ZEPHYR_BASE 指向這裡 (見 core/workflow.build_devops_docker_cmd)。
