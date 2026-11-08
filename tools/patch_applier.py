@@ -2,7 +2,7 @@
 import os
 import re
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 _NOT_A_PATH_PREFIXES = (">>>>", "<<<<", "====", "---", "+++", "@@", "diff ")
 _SEARCH_MARKER_RE = re.compile(r"^<<<<<<<<\s*SEARCH\s*$", re.MULTILINE)

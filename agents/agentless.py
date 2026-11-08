@@ -10,7 +10,7 @@ patches (the first at temperature 0, the rest at 0.8). Orchestration and validat
 No Zephyr-specific retrieval or knowledge, no iterative feedback, no role split.
 """
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 from langchain_core.prompts import ChatPromptTemplate
 

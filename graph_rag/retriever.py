@@ -1,7 +1,7 @@
 # graph_rag/retriever.py
 import re
 import networkx as nx
-from typing import List, Set
+from typing import List
 from .build_graph import subgraph_to_yaml_context # 引入先前寫好的序列化函數
 
 class GraphRetriever:
