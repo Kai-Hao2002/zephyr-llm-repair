@@ -27,7 +27,7 @@ To ensure high scalability and maintainability, the codebase is deeply decoupled
 ```text
 zephyr-llm-repair/
 │
-├── main.py                     # 系統進入點：初始化參數、啟動 LangGraph 狀態機
+├── evaluate.py                 # 評測進入點：逐筆準備 workspace、執行 pipeline、判定結果
 ├── requirements.txt            # Python 依賴清單 (langgraph, langchain-google-genai, 等)
 ├── Dockerfile                  # 決定性建置環境：打包 Zephyr SDK 與相關依賴
 ├── .env                        # 環境變數設定檔 (如 API Key)
@@ -51,10 +51,6 @@ zephyr-llm-repair/
 │   ├── patch_applier.py        # 在本地或容器內執行精確的字串匹配與替換
 │   ├── log_filter.py           # 分層日誌過濾：剔除常規輸出，提取 Fatal Error
 │   └── qemu_oracle.py          # 測試預言：監控 QEMU stdout，捕捉啟動或崩潰特徵
-│
-├── env_manager/                # 隔離環境與建置管理
-│   ├── docker_manager.py       # 負責啟動/重置 Docker 容器
-│   └── west_executor.py        # 封裝執行 west build 與 west build -t run 的指令
 │
 └── dataset/                    # Zephyr-Eval 評估資料集
     ├── scripts/                # 自動化探勘 GitHub 提交記錄的腳本
@@ -111,11 +107,11 @@ docker build -t zephyr-sandbox -f Dockerfile .
 You can start the repair process by passing the path of the broken Zephyr project or a specific dataset case via the CLI.
 您可以直接透過指令列 (CLI) 傳入發生錯誤的 Zephyr 專案路徑，來啟動修復流程。
 ```bash
-# Run a single repair task (執行單一端到端修復任務)
-python main.py --target ./dataset/cases/bug_001 --max_retries 5
+# Run a single case (執行單一案例)
+python evaluate.py --dataset dataset/cases/final_dataset_v3.json --pipeline proposed --case-id <case_id>
 
-# Run automated benchmark evaluation (啟動自動化基準測試 - 開發中)
-python evaluate.py --dataset ./dataset/cases/ --model gemini-2.5-pro
+# Run the whole dataset (跑整個資料集)
+python evaluate.py --dataset dataset/cases/final_dataset_v3.json --pipeline proposed --all
 ```
 
 ### ⚠️ `evaluate.py` 設計要求：禁止把 `.git` 暴露給待測 agent / Design requirement: never expose `.git` to the agent under evaluation
