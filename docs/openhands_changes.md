@@ -47,3 +47,26 @@ OpenHands SDK 本身不修改。這裡記錄 baseline 的每次設定變動，�
 - **run_meta：** 新增 `patch_llm_timeout`。`openhands` 欄位維持映像、image ID、步數、時間上限。
 - **試跑：** `eval_runs/v4_main/pilot/openhands/` 是 300 秒時跑的（commit 419f09c 之前的設定），2 筆都修好，
   過程沒有逾時。
+
+## 2026-11-08：跨模型 (Claude、Qwen3) 的 runner 參數
+
+- **為什麼：** 助教提供 claude-sonnet-5-5 與 qwen.qwen3-235b-a22b-2507 的金鑰，OpenHands 要能用這兩個模型跑。
+- **OpenHands 相關檔案：**
+  - `tools/openhands_runner.py`：新增 `--temperature` (預設 `0.0`，`none` = 不送) 與 `--base-url` (預設不設)；
+    兩個值記進輸出的 `temperature`、`base_url`。
+  - `core/openhands_pipeline.py`：Claude 傳 `--temperature none` (claude-sonnet-5-5 拒絕非預設溫度)；Qwen 用 LiteLLM
+    字串 `openai/qwen.qwen3-235b-a22b-2507` 加 `--base-url https://llm-proxy.seai.cit.tum.de`，網路白名單放行
+    `llm-proxy.seai.cit.tum.de:443`。金鑰改由 `core.llm_provider.get_api_key()` 取得 (Claude 可用 `Claude_API_KEY`，
+    Qwen 可用 `Bedrock_API_KEY`)。
+- **前後差異：** Gemini 的呼叫完全不變 (仍送 temperature 0、不設 base_url)。任務描述全文沒有變動。
+- **SDK 版本、Docker 映像、Dockerfile、工具、步數與時間上限：** 都沒有變動。
+- **網路白名單：** 仍只放行目前供應商的 LLM API host (新增 Qwen 代理的 host)。
+- **結果目錄：** `eval_runs/x_claude/`、`eval_runs/x_qwen/`。
+- **試跑：** 尚未完成 (Claude 金鑰回 credit balance too low；Qwen 代理在目前網路連不上)。
+
+## 2026-11-08: runner arguments for the cross-model runs (Claude, Qwen3)
+
+- `tools/openhands_runner.py` gains `--temperature` (default `0.0`; `none` sends no temperature) and `--base-url`.
+- `core/openhands_pipeline.py` passes `--temperature none` for Claude and the proxy base URL plus the
+  `openai/` LiteLLM prefix for Qwen; the egress allowlist adds `llm-proxy.seai.cit.tum.de:443`.
+- Gemini calls are unchanged. SDK versions, image, tools, step and time limits are unchanged.

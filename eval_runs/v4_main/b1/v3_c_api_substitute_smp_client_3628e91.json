@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3_c_api_substitute_smp_client_3628e91",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 97.21549820899963,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 935,
+            "output_tokens": 3338
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "subsys/mgmt/mcumgr/smp_client/src/client.c",
+            "content": "/*\n * Copyright (c) 2023 Nordic Semiconductor ASA\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <zephyr/sys/byteorder.h>\n#include <zephyr/net_buf.h>\n#include <zephyr/mgmt/mcumgr/mgmt/mgmt.h>\n#include <zephyr/mgmt/mcumgr/smp/smp.h>\n#include <zephyr/mgmt/mcumgr/smp/smp_client.h>\n#include <zephyr/mgmt/mcumgr/transport/smp.h>\n#include <zephyr/logging/log.h>\n#include <mgmt/mcumgr/transport/smp_internal.h>\n\nLOG_MODULE_REGISTER(mcumgr_smp_client, CONFIG_MCUMGR_SMP_CLIENT_LOG_LEVEL);\n\nstruct smp_client_cmd_entry {\n\tstruct net_buf *nb;\n\tsmp_client_res_fn cb;\n\tvoid *user_data;\n\tint64_t timeout;\n};\n\nstruct smp_client_data {\n\tstruct smp_client_cmd_entry cmd_list[CONFIG_MCUMGR_SMP_CLIENT_MAX_CONCURRENT_REQUEST];\n\tstruct k_work_delayable cmd_timeout_work;\n\tstruct k_mutex lock;\n\tuint8_t smp_seq;\n};\n\nstatic struct smp_client_data client_data;\n\nstatic void smp_client_handle_Timer(struct k_work *work);\n\nstatic struct smp_transport *smp_client_transport_get(int smpt_type)\n{\n\tZ_STRUCT_SECTION_FOREACH(smp_client_transport_entry, entry) {\n\t\tif (entry->smpt->functions.query_valid_check == NULL) {\n\t\t\tif (entry->smpt_type == smpt_type) {\n\t\t\t\treturn entry->smpt;\n\t\t\t}\n\t\t} else {\n\t\t\tif (entry->smpt->functions.query_valid_check(smpt_type)) {\n\t\t\t\treturn entry->smpt;\n\t\t\t}\n\t\t}\n\t}\n\n\treturn NULL;\n}\n\nstruct net_buf *smp_client_buf_allocation(struct smp_client_object *smp_client, uint16_t group,\n\t\t\t\t\t  uint8_t command_id, uint8_t op, enum smp_mcumgr_version_t version)\n{\n\tstruct net_buf *nb;\n\tstruct smp_hdr *uhdr;\n\n\tif (op != MGMT_OP_READ && op != MGMT_OP_WRITE) {\n\t\treturn NULL;\n\t}\n\n\t/* Clear the buffer and allocate from transport pool */\n\tnb = smp_packet_alloc();\n\tif (!nb) {\n\t\treturn NULL;\n\t}\n\n\tuhdr = net_buf_add(nb, sizeof(*uhdr));\n\tuhdr->nh_op = op;\n\tuhdr->nh_flags = 0;\n\tuhdr->nh_len = 0;\n\tuhdr->nh_group = sys_cpu_to_be16(group);\n\tuhdr->nh_seq = 0;\n\tuhdr->nh_id = command_id;\n\tuhdr->nh_version = version;\n\n\treturn nb;\n}\n\nvoid smp_client_buf_free(struct net_buf *nb)\n{\n\tsmp_packet_free(nb);\n}\n\nint smp_client_object_init(struct smp_client_object *smp_client, int smp_type)\n{\n\tsmp_client->smpt = smp_client_transport_get(smp_type);\n\tif (smp_client->smpt) {\n\t\tsmp_client->priv_data = &client_data;\n\t\treturn MGMT_ERR_EOK;\n\t}\n\n\treturn MGMT_ERR_ENOENT;\n}\n\nstatic void smp_client_timeout_reschedule(void)\n{\n\tint64_t min_timeout = INT64_MAX;\n\tint64_t current_time = k_uptime_get();\n\n\tfor (int i = 0; i < CONFIG_MCUMGR_SMP_CLIENT_MAX_CONCURRENT_REQUEST; i++) {\n\t\tif (client_data.cmd_list[i].nb) {\n\t\t\tif (client_data.cmd_list[i].timeout < min_timeout) {\n\t\t\t\tmin_timeout = client_data.cmd_list[i].timeout;\n\t\t\t}\n\t\t}\n\t}\n\n\tif (min_timeout == INT64_MAX) {\n\t\tk_work_cancel_delayable(&client_data.cmd_timeout_work);\n\t\treturn;\n\t}\n\n\tif (min_timeout <= current_time) {\n\t\t/* Trigger timeout handling immediately */\n\t\tk_work_reschedule(&client_data.cmd_timeout_work, K_NO_WAIT);\n\t} else {\n\t\tk_work_reschedule(&client_data.cmd_timeout_work,\n\t\t\t\t  K_MSEC(min_timeout - current_time));\n\t}\n}\n\nstatic void smp_client_handle_Timer(struct k_work *work)\n{\n\tint64_t current_time;\n\tsmp_client_res_fn cb;\n\tvoid *user_data;\n\n\tk_mutex_lock(&client_data.lock, K_FOREVER);\n\tcurrent_time = k_uptime_get();\n\tfor (int i = 0; i < CONFIG_MCUMGR_SMP_CLIENT_MAX_CONCURRENT_REQUEST; i++) {\n\t\tif (client_data.cmd_list[i].nb &&\n\t\t    client_data.cmd_list[i].timeout <= current_time) {\n\t\t\t/* Free buffer */\n\t\t\tsmp_client_buf_free(client_data.cmd_list[i].nb);\n\t\t\tclient_data.cmd_list[i].nb = NULL;\n\t\t\tcb = client_data.cmd_list[i].cb;\n\t\t\tuser_data = client_data.cmd_list[i].user_data;\n\t\t\tk_mutex_unlock(&client_data.lock);\n\t\t\tif (cb) {\n\t\t\t\tcb(NULL, user_data);\n\t\t\t}\n\t\t\tk_mutex_lock(&client_data.lock, K_FOREVER);\n\t\t}\n\t}\n\n\tsmp_client_timeout_reschedule();\n\tk_mutex_unlock(&client_data.lock);\n}\n\nstatic struct smp_client_cmd_entry *smp_client_Entry_allocate(void)\n{\n\tfor (int i = 0; i < CONFIG_MCUMGR_SMP_CLIENT_MAX_CONCURRENT_REQUEST; i++) {\n\t\tif (client_data.cmd_list[i].nb == NULL) {\n\t\t\treturn &client_data.cmd_list[i];\n\t\t}\n\t}\n\n\treturn NULL;\n}\n\nint smp_client_single_response(struct net_buf *nb, const struct smp_hdr *res_hdr)\n{\n\tsmp_client_res_fn cb = NULL;\n\tvoid *user_data = NULL;\n\tstruct smp_hdr *cmd_hdr;\n\n\tk_mutex_lock(&client_data.lock, K_FOREVER);\n\n\tfor (int i = 0; i < CONFIG_MCUMGR_SMP_CLIENT_MAX_CONCURRENT_REQUEST; i++) {\n\t\tif (client_data.cmd_list[i].nb) {\n\t\t\tcmd_hdr = (struct smp_hdr *)client_data.cmd_list[i].nb->data;\n\t\t\tif (cmd_hdr->nh_seq == res_hdr->nh_seq &&\n\t\t\t    cmd_hdr->nh_id == res_hdr->nh_id &&\n\t\t\t    cmd_hdr->nh_group == res_hdr->nh_group) {\n\t\t\t\tif ((cmd_hdr->nh_op == MGMT_OP_READ &&\n\t\t\t\t     res_hdr->nh_op == MGMT_OP_READ_RSP) ||\n\t\t\t\t    (cmd_hdr->nh_op == MGMT_OP_WRITE &&\n\t\t\t\t     res_hdr->nh_op == MGMT_OP_WRITE_RSP)) {\n\t\t\t\t\t/* Free command buffer */\n\t\t\t\t\tsmp_client_buf_free(client_data.cmd_list[i].nb);\n\t\t\t\t\tclient_data.cmd_list[i].nb = NULL;\n\t\t\t\t\tcb = client_data.cmd_list[i].cb;\n\t\t\t\t\tuser_data = client_data.cmd_list[i].user_data;\n\t\t\t\t\tbreak;\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n\n\tif (cb) {\n\t\tsmp_client_timeout_reschedule();\n\t\tk_mutex_unlock(&client_data.lock);\n\t\tcb(nb, user_data);\n\t} else {\n\t\tk_mutex_unlock(&client_data.lock);\n\t}\n\n\tsmp_client_buf_free(nb);\n\n\treturn MGMT_ERR_EOK;\n}\n\nint smp_client_send_cmd(struct smp_client_object *smp_client, struct net_buf *nb,\n\t\t\tsmp_client_res_fn cb, void *user_data, int timeout_in_sec)\n{\n\tstruct smp_client_cmd_entry *cmd_entry;\n\tstruct smp_hdr *uhdr;\n\tint rc;\n\n\tif (nb->len < sizeof(*uhdr)) {\n\t\tLOG_ERR(\"Drop invalid packet before sending.\");\n\t\treturn MGMT_ERR_EINVAL;\n\t}\n\n\tk_mutex_lock(&client_data.lock, K_FOREVER);\n\tcmd_entry = smp_client_Entry_allocate();\n\tif (!cmd_entry) {\n\t\tk_mutex_unlock(&client_data.lock);\n\t\treturn MGMT_ERR_ENOMEM;\n\t}\n\t/* Give sequence number and set length */\n\tuhdr = (struct smp_hdr *)nb->data;\n\tuhdr->nh_seq = client_data.smp_seq++;\n\tuhdr->nh_len = sys_cpu_to_be16(nb->len - sizeof(*uhdr));\n\n\trc = smp_client->smpt->functions.output(nb);\n\tif (rc) {\n\t\tk_mutex_unlock(&client_data.lock);\n\t\treturn rc;\n\t}\n\n\tcmd_entry->nb = nb;\n\tcmd_entry->cb = cb;\n\tcmd_entry->user_data = user_data;\n\tcmd_entry->timeout = k_uptime_get() + ((int64_t)timeout_in_sec * 1000);\n\n\tsmp_client_timeout_reschedule();\n\tk_mutex_unlock(&client_data.lock);\n\n\treturn MGMT_ERR_EOK;\n}\n\nstatic int smp_client_init(void)\n{\n\tk_mutex_init(&client_data.lock);\n\tfor (int i = 0; i < CONFIG_MCUMGR_SMP_CLIENT_MAX_CONCURRENT_REQUEST; i++) {\n\t\tclient_data.cmd_list[i].nb = NULL;\n\t}\n\tk_work_init_delayable(&client_data.cmd_timeout_work, smp_client_handle_Timer);\n\tclient_data.smp_seq = 0;\n\treturn 0;\n}\n\nSYS_INIT(smp_client_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);\n"
+          },
+          "applied_files": [
+            "subsys/mgmt/mcumgr/smp_client/src/client.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Failed Compilation Units]\n/zephyrproject/zephyr/subsys/mgmt/mcumgr/smp_client/src/client.c\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/mgmt/mcumgr/smp_client/src/client.c:27:46: error: ‘CONFIG_MCUMGR_SMP_CLIENT_MAX_CONCURRENT_REQUEST’ undeclared here (not in a function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/mgmt/mcumgr/smp_client/src/client.c:37:30: error: static declaration of ‘smp_client_transport_get’ follows non-static declaration\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/mgmt/mcumgr/smp_client/src/client.c:39:34: error: ‘smp_client_transport_entry’ undeclared (first use in this function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/mgmt/mcumgr/smp_client/src/client.c:39:62: error: ‘entry’ undeclared (first use in this function)\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/mgmt/mcumgr/smp_client/src/client.c:39:68: error: expected ‘;’ before ‘{’ token\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/subsys/mgmt/mcumgr/smp_client/src/client.c:91:27: error: ‘struct smp_client_object’ has no member named ‘priv_data’\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[132/139] Building C object zephyr/kernel/CMakeFiles/kernel.dir/timeout.c.obj\n[133/139] Building C object zephyr/kernel/CMakeFiles/kernel.dir/dynamic_disabled.c.obj\n[134/139] Building C object zephyr/kernel/CMakeFiles/kernel.dir/sched.c.obj\n[135/139] Linking C static library zephyr/kernel/libkernel.a\n[136/139] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[137/139] Building native simulator runner, and linking final executable\n[138/139] Running utility command for native_runner_executable\n[138/139] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.0-rc1 ***\nRunning TESTSUITE smp_client\n===================================================================\nSTART - test_buf_alloc\nPASS - test_buf_alloc in 0.000 seconds\n===================================================================\nSTART - test_msg_response_handler\nPASS - test_msg_response_handler in 0.000 seconds\n===================================================================\nSTART - test_msg_send_timeout\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/mgmt/mcumgr/smp_client/src/main.c:72: smp_client_test_msg_send_timeout: (response_ptr not equal to &testing_user_data)",
+    "protected_file_count": 5,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3_c_api_substitute_smp_client_3628e91",
+    "api_events": [],
+    "started_at": "2026-11-05T20:36:29+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

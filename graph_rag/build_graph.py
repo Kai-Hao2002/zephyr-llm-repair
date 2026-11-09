@@ -3,7 +3,6 @@ import networkx as nx
 import yaml
 import pickle
 import os
-from typing import Dict, Any
 
 from .parsers.kconfig_parser import KconfigParser
 from .parsers.dts_parser import DTSParser

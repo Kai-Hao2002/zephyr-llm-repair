@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3_runtime_i2c_rtio_copy_pool_exhausted_nullcheck_aa50e83",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 129.03765487670898,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 1149,
+            "output_tokens": 5419
+          }
+        ],
+        "trajectory": {
+          "stage": "build",
+          "status": "eof_no_boot",
+          "patch": {
+            "filepath": "drivers/i2c/i2c_rtio.c",
+            "content": "/*\n * Copyright (c) 2023 Google LLC\n * Copyright (c) 2024 Croxel Inc.\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/drivers/i2c.h>\n#include <zephyr/drivers/i2c/rtio.h>\n#include <zephyr/rtio/rtio.h>\n#include <zephyr/rtio/work.h>\n#include <zephyr/sys/mpsc_lockfree.h>\n\n#include <zephyr/logging/log.h>\nLOG_MODULE_REGISTER(i2c_rtio, CONFIG_I2C_LOG_LEVEL);\n\nconst struct rtio_iodev_api i2c_iodev_api = {\n\t.submit = i2c_iodev_submit,\n};\n\nstruct rtio_sqe *i2c_rtio_copy(struct rtio *r,\n\t\t\t       struct rtio_iodev *iodev,\n\t\t\t       const struct i2c_msg *msgs,\n\t\t\t       uint8_t num_msgs)\n{\n\t__ASSERT(num_msgs > 0, \"Expecting at least one message to copy\");\n\n\tstruct rtio_sqe *sqe = NULL;\n\n\tfor (uint8_t i = 0; i < num_msgs; i++) {\n\t\tsqe = rtio_sqe_acquire(r);\n\n\t\tif (sqe == NULL) {\n\t\t\trtio_sqe_drop_all(r);\n\t\t\treturn NULL;\n\t\t}\n\n\t\tif (msgs[i].flags & I2C_MSG_READ) {\n\t\t\trtio_sqe_prep_read(sqe, iodev, RTIO_PRIO_NORM,\n\t\t\t\t\t   msgs[i].buf, msgs[i].len,\n\t\t\t\t\t   NULL);\n\t\t} else {\n\t\t\trtio_sqe_prep_write(sqe, iodev, RTIO_PRIO_NORM,\n\t\t\t\t\t    msgs[i].buf, msgs[i].len,\n\t\t\t\t\t    NULL);\n\t\t}\n\t\tsqe->flags |= RTIO_SQE_TRANSACTION;\n\t\tsqe->iodev_flags =\n\t\t\t((msgs[i].flags & I2C_MSG_STOP) ? RTIO_IODEV_I2C_STOP : 0) |\n\t\t\t((msgs[i].flags & I2C_MSG_RESTART) ? RTIO_IODEV_I2C_RESTART : 0) |\n\t\t\t((msgs[i].flags & I2C_MSG_ADDR_10_BITS) ? RTIO_IODEV_I2C_10_BITS : 0);\n\t}\n\n\tsqe->flags &= ~RTIO_SQE_TRANSACTION;\n\n\treturn sqe;\n}\n\nstruct rtio_sqe *i2c_rtio_copy_reg_write_byte(struct rtio *r,\n\t\t\t\t\t      struct rtio_iodev *iodev,\n\t\t\t\t\t      uint8_t reg_addr,\n\t\t\t\t\t      uint8_t data)\n{\n\tstruct rtio_sqe *sqe = rtio_sqe_acquire(r);\n\tstruct i2c_msg msg;\n\n\tif (sqe == NULL) {\n\t\treturn NULL;\n\t}\n\n\t/* Similar to how syntactic sugar function: i2c_reg_write_byte\n\t * wraps the operation as single message starting with two bytes.\n\t */\n\tuint8_t tx_buf[2] = {reg_addr, data};\n\n\tmsg.buf = tx_buf;\n\tmsg.len = sizeof(tx_buf);\n\tmsg.flags = I2C_MSG_WRITE | I2C_MSG_STOP;\n\n\trtio_sqe_prep_tiny_write(sqe, iodev, RTIO_PRIO_NORM, msg.buf, msg.len, NULL);\n\tsqe->iodev_flags = RTIO_IODEV_I2C_STOP;\n\n\treturn sqe;\n}\n\nstruct rtio_sqe *i2c_rtio_copy_reg_burst_read(struct rtio *r,\n\t\t\t\t\t      struct rtio_iodev *iodev,\n\t\t\t\t\t      uint8_t start_addr,\n\t\t\t\t\t      void *buf,\n\t\t\t\t\t      size_t num_bytes)\n{\n\tstruct i2c_msg msgs[2];\n\tstruct rtio_sqe *sqe;\n\n\tsqe = rtio_sqe_acquire(r);\n\tif (sqe == NULL) {\n\t\treturn NULL;\n\t}\n\n\t/* Similar to how syntactic sugar function: i2c_burst_read\n\t * wraps the operation as two messages.\n\t */\n\tmsgs[0].buf = &start_addr;\n\tmsgs[0].len = 1U;\n\tmsgs[0].flags = I2C_MSG_WRITE;\n\n\trtio_sqe_prep_tiny_write(sqe, iodev, RTIO_PRIO_NORM,\n\t\t\t\t msgs[0].buf, msgs[0].len, NULL);\n\tsqe->flags |= RTIO_SQE_TRANSACTION;\n\n\tmsgs[1].buf = buf;\n\tmsgs[1].len = num_bytes;\n\tmsgs[1].flags = I2C_MSG_RESTART | I2C_MSG_READ | I2C_MSG_STOP;\n\n\tsqe = i2c_rtio_copy(r, iodev, &msgs[1], 1);\n\tif (sqe == NULL) {\n\t\treturn NULL;\n\t}\n\n\t/* Clear the last transaction flag */\n\tsqe->flags &= ~RTIO_SQE_TRANSACTION;\n\n\treturn sqe;\n}\n\nstatic void i2c_iodev_submit_work_handler(struct rtio_iodev_sqe *txn_first)\n{\n\tstruct i2c_dt_spec *dt_spec = txn_first->sqe.iodev->data;\n\tconst struct device *dev = dt_spec->bus;\n\n\tLOG_DBG(\"Sync RTIO work item for: %p\", (void *)txn_first);\n\n\tuint32_t num_msgs = 0;\n\tint rc = 0;\n\tstruct rtio_iodev_sqe *txn_last = txn_first;\n\n\t/* Count the number of messages in the transaction so we can\n\t * allocate the array of messages on the stack.\n\t */\n\tdo {\n\t\tswitch (txn_last->sqe.op) {\n\t\tcase RTIO_OP_RX:\n\t\tcase RTIO_OP_TX:\n\t\tcase RTIO_OP_TINY_TX:\n\t\t\tnum_msgs++;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tLOG_ERR(\"Invalid op code %d for submission %p\\n\",\n\t\t\t\ttxn_last->sqe.op, (void *)&txn_last->sqe);\n\t\t\trc = -EIO;\n\t\t\tbreak;\n\t\t}\n\t\ttxn_last = rtio_txn_next(txn_last);\n\t} while (rc == 0 && txn_last != NULL);\n\n\tif (rc != 0) {\n\t\trtio_iodev_sqe_err(txn_first, rc);\n\t\treturn;\n\t}\n\n\t/* Allocate the msgs on the stack, MISRA doesn't like VLAs so we need\n\t * a maximum number of messages here. We'll use\n\t * CONFIG_I2C_RTIO_FALLBACK_MSGS.\n\t */\n\tif (num_msgs > CONFIG_I2C_RTIO_FALLBACK_MSGS) {\n\t\tLOG_ERR(\"At most CONFIG_I2C_RTIO_FALLBACK_MSGS\" \"(%d)\"\n\t\t\t\" submissions in a transaction are allowed in the default handler\",\n\t\t\tCONFIG_I2C_RTIO_FALLBACK_MSGS);\n\t\trtio_iodev_sqe_err(txn_first, -ENOMEM);\n\t\treturn;\n\t}\n\tstruct i2c_msg msgs[CONFIG_I2C_RTIO_FALLBACK_MSGS];\n\n\t/* Initialize the messages and send the transfer */\n\ttxn_last = txn_first;\n\tfor (int i = 0; i < num_msgs; i++) {\n\t\tswitch (txn_last->sqe.op) {\n\t\tcase RTIO_OP_RX:\n\t\t\tmsgs[i].buf = txn_last->sqe.rx.buf;\n\t\t\tmsgs[i].len = txn_last->sqe.rx.buf_len;\n\t\t\tmsgs[i].flags = I2C_MSG_READ;\n\t\t\tbreak;\n\t\tcase RTIO_OP_TX:\n\t\t\tmsgs[i].buf = (uint8_t *)txn_last->sqe.tx.buf;\n\t\t\tmsgs[i].len = txn_last->sqe.tx.buf_len;\n\t\t\tmsgs[i].flags = I2C_MSG_WRITE;\n\t\t\tbreak;\n\t\tcase RTIO_OP_TINY_TX:\n\t\t\tmsgs[i].buf = (uint8_t *)txn_last->sqe.tiny_tx.buf;\n\t\t\tmsgs[i].len = txn_last->sqe.tiny_tx.buf_len;\n\t\t\tmsgs[i].flags = I2C_MSG_WRITE;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\trc = -EIO;\n\t\t\tbreak;\n\t\t}\n\t\tmsgs[i].flags |=\n\t\t\t((txn_last->sqe.iodev_flags & RTIO_IODEV_I2C_STOP) ? I2C_MSG_STOP : 0) |\n\t\t\t((txn_last->sqe.iodev_flags & RTIO_IODEV_I2C_RESTART) ?\n\t\t\t\tI2C_MSG_RESTART : 0) |\n\t\t\t((txn_last->sqe.iodev_flags & RTIO_IODEV_I2C_10_BITS) ?\n\t\t\t\tI2C_MSG_ADDR_10_BITS : 0);\n\n\t\ttxn_last = rtio_txn_next(txn_last);\n\t}\n\n\tif (rc == 0) {\n\t\t__ASSERT_NO_MSG(num_msgs > 0);\n\n\t\trc = i2c_transfer(dev, msgs, num_msgs, dt_spec->addr);\n\t}\n\n\tif (rc != 0) {\n\t\trtio_iodev_sqe_err(txn_first, rc);\n\t} else {\n\t\trtio_iodev_sqe_ok(txn_first, 0);\n\t}\n}\n\nvoid i2c_iodev_submit_fallback(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe)\n{\n\tLOG_DBG(\"Executing fallback for dev: %p, sqe: %p\", (void *)dev, (void *)iodev_sqe);\n\n\tstruct rtio_work_req *req = rtio_work_req_alloc();\n\n\tif (req == NULL) {\n\t\trtio_iodev_sqe_err(iodev_sqe, -ENOMEM);\n\t\treturn;\n\t}\n\n\trtio_work_req_submit(req, iodev_sqe, i2c_iodev_submit_work_handler);\n}\n\nvoid i2c_rtio_init(struct i2c_rtio *ctx)\n{\n\tk_sem_init(&ctx->lock, 1, 1);\n\tmpsc_init(&ctx->io_q);\n\tctx->txn_head = NULL;\n\tctx->txn_curr = NULL;\n\tctx->dt_spec.bus = NULL;\n\tctx->iodev.data = &ctx->dt_spec;\n\tctx->iodev.api = &i2c_iodev_api;\n}\n\n/**\n * @brief Complete the current transaction (Wait for start/stop Included)\n *\n * @retval true If a new transaction is ready to start immediately\n * @retval false If no more transactions are left on the queue\n */\nbool i2c_rtio_complete(struct i2c_rtio *ctx, int status)\n{\n\t/* On error, bail across all the transactions */\n\tif (status < 0) {\n\t\trtio_iodev_sqe_err(ctx->txn_head, status);\n\t\treturn i2c_rtio_next(ctx, false);\n\t}\n\n\t/* Try to move on to the next message in the multi-msg transaction */\n\tif (i2c_rtio_next(ctx, true)) {\n\t\treturn true;\n\t}\n\n\trtio_iodev_sqe_ok(ctx->txn_head, status);\n\treturn i2c_rtio_next(ctx, false);\n}\n\n/**\n * @brief Move on to the next transaction or transaction piece\n *\n * @retval true If a new transaction, or part of one, is ready to start\n * @retval false If no more transactions are left on the queue\n */\nbool i2c_rtio_next(struct i2c_rtio *ctx, bool completion)\n{\n\tk_sem_take(&ctx->lock, K_FOREVER);\n\n\t/* Already working on something, bail early */\n\tif (!completion && ctx->txn_head != NULL) {\n\t\tk_sem_give(&ctx->lock);\n\t\treturn false;\n\t}\n\n\tif (completion && ctx->txn_curr != NULL) {\n\t\tctx->txn_curr = rtio_txn_next(ctx->txn_curr);\n\n\t\t/* We have another part of the same transaction to process */\n\t\tif (ctx->txn_curr != NULL) {\n\t\t\tk_sem_give(&ctx->lock);\n\t\t\treturn true;\n\t\t}\n\t}\n\n\tstruct mpsc_node *next = mpsc_pop(&ctx->io_q);\n\n\t/* We have another entirely new transaction in the queue */\n\tif (next != NULL) {\n\t\tstruct rtio_iodev_sqe *next_sqe =\n\t\t\tCONTAINER_OF(next, struct rtio_iodev_sqe, q);\n\n\t\tctx->txn_head = next_sqe;\n\t\tctx->txn_curr = next_sqe;\n\t\tk_sem_give(&ctx->lock);\n\t\treturn true;\n\t}\n\n\t/* Completely done with the queue for now */\n\tctx->txn_head = NULL;\n\tctx->txn_curr = NULL;\n\tk_sem_give(&ctx->lock);\n\treturn false;\n}\n\nbool i2c_rtio_submit(struct i2c_rtio *ctx, struct rtio_iodev_sqe *iodev_sqe)\n{\n\tmpsc_push(&ctx->io_q, &iodev_sqe->q);\n\treturn i2c_rtio_next(ctx, false);\n}\n\nint i2c_rtio_transfer(struct i2c_rtio *ctx, struct i2c_msg *msgs, uint8_t num_msgs, uint16_t addr)\n{\n\tstruct rtio_iodev *iodev = &ctx->iodev;\n\tstruct rtio * const r = ctx->r;\n\tstruct rtio_sqe *sqe = NULL;\n\tstruct rtio_cqe *cqe = NULL;\n\tint res = 0;\n\n\tk_sem_take(&ctx->lock, K_FOREVER);\n\n\tctx->dt_spec.addr = addr;\n\n\tsqe = i2c_rtio_copy(r, iodev, msgs, num_msgs);\n\tif (sqe == NULL) {\n\t\tLOG_ERR(\"Not enough submission queue entries\");\n\t\tres = -ENOMEM;\n\t\tgoto out;\n\t}\n\n\trtio_submit(r, 1);\n\n\tcqe = rtio_cqe_consume(r);\n\twhile (cqe != NULL) {\n\t\tres = cqe->result;\n\t\trtio_cqe_release(r, cqe);\n\t\tcqe = rtio_cqe_consume(r);\n\t}\n\nout:\n\tk_sem_give(&ctx->lock);\n\treturn res;\n}\n\nint i2c_rtio_Configure(struct i2c_rtio *ctx, uint32_t i2c_config)\n{\n\tstruct rtio_iodev *iodev = &ctx->iodev;\n\tstruct rtio * const r = ctx->r;\n\tstruct rtio_sqe *sqe = NULL;\n\tstruct rtio_cqe *cqe = NULL;\n\tint res = 0;\n\n\tk_sem_take(&ctx->lock, K_FOREVER);\n\n\tsqe = rtio_sqe_acquire(r);\n\tif (sqe == NULL) {\n\t\tLOG_ERR(\"Not enough submission queue entries\");\n\t\tres = -ENOMEM;\n\t\tgoto out;\n\t}\n\n\tsqe->op = RTIO_OP_I2C_CONFIGURE;\n\tsqe->iodev = iodev;\n\tsqe->i2c_config = i2c_config;\n\n\trtio_submit(r, 1);\n\n\tcqe = rtio_cqe_consume(r);\n\tres = cqe->result;\n\trtio_cqe_release(r, cqe);\n\nout:\n\tk_sem_give(&ctx->lock);\n\treturn res;\n}\n\nint i2c_rtio_recover(struct i2c_rtio *ctx)\n{\n\tstruct rtio_iodev *iodev = &ctx->iodev;\n\tstruct rtio * const r = ctx->r;\n\tstruct rtio_sqe *sqe = NULL;\n\tstruct rtio_cqe *cqe = NULL;\n\tint res = 0;\n\n\tk_sem_take(&ctx->lock, K_FOREVER);\n\n\tsqe = rtio_sqe_acquire(r);\n\tif (sqe == NULL) {\n\t\tLOG_ERR(\"Not enough submission queue entries\");\n\t\tres = -ENOMEM;\n\t\tgoto out;\n\t}\n\n\tsqe->op = RTIO_OP_I2C_RECOVER;\n\tsqe->iodev = iodev;\n\n\trtio_submit(r, 1);\n\n\tcqe = rtio_cqe_consume(r);\n\tres = cqe->result;\n\trtio_cqe_release(r, cqe);\n\nout:\n\tk_sem_give(&ctx->lock);\n\treturn res;\n}\n"
+          },
+          "applied_files": [
+            "drivers/i2c/i2c_rtio.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Failed Compilation Units]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:234:6: error: conflicting types for ‘i2c_rtio_init’; have ‘void(struct i2c_rtio *)’\n\n[C/C++ Compilation Error Detected]\n/zephyrproject/zephyr/drivers/i2c/i2c_rtio.c:274:6: error: conflicting types for ‘i2c_rtio_next’; have ‘_Bool(struct i2c_rtio *, _Bool)’\n\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw:    R    P len=03:\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw: contents:\nd3 7f f5                                         |...\nPASS - test_fallback_transaction in 0.000 seconds\n===================================================================\nSTART - test_fallback_transaction_error\n[00:00:00.000,000] <dbg> i2c_rtio.i2c_iodev_submit_fallback: Executing fallback for dev: 0x805bae8, sqe: 0x8060b30\n[00:00:00.000,000] <dbg> i2c_rtio.i2c_iodev_submit_work_handler: Sync RTIO work item for: 0x8060b30\n[00:00:00.000,000] <dbg> i2c_emul_ctlr.i2c_emul_transfer: i2c_emul_transfer(dev=0x805bae8, addr=0x80)\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw: I2C msg: i2c@100, addr=80\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw:    R      len=03:\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw: contents:\nd3 7f f5                                         |...\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw:    R    P len=03:\n[00:00:00.000,000] <dbg> i2c.i2c_dump_msgs_rw: contents:\nd3 7f f5                                         |...\nPASS - test_fallback_transaction_error in 0.000 seconds\n===================================================================\nSTART - test_i2c_rtio_copy_pool_exhausted\nSegmentation fault",
+    "protected_file_count": 8,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3_runtime_i2c_rtio_copy_pool_exhausted_nullcheck_aa50e83",
+    "api_events": [],
+    "started_at": "2026-11-06T00:07:20+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

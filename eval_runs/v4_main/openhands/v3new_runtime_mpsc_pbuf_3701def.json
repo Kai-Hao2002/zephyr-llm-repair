@@ -1,0 +1,307 @@
+[
+  {
+    "case_id": "v3new_runtime_mpsc_pbuf_3701def",
+    "category": "runtime_crash",
+    "pipeline": "openhands",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "resolved",
+    "iterations": 12,
+    "ttr_seconds": 462.8982458114624,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": true,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "openhands",
+            "model": "gemini-4-argon",
+            "input_tokens": 280098,
+            "output_tokens": 2507,
+            "llm_calls": 9,
+            "cache_read_tokens": 223149,
+            "reasoning_tokens": 1075
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "success",
+          "patch": null,
+          "applied_files": [
+            "lib/os/mpsc_pbuf.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "Zephyr OS successfully booted.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_item_put_word_ext_overwrite\nPASS - test_item_put_word_ext_overwrite in 0.000 seconds\n===================================================================\nSTART - test_overwrite\nPASS - test_overwrite in 0.000 seconds\n===================================================================\nSTART - test_overwrite_consistency\nPASS - test_overwrite_consistency in 0.000 seconds\n===================================================================\nSTART - test_overwrite_while_claimed2\nPASS - test_overwrite_while_claimed2 in 0.000 seconds\n===================================================================\nSTART - test_overwrite_while_claimed\nPASS - test_overwrite_while_claimed in 0.000 seconds\n===================================================================\nSTART - test_pending_alloc\nPASS - test_pending_alloc in 0.040 seconds\n===================================================================\nSTART - test_put_data_overwrite\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/mpsc_pbuf/src/main.c:63: drop: drop_cnt < exp_drop_cnt is false",
+    "protected_file_count": 5,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_openhands/openhands/v3new_runtime_mpsc_pbuf_3701def",
+    "openhands": {
+      "status": "finished",
+      "error": null,
+      "steps": 12,
+      "llm_calls": 9,
+      "input_tokens": 280098,
+      "output_tokens": 2507,
+      "cache_read_tokens": 223149,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 1075,
+      "cost": 0.0,
+      "wall_seconds": 357.0804901123047,
+      "model": "gemini/gemini-4-argon",
+      "image": "zephyr-oh-agent:1.55.1-z2",
+      "max_steps": 50,
+      "timeout_min": 40.0,
+      "egress_allowed": [
+        "generativelanguage.googleapis.com:443"
+      ],
+      "egress_log": {
+        "allowed": 2,
+        "denied": [
+          "CONNECT raw.githubusercontent.com:443 HTTP/1.1"
+        ],
+        "upstream_errors": []
+      },
+      "changed_files": [
+        "lib/os/mpsc_pbuf.c"
+      ],
+      "final_contents": {
+        "lib/os/mpsc_pbuf.c": "/*\n * Copyright (c) 2021 Nordic Semiconductor\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n#include <zephyr/sys/minmax.h>\n#include <zephyr/sys/mpsc_pbuf.h>\n\n#define MPSC_PBUF_DEBUG 0\n\n#define MPSC_PBUF_DBG(buffer, ...) do { \\\n\tif (MPSC_PBUF_DEBUG) { \\\n\t\tprintk(__VA_ARGS__); \\\n\t\tif (buffer) { \\\n\t\t\tmpsc_state_print(buffer); \\\n\t\t} \\\n\t} \\\n} while (false)\n\nstatic inline void mpsc_state_print(struct mpsc_pbuf_buffer *buffer)\n{\n\tif (MPSC_PBUF_DEBUG) {\n\t\tprintk(\", wr:%d/%d, rd:%d/%d\\n\",\n\t\t\tbuffer->wr_idx, buffer->tmp_wr_idx,\n\t\t\tbuffer->rd_idx, buffer->tmp_rd_idx);\n\t}\n}\n\nvoid mpsc_pbuf_init(struct mpsc_pbuf_buffer *buffer,\n\t\t    const struct mpsc_pbuf_buffer_config *cfg)\n{\n\tmemset(buffer, 0, offsetof(struct mpsc_pbuf_buffer, buf));\n\tbuffer->get_wlen = cfg->get_wlen;\n\tbuffer->notify_drop = cfg->notify_drop;\n\tbuffer->buf = cfg->buf;\n\tbuffer->size = cfg->size;\n\tbuffer->max_usage = 0;\n\tbuffer->flags = cfg->flags;\n\n\tif (is_power_of_two(buffer->size)) {\n\t\tbuffer->flags |= MPSC_PBUF_SIZE_POW2;\n\t}\n\n\tif (IS_ENABLED(CONFIG_MULTITHREADING)) {\n\t\tint err;\n\n\t\terr = k_sem_init(&buffer->sem, 0, 1);\n\t\t__ASSERT_NO_MSG(err == 0);\n\t\tARG_UNUSED(err);\n\t}\n}\n\n/* Calculate free space available or till end of buffer.\n *\n * @param buffer Buffer.\n * @param[out] res Destination where free space is written.\n *\n * @retval true when space was calculated until end of buffer (and there might\n * be more space available after wrapping.\n * @retval false When result is total free space.\n */\nstatic inline bool free_space(struct mpsc_pbuf_buffer *buffer, uint32_t *res)\n{\n\tif (buffer->flags & MPSC_PBUF_FULL) {\n\t\t*res = 0;\n\t\treturn false;\n\t}\n\n\tif (buffer->rd_idx > buffer->tmp_wr_idx) {\n\t\t*res =  buffer->rd_idx - buffer->tmp_wr_idx;\n\t\treturn false;\n\t}\n\t*res = buffer->size - buffer->tmp_wr_idx;\n\n\treturn true;\n}\n\n/* Get amount of valid data.\n *\n * @param buffer Buffer.\n * @param[out] res Destination where available space is written.\n *\n * @retval true when space was calculated until end of buffer (and there might\n * be more space available after wrapping.\n * @retval false When result is total free space.\n */\nstatic inline bool available(struct mpsc_pbuf_buffer *buffer, uint32_t *res)\n{\n\tif (buffer->flags & MPSC_PBUF_FULL || buffer->tmp_rd_idx > buffer->wr_idx) {\n\t\t*res = buffer->size - buffer->tmp_rd_idx;\n\t\treturn true;\n\t}\n\n\t*res = (buffer->wr_idx - buffer->tmp_rd_idx);\n\n\treturn false;\n}\n\nstatic inline uint32_t get_usage(struct mpsc_pbuf_buffer *buffer)\n{\n\tuint32_t f;\n\n\tif (free_space(buffer, &f)) {\n\t\tf += (buffer->rd_idx - 1);\n\t}\n\n\treturn buffer->size - 1 - f;\n}\n\nstatic inline void max_utilization_update(struct mpsc_pbuf_buffer *buffer)\n{\n\tif (!(buffer->flags & MPSC_PBUF_MAX_UTILIZATION)) {\n\t\treturn;\n\t}\n\n\tbuffer->max_usage = max(buffer->max_usage, get_usage(buffer));\n}\n\nstatic inline bool is_valid(union mpsc_pbuf_generic *item)\n{\n\treturn item->hdr.valid;\n}\n\nstatic inline bool is_invalid(union mpsc_pbuf_generic *item)\n{\n\treturn !item->hdr.valid && !item->hdr.busy;\n}\n\nstatic inline uint32_t idx_inc(struct mpsc_pbuf_buffer *buffer,\n\t\t\t\tuint32_t idx, int32_t val)\n{\n\tuint32_t i = idx + val;\n\n\tif (buffer->flags & MPSC_PBUF_SIZE_POW2) {\n\t\treturn i & (buffer->size - 1);\n\t}\n\n\treturn (i >= buffer->size) ? i - buffer->size : i;\n}\n\nstatic inline uint32_t get_skip(union mpsc_pbuf_generic *item)\n{\n\tif (item->hdr.busy && !item->hdr.valid) {\n\t\treturn item->skip.len;\n\t}\n\n\treturn 0;\n}\n\n\nstatic ALWAYS_INLINE void tmp_wr_idx_inc(struct mpsc_pbuf_buffer *buffer, int32_t wlen)\n{\n\tbuffer->tmp_wr_idx = idx_inc(buffer, buffer->tmp_wr_idx, wlen);\n\tif (buffer->tmp_wr_idx == buffer->rd_idx) {\n\t\tbuffer->flags |= MPSC_PBUF_FULL;\n\t}\n}\n\nstatic void rd_idx_inc(struct mpsc_pbuf_buffer *buffer, int32_t wlen)\n{\n\tbuffer->rd_idx = idx_inc(buffer, buffer->rd_idx, wlen);\n\tbuffer->flags &= ~MPSC_PBUF_FULL;\n}\n\nstatic void add_skip_item(struct mpsc_pbuf_buffer *buffer, uint32_t wlen)\n{\n\tunion mpsc_pbuf_generic skip = {\n\t\t.skip = { .valid = 0, .busy = 1, .len = wlen }\n\t};\n\n\tbuffer->buf[buffer->tmp_wr_idx] = skip.raw;\n\ttmp_wr_idx_inc(buffer, wlen);\n\tbuffer->wr_idx = idx_inc(buffer, buffer->wr_idx, wlen);\n}\n\nstatic bool drop_item_locked(struct mpsc_pbuf_buffer *buffer,\n\t\t\t     uint32_t free_wlen,\n\t\t\t     union mpsc_pbuf_generic **item_to_drop,\n\t\t\t     uint32_t *tmp_wr_idx_shift)\n{\n\tunion mpsc_pbuf_generic *item;\n\tuint32_t skip_wlen;\n\n\titem = (union mpsc_pbuf_generic *)&buffer->buf[buffer->rd_idx];\n\tskip_wlen = get_skip(item);\n\t*item_to_drop = NULL;\n\t*tmp_wr_idx_shift = 0;\n\n\tif (skip_wlen) {\n\t\t/* Skip packet found, can be dropped to free some space */\n\t\tMPSC_PBUF_DBG(buffer, \"no space: Found skip packet %d len\", skip_wlen);\n\n\t\trd_idx_inc(buffer, skip_wlen);\n\t\tbuffer->tmp_rd_idx = buffer->rd_idx;\n\t\treturn true;\n\t}\n\n\t/* Other options for dropping available only in overwrite mode. */\n\tif (!(buffer->flags & MPSC_PBUF_MODE_OVERWRITE)) {\n\t\treturn false;\n\t}\n\n\tuint32_t rd_wlen = buffer->get_wlen(item);\n\n\t/* If packet is busy need to be omitted. */\n\tif (!is_valid(item)) {\n\t\treturn false;\n\t} else if (item->hdr.busy) {\n\t\tbool ret = true;\n\n\t\tMPSC_PBUF_DBG(buffer, \"no space: Found busy packet %p (len:%d)\", item, rd_wlen);\n\t\t/* Add skip packet before claimed packet. */\n\t\tif (free_wlen) {\n\t\t\tadd_skip_item(buffer, free_wlen);\n\t\t\tMPSC_PBUF_DBG(buffer, \"no space: Added skip packet (len:%d)\", free_wlen);\n\t\t}\n\t\t/* Move all indexes forward, after claimed packet. */\n\t\tbuffer->wr_idx = idx_inc(buffer, buffer->wr_idx, rd_wlen);\n\n\t\t/* If allocation wrapped around the buffer and found busy packet\n\t\t * that was already omitted, skip it again and indicate that no\n\t\t * packet was dropped.\n\t\t */\n\t\tif (buffer->rd_idx == buffer->tmp_rd_idx) {\n\t\t\tbuffer->tmp_rd_idx = idx_inc(buffer, buffer->tmp_rd_idx, rd_wlen);\n\t\t\tret = false;\n\t\t}\n\n\t\tbuffer->tmp_wr_idx = buffer->tmp_rd_idx;\n\t\tbuffer->rd_idx = buffer->tmp_rd_idx;\n\t\tbuffer->flags |= MPSC_PBUF_FULL;\n\t\treturn ret;\n\t} else {\n\t\t/* Prepare packet dropping. */\n\t\trd_idx_inc(buffer, rd_wlen);\n\t\tbuffer->tmp_rd_idx = buffer->rd_idx;\n\t\t/* Temporary move tmp_wr idx forward to ensure that packet\n\t\t * will not be dropped twice and content will not be\n\t\t * overwritten.\n\t\t */\n\t\tif (free_wlen) {\n\t\t\t/* Free location mark as invalid to prevent\n\t\t\t * reading incomplete data.\n\t\t\t */\n\t\t\tunion mpsc_pbuf_generic invalid = {\n\t\t\t\t.hdr = {\n\t\t\t\t\t.valid = 0,\n\t\t\t\t\t.busy = 0\n\t\t\t\t}\n\t\t\t};\n\n\t\t\tbuffer->buf[buffer->tmp_wr_idx] = invalid.raw;\n\t\t}\n\n\t\t*tmp_wr_idx_shift = rd_wlen + free_wlen;\n\t\tbuffer->tmp_wr_idx = idx_inc(buffer, buffer->tmp_wr_idx, *tmp_wr_idx_shift);\n\t\tbuffer->flags |= MPSC_PBUF_FULL;\n\t\titem->hdr.valid = 0;\n\t\t*item_to_drop = item;\n\t\tMPSC_PBUF_DBG(buffer, \"no space: dropping packet %p (len: %d)\",\n\t\t\t       item, rd_wlen);\n\t}\n\n\treturn true;\n}\n\nstatic void post_drop_action(struct mpsc_pbuf_buffer *buffer,\n\t\t\t     uint32_t prev_tmp_wr_idx,\n\t\t\t     uint32_t tmp_wr_idx_shift)\n{\n\tuint32_t cmp_tmp_wr_idx = idx_inc(buffer, prev_tmp_wr_idx, tmp_wr_idx_shift);\n\n\tif (cmp_tmp_wr_idx == buffer->tmp_wr_idx) {\n\t\t/* Operation not interrupted by another alloc. */\n\t\tbuffer->tmp_wr_idx = prev_tmp_wr_idx;\n\t\tbuffer->flags &= ~MPSC_PBUF_FULL;\n\t\treturn;\n\t}\n\n\t/* Operation interrupted, mark area as to be skipped. */\n\tunion mpsc_pbuf_generic skip = {\n\t\t.skip = {\n\t\t\t.valid = 0,\n\t\t\t.busy = 1,\n\t\t\t.len = tmp_wr_idx_shift\n\t\t}\n\t};\n\n\tbuffer->buf[prev_tmp_wr_idx] = skip.raw;\n\tbuffer->wr_idx = idx_inc(buffer,\n\t\t\t\t buffer->wr_idx,\n\t\t\t\t tmp_wr_idx_shift);\n\t/* full flag? */\n}\n\nvoid mpsc_pbuf_put_word(struct mpsc_pbuf_buffer *buffer,\n\t\t\tconst union mpsc_pbuf_generic item)\n{\n\tbool cont;\n\tuint32_t free_wlen;\n\tk_spinlock_key_t key;\n\tunion mpsc_pbuf_generic *dropped_item = NULL;\n\tuint32_t tmp_wr_idx_shift = 0;\n\tuint32_t tmp_wr_idx_val = 0;\n\n\tdo {\n\t\tkey = k_spin_lock(&buffer->lock);\n\n\t\tif (tmp_wr_idx_shift) {\n\t\t\tpost_drop_action(buffer, tmp_wr_idx_val, tmp_wr_idx_shift);\n\t\t\ttmp_wr_idx_shift = 0;\n\t\t}\n\n\t\t(void)free_space(buffer, &free_wlen);\n\n\t\tMPSC_PBUF_DBG(buffer, \"put_word (%d free space)\", (int)free_wlen);\n\n\t\tif (free_wlen) {\n\t\t\tbuffer->buf[buffer->tmp_wr_idx] = item.raw;\n\t\t\ttmp_wr_idx_inc(buffer, 1);\n\t\t\tcont = false;\n\t\t\tbuffer->wr_idx = idx_inc(buffer, buffer->wr_idx, 1);\n\t\t\tmax_utilization_update(buffer);\n\t\t} else {\n\t\t\ttmp_wr_idx_val = buffer->tmp_wr_idx;\n\t\t\tcont = drop_item_locked(buffer, free_wlen,\n\t\t\t\t\t\t&dropped_item, &tmp_wr_idx_shift);\n\t\t}\n\n\t\tk_spin_unlock(&buffer->lock, key);\n\n\t\tif (dropped_item) {\n\t\t\t/* Notify about item being dropped. */\n\t\t\tif (buffer->notify_drop) {\n\t\t\t\tbuffer->notify_drop(buffer, dropped_item);\n\t\t\t}\n\t\t\tdropped_item = NULL;\n\t\t}\n\t} while (cont);\n}\n\nunion mpsc_pbuf_generic *mpsc_pbuf_alloc(struct mpsc_pbuf_buffer *buffer,\n\t\t\t\t\t size_t wlen, k_timeout_t timeout)\n{\n\tunion mpsc_pbuf_generic *item = NULL;\n\tunion mpsc_pbuf_generic *dropped_item = NULL;\n\tbool cont = true;\n\tuint32_t free_wlen;\n\tuint32_t tmp_wr_idx_shift = 0;\n\tuint32_t tmp_wr_idx_val = 0;\n\n\tMPSC_PBUF_DBG(buffer, \"alloc %d words\", (int)wlen);\n\n\tif (wlen > (buffer->size)) {\n\t\tMPSC_PBUF_DBG(buffer, \"Failed to alloc\");\n\t\treturn NULL;\n\t}\n\n\tdo {\n\t\tk_spinlock_key_t key;\n\t\tbool wrap;\n\n\t\tkey = k_spin_lock(&buffer->lock);\n\t\tif (tmp_wr_idx_shift) {\n\t\t\tpost_drop_action(buffer, tmp_wr_idx_val, tmp_wr_idx_shift);\n\t\t\ttmp_wr_idx_shift = 0;\n\t\t}\n\n\t\twrap = free_space(buffer, &free_wlen);\n\n\t\tif (free_wlen >= wlen) {\n\t\t\titem =\n\t\t\t    (union mpsc_pbuf_generic *)&buffer->buf[buffer->tmp_wr_idx];\n\t\t\titem->hdr.valid = 0;\n\t\t\titem->hdr.busy = 0;\n\t\t\ttmp_wr_idx_inc(buffer, wlen);\n\t\t\tcont = false;\n\t\t} else if (wrap) {\n\t\t\tadd_skip_item(buffer, free_wlen);\n\t\t\tcont = true;\n\t\t} else if (IS_ENABLED(CONFIG_MULTITHREADING) && !K_TIMEOUT_EQ(timeout, K_NO_WAIT) &&\n\t\t\t   !k_is_in_isr() && arch_irq_unlocked(key.key)) {\n\t\t\tint err;\n\n\t\t\tk_spin_unlock(&buffer->lock, key);\n\t\t\terr = k_sem_take(&buffer->sem, timeout);\n\t\t\tkey = k_spin_lock(&buffer->lock);\n\t\t\tcont = (err == 0) ? true : false;\n\t\t} else if (cont) {\n\t\t\ttmp_wr_idx_val = buffer->tmp_wr_idx;\n\t\t\tcont = drop_item_locked(buffer, free_wlen,\n\t\t\t\t\t\t&dropped_item, &tmp_wr_idx_shift);\n\t\t}\n\t\tk_spin_unlock(&buffer->lock, key);\n\n\t\tif (dropped_item) {\n\t\t\t/* Notify about item being dropped. */\n\t\t\tif (buffer->notify_drop) {\n\t\t\t\tbuffer->notify_drop(buffer, dropped_item);\n\t\t\t}\n\t\t\tdropped_item = NULL;\n\t\t}\n\t} while (cont);\n\n\n\tMPSC_PBUF_DBG(buffer, \"allocated %p\", item);\n\n\tif (IS_ENABLED(CONFIG_MPSC_CLEAR_ALLOCATED) && item) {\n\t\t/* During test fill with 0's to simplify message comparison */\n\t\tmemset(item, 0, sizeof(int) * wlen);\n\t}\n\n\treturn item;\n}\n\nvoid mpsc_pbuf_commit(struct mpsc_pbuf_buffer *buffer,\n\t\t       union mpsc_pbuf_generic *item)\n{\n\tuint32_t wlen = buffer->get_wlen(item);\n\n\tk_spinlock_key_t key = k_spin_lock(&buffer->lock);\n\n\titem->hdr.valid = 1;\n\tbuffer->wr_idx = idx_inc(buffer, buffer->wr_idx, wlen);\n\tmax_utilization_update(buffer);\n\tk_spin_unlock(&buffer->lock, key);\n\tMPSC_PBUF_DBG(buffer, \"committed %p\", item);\n}\n\nvoid mpsc_pbuf_put_word_ext(struct mpsc_pbuf_buffer *buffer,\n\t\t\t    const union mpsc_pbuf_generic item,\n\t\t\t    const void *data)\n{\n\tstatic const size_t l =\n\t\t(sizeof(item) + sizeof(data)) / sizeof(uint32_t);\n\tunion mpsc_pbuf_generic *dropped_item = NULL;\n\tbool cont;\n\tuint32_t tmp_wr_idx_shift = 0;\n\tuint32_t tmp_wr_idx_val = 0;\n\n\tdo {\n\t\tk_spinlock_key_t key;\n\t\tuint32_t free_wlen;\n\t\tbool wrap;\n\n\t\tkey = k_spin_lock(&buffer->lock);\n\n\t\tif (tmp_wr_idx_shift) {\n\t\t\tpost_drop_action(buffer, tmp_wr_idx_val, tmp_wr_idx_shift);\n\t\t\ttmp_wr_idx_shift = 0;\n\t\t}\n\n\t\twrap = free_space(buffer, &free_wlen);\n\n\t\tif (free_wlen >= l) {\n\t\t\tbuffer->buf[buffer->tmp_wr_idx] = item.raw;\n\t\t\tvoid **p =\n\t\t\t\t(void **)&buffer->buf[buffer->tmp_wr_idx + 1];\n\n\t\t\t*p = (void *)data;\n\t\t\ttmp_wr_idx_inc(buffer, l);\n\t\t\tbuffer->wr_idx = idx_inc(buffer, buffer->wr_idx, l);\n\t\t\tcont = false;\n\t\t\tmax_utilization_update(buffer);\n\t\t} else if (wrap) {\n\t\t\tadd_skip_item(buffer, free_wlen);\n\t\t\tcont = true;\n\t\t} else {\n\t\t\ttmp_wr_idx_val = buffer->tmp_wr_idx;\n\t\t\tcont = drop_item_locked(buffer, free_wlen,\n\t\t\t\t\t\t &dropped_item, &tmp_wr_idx_shift);\n\t\t}\n\n\t\tk_spin_unlock(&buffer->lock, key);\n\n\t\tif (dropped_item) {\n\t\t\t/* Notify about item being dropped. */\n\t\t\tif (buffer->notify_drop) {\n\t\t\t\tbuffer->notify_drop(buffer, dropped_item);\n\t\t\t}\n\t\t\tdropped_item = NULL;\n\t\t}\n\t} while (cont);\n}\n\nvoid mpsc_pbuf_put_data(struct mpsc_pbuf_buffer *buffer, const uint32_t *data,\n\t\t\tsize_t wlen)\n{\n\tbool cont;\n\tunion mpsc_pbuf_generic *dropped_item = NULL;\n\tuint32_t tmp_wr_idx_shift = 0;\n\tuint32_t tmp_wr_idx_val = 0;\n\n\tdo {\n\t\tuint32_t free_wlen;\n\t\tk_spinlock_key_t key;\n\t\tbool wrap;\n\n\t\tkey = k_spin_lock(&buffer->lock);\n\n\t\tif (tmp_wr_idx_shift) {\n\t\t\tpost_drop_action(buffer, tmp_wr_idx_val, tmp_wr_idx_shift);\n\t\t\ttmp_wr_idx_shift = 0;\n\t\t}\n\n\t\twrap = free_space(buffer, &free_wlen);\n\n\t\tif (free_wlen >= wlen) {\n\t\t\tmemcpy(&buffer->buf[buffer->tmp_wr_idx], data,\n\t\t\t\twlen * sizeof(uint32_t));\n\t\t\tbuffer->wr_idx = idx_inc(buffer, buffer->wr_idx, wlen);\n\t\t\ttmp_wr_idx_inc(buffer, wlen);\n\t\t\tcont = false;\n\t\t\tmax_utilization_update(buffer);\n\t\t} else if (wrap) {\n\t\t\tadd_skip_item(buffer, free_wlen);\n\t\t\tcont = true;\n\t\t} else {\n\t\t\ttmp_wr_idx_val = buffer->tmp_wr_idx;\n\t\t\tcont = drop_item_locked(buffer, free_wlen,\n\t\t\t\t\t\t &dropped_item, &tmp_wr_idx_shift);\n\t\t}\n\n\t\tk_spin_unlock(&buffer->lock, key);\n\n\t\tif (dropped_item) {\n\t\t\t/* Notify about item being dropped. */\n\t\t\tdropped_item->hdr.valid = 0;\n\t\t\tif (buffer->notify_drop) {\n\t\t\t\tbuffer->notify_drop(buffer, dropped_item);\n\t\t\t}\n\t\t\tdropped_item = NULL;\n\t\t}\n\t} while (cont);\n}\n\nconst union mpsc_pbuf_generic *mpsc_pbuf_claim(struct mpsc_pbuf_buffer *buffer)\n{\n\tunion mpsc_pbuf_generic *item;\n\tbool cont;\n\tbool need_post = false;\n\n\tdo {\n\t\tuint32_t a;\n\t\tk_spinlock_key_t key;\n\n\t\tcont = false;\n\t\tkey = k_spin_lock(&buffer->lock);\n\t\t(void)available(buffer, &a);\n\t\titem = (union mpsc_pbuf_generic *)\n\t\t\t&buffer->buf[buffer->tmp_rd_idx];\n\n\t\tif (!a || is_invalid(item)) {\n\t\t\tMPSC_PBUF_DBG(buffer, \"invalid claim %d: %p\", a, item);\n\t\t\titem = NULL;\n\t\t} else {\n\t\t\tuint32_t skip = get_skip(item);\n\n\t\t\tif (skip || !is_valid(item)) {\n\t\t\t\tuint32_t inc =\n\t\t\t\t\tskip ? skip : buffer->get_wlen(item);\n\n\t\t\t\tbuffer->tmp_rd_idx =\n\t\t\t\t      idx_inc(buffer, buffer->tmp_rd_idx, inc);\n\t\t\t\trd_idx_inc(buffer, inc);\n\t\t\t\tcont = true;\n\t\t\t\tneed_post = true;\n\t\t\t} else {\n\t\t\t\titem->hdr.busy = 1;\n\t\t\t\tbuffer->tmp_rd_idx =\n\t\t\t\t\tidx_inc(buffer, buffer->tmp_rd_idx,\n\t\t\t\t\t\tbuffer->get_wlen(item));\n\t\t\t}\n\t\t}\n\n\t\tif (!cont) {\n\t\t\tMPSC_PBUF_DBG(buffer, \">>claimed %d: %p\", a, item);\n\t\t}\n\t\tk_spin_unlock(&buffer->lock, key);\n\t} while (cont);\n\n\tif (IS_ENABLED(CONFIG_MULTITHREADING) && need_post && item == NULL) {\n\t\tk_sem_give(&buffer->sem);\n\t}\n\n\treturn item;\n}\n\nvoid mpsc_pbuf_free(struct mpsc_pbuf_buffer *buffer,\n\t\t     const union mpsc_pbuf_generic *item)\n{\n\tuint32_t wlen = buffer->get_wlen(item);\n\tk_spinlock_key_t key = k_spin_lock(&buffer->lock);\n\tunion mpsc_pbuf_generic *witem = (union mpsc_pbuf_generic *)item;\n\n\twitem->hdr.valid = 0;\n\tif (!(buffer->flags & MPSC_PBUF_MODE_OVERWRITE) ||\n\t\t ((uint32_t *)item == &buffer->buf[buffer->rd_idx])) {\n\t\twitem->hdr.busy = 0;\n\t\tif (buffer->rd_idx == buffer->tmp_rd_idx) {\n\t\t\t/* There is a chance that there are so many new packets\n\t\t\t * added between claim and free that rd_idx points again\n\t\t\t * at claimed item. In that case tmp_rd_idx points at\n\t\t\t * the same location. In that case increment also tmp_rd_idx\n\t\t\t * which will mark freed buffer as the only free space in\n\t\t\t * the buffer.\n\t\t\t */\n\t\t\tbuffer->tmp_rd_idx = idx_inc(buffer, buffer->tmp_rd_idx, wlen);\n\t\t}\n\t\trd_idx_inc(buffer, wlen);\n\t} else {\n\t\tMPSC_PBUF_DBG(buffer, \"Allocation occurred during claim\");\n\t\twitem->skip.len = wlen;\n\t}\n\tMPSC_PBUF_DBG(buffer, \"<<freed: %p\", item);\n\n\tk_spin_unlock(&buffer->lock, key);\n\tif (IS_ENABLED(CONFIG_MULTITHREADING)) {\n\t\tk_sem_give(&buffer->sem);\n\t}\n}\n\nbool mpsc_pbuf_is_pending(struct mpsc_pbuf_buffer *buffer)\n{\n\tuint32_t a;\n\tk_spinlock_key_t key = k_spin_lock(&buffer->lock);\n\n\t(void)available(buffer, &a);\n\tk_spin_unlock(&buffer->lock, key);\n\n\treturn a ? true : false;\n}\n\nvoid mpsc_pbuf_get_utilization(struct mpsc_pbuf_buffer *buffer,\n\t\t\t       uint32_t *size, uint32_t *now)\n{\n\tk_spinlock_key_t key = k_spin_lock(&buffer->lock);\n\n\t/* One byte is left for full/empty distinction. */\n\t*size = (buffer->size - 1) * sizeof(int);\n\t*now = get_usage(buffer) * sizeof(int);\n\n\tk_spin_unlock(&buffer->lock, key);\n}\n\nint mpsc_pbuf_get_max_utilization(struct mpsc_pbuf_buffer *buffer, uint32_t *max)\n{\n\tint rc;\n\tk_spinlock_key_t key = k_spin_lock(&buffer->lock);\n\n\tif (buffer->flags & MPSC_PBUF_MAX_UTILIZATION) {\n\t\t*max = buffer->max_usage * sizeof(int);\n\t\trc = 0;\n\t} else {\n\t\trc = -ENOTSUP;\n\t}\n\n\tk_spin_unlock(&buffer->lock, key);\n\n\treturn rc;\n}\n"
+      },
+      "events": [
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "SystemPromptEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "MessageEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/lib/mpsc_pbuf/src/main.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [1, 250], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/lib/os/mpsc_pbuf.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [1, 500], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/include/zephyr/sys/mpsc_pbuf.h\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [1, 400], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/tests/lib/mpsc_pbuf/src/main.c:\\n     1\\t/*\\n     2\\t * Copyright (c) 2021 Nordic Semiconductor\\n     3\\t *\\n     4\\t * SPDX-License-Identifier: Apache-2.0\\n     5\\t */\\n     6\\t\\n     7\\t/**\\n     8\\t * @file\\n     9\\t * @brief Test log message\\n    10\\t */\\n    11\\t\\n    12\\t#include <zephyr/sys/mpsc_pbuf.h>\\n    13\\t\\n    14\\t#include <zephyr/tc_util.h>\\n    15\\t#include <stdbool.h>\\n    16\\t#include <zephyr/kernel.h>\\n    17\\t#include <zephyr/ztest.h>\\n    18\\t#include <zephyr/random/random.h>\\n    19\\t\\n    20\\t#define PUT_EXT_LEN \\\\\\n    21\\t\\t((sizeof(union mpsc_pbuf_generic) + sizeof(void *)) / sizeof(uint32_t))\\n    22\\t\\n    23\\t#define LEN_BITS 9\\n    24\\t\\n    25\\tstruct test_data {\\n    26\\t\\tMPSC_PBUF_HDR;\\n    27\\t\\tuint32_t len : LEN_BITS;\\n    28\\t\\tuint32_t data : 32 - MPSC_PBUF_HDR_BITS - LEN_BITS;\\n    29\\t};\\n    30\\t\\n    31\\tstruct test_dat\n…[6343 chars omitted]…\n\\t\\t\\ttest_1word.data.data = i;\\n   229\\t\\t\\tmpsc_pbuf_put_word(&buffer, test_1word.item);\\n   230\\t\\t}\\n   231\\t\\n   232\\t\\tt = get_cyc() - t;\\n   233\\t\\tPRINT(\\\"%s buffer\\\\n\\\", pow2 ? \\\"pow2\\\" : \\\"non-pow2\\\");\\n   234\\t\\tPRINT(\\\"single word put time: %d cycles\\\\n\\\", t/repeat);\\n   235\\t\\n   236\\t\\tt = get_cyc();\\n   237\\t\\tfor (int i = 0; i < repeat; i++) {\\n   238\\t\\t\\tunion test_item *ti;\\n   239\\t\\n   240\\t\\t\\tti = (union test_item *)mpsc_pbuf_claim(&buffer);\\n   241\\t\\t\\tzassert_true(ti);\\n   242\\t\\t\\tzassert_equal(ti->data.data, i);\\n   243\\t\\t\\tmpsc_pbuf_free(&buffer, &ti->item);\\n   244\\t\\t}\\n   245\\t\\n   246\\t\\tt = get_cyc() - t;\\n   247\\t\\tPRINT(\\\"single word item claim,free: %d cycles\\\\n\\\", t/repeat);\\n   248\\t\\n   249\\t\\tzassert_is_null(mpsc_pbuf_claim(&buffer));\\n   250\\t}\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/lib/mpsc_pbuf/src/main.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/lib/os/mpsc_pbuf.c:\\n     1\\t/*\\n     2\\t * Copyright (c) 2021 Nordic Semiconductor\\n     3\\t *\\n     4\\t * SPDX-License-Identifier: Apache-2.0\\n     5\\t */\\n     6\\t#include <zephyr/sys/minmax.h>\\n     7\\t#include <zephyr/sys/mpsc_pbuf.h>\\n     8\\t\\n     9\\t#define MPSC_PBUF_DEBUG 0\\n    10\\t\\n    11\\t#define MPSC_PBUF_DBG(buffer, ...) do { \\\\\\n    12\\t\\tif (MPSC_PBUF_DEBUG) { \\\\\\n    13\\t\\t\\tprintk(__VA_ARGS__); \\\\\\n    14\\t\\t\\tif (buffer) { \\\\\\n    15\\t\\t\\t\\tmpsc_state_print(buffer); \\\\\\n    16\\t\\t\\t} \\\\\\n    17\\t\\t} \\\\\\n    18\\t} while (false)\\n    19\\t\\n    20\\tstatic inline void mpsc_state_print(struct mpsc_pbuf_buffer *buffer)\\n    21\\t{\\n    22\\t\\tif (MPSC_PBUF_DEBUG) {\\n    23\\t\\t\\tprintk(\\\", wr:%d/%d, rd:%d/%d\\\\n\\\",\\n    24\\t\\t\\t\\tbuffer->wr_idx, buffer->tmp_wr_idx,\\n    25\\t\\t\\t\\tbuffer->rd_idx, buffer->tmp_rd_idx);\\n    26\\t\\t}\\n    27\\t}\\n    28\\t\\n \n…[15955 chars omitted]…\n(&buffer->lock, key);\\n   475\\t\\n   476\\t\\t\\tif (dropped_item) {\\n   477\\t\\t\\t\\t/* Notify about item being dropped. */\\n   478\\t\\t\\t\\tif (buffer->notify_drop) {\\n   479\\t\\t\\t\\t\\tbuffer->notify_drop(buffer, dropped_item);\\n   480\\t\\t\\t\\t}\\n   481\\t\\t\\t\\tdropped_item = NULL;\\n   482\\t\\t\\t}\\n   483\\t\\t} while (cont);\\n   484\\t}\\n   485\\t\\n   486\\tvoid mpsc_pbuf_put_data(struct mpsc_pbuf_buffer *buffer, const uint32_t *data,\\n   487\\t\\t\\t\\tsize_t wlen)\\n   488\\t{\\n   489\\t\\tbool cont;\\n   490\\t\\tunion mpsc_pbuf_generic *dropped_item = NULL;\\n   491\\t\\tuint32_t tmp_wr_idx_shift = 0;\\n   492\\t\\tuint32_t tmp_wr_idx_val = 0;\\n   493\\t\\n   494\\t\\tdo {\\n   495\\t\\t\\tuint32_t free_wlen;\\n   496\\t\\t\\tk_spinlock_key_t key;\\n   497\\t\\t\\tbool wrap;\\n   498\\t\\n   499\\t\\t\\tkey = k_spin_lock(&buffer->lock);\\n   500\\t\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/lib/os/mpsc_pbuf.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"NOTE: We only show up to 278 since there're only 278 lines in this file.\\nHere's the result of running `cat -n` on /zephyrproject/zephyr/include/zephyr/sys/mpsc_pbuf.h:\\n     1\\t/*\\n     2\\t * Copyright (c) 2021 Nordic Semiconductor ASA\\n     3\\t *\\n     4\\t * SPDX-License-Identifier: Apache-2.0\\n     5\\t */\\n     6\\t#ifndef ZEPHYR_INCLUDE_SYS_MPSC_PBUF_H_\\n     7\\t#define ZEPHYR_INCLUDE_SYS_MPSC_PBUF_H_\\n     8\\t\\n     9\\t#include <zephyr/kernel.h>\\n    10\\t#include <zephyr/sys/mpsc_packet.h>\\n    11\\t#include <string.h>\\n    12\\t#include <stdint.h>\\n    13\\t#include <stdbool.h>\\n    14\\t\\n    15\\t#ifdef __cplusplus\\n    16\\textern \\\"C\\\" {\\n    17\\t#endif\\n    18\\t\\n    19\\t/**\\n    20\\t * @brief Multi producer, single consumer packet buffer API\\n    21\\t * @defgroup mpsc_buf MPSC (Multi producer, single consumer) packet buffer API\\n    22\\t * @ingroup datastructure_apis\\n    23\\t * @{\\n    24\\t */\\n    25\\t\\n    26\\t/*\\n  \n…[8504 chars omitted]…\nut]     now    Current buffer usage in bytes.\\n   257\\t */\\n   258\\tvoid mpsc_pbuf_get_utilization(struct mpsc_pbuf_buffer *buffer,\\n   259\\t\\t\\t\\t       uint32_t *size, uint32_t *now);\\n   260\\t\\n   261\\t/** @brief Get maximum memory utilization.\\n   262\\t *\\n   263\\t * @param[in, out] buffer Buffer.\\n   264\\t * @param[out]     max    Maximum buffer usage in bytes.\\n   265\\t *\\n   266\\t * retval 0 if utilization data collected successfully.\\n   267\\t * retval -ENOTSUP if Collecting utilization data is not supported.\\n   268\\t */\\n   269\\tint mpsc_pbuf_get_max_utilization(struct mpsc_pbuf_buffer *buffer, uint32_t *max);\\n   270\\t/**\\n   271\\t * @}\\n   272\\t */\\n   273\\t\\n   274\\t#ifdef __cplusplus\\n   275\\t}\\n   276\\t#endif\\n   277\\t\\n   278\\t#endif /* ZEPHYR_INCLUDE_SYS_MPSC_PBUF_H_ */\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/include/zephyr/sys/mpsc_pbuf.h\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/lib/os/mpsc_pbuf.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [485, -1], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/lib/mpsc_pbuf/src/main.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [251, 700], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/lib/os/mpsc_pbuf.c:\\n   485\\t\\n   486\\tvoid mpsc_pbuf_put_data(struct mpsc_pbuf_buffer *buffer, const uint32_t *data,\\n   487\\t\\t\\t\\tsize_t wlen)\\n   488\\t{\\n   489\\t\\tbool cont;\\n   490\\t\\tunion mpsc_pbuf_generic *dropped_item = NULL;\\n   491\\t\\tuint32_t tmp_wr_idx_shift = 0;\\n   492\\t\\tuint32_t tmp_wr_idx_val = 0;\\n   493\\t\\n   494\\t\\tdo {\\n   495\\t\\t\\tuint32_t free_wlen;\\n   496\\t\\t\\tk_spinlock_key_t key;\\n   497\\t\\t\\tbool wrap;\\n   498\\t\\n   499\\t\\t\\tkey = k_spin_lock(&buffer->lock);\\n   500\\t\\n   501\\t\\t\\tif (tmp_wr_idx_shift) {\\n   502\\t\\t\\t\\tpost_drop_action(buffer, tmp_wr_idx_val, tmp_wr_idx_shift);\\n   503\\t\\t\\t\\ttmp_wr_idx_shift = 0;\\n   504\\t\\t\\t}\\n   505\\t\\n   506\\t\\t\\twrap = free_space(buffer, &free_wlen);\\n   507\\t\\n   508\\t\\t\\tif (free_wlen > wlen) {\\n   509\\t\\t\\t\\tmemcpy(&buffer->buf[buffer->tmp_wr_idx], data,\\n   510\\t\\t\\t\\t\\twlen * sizeof(uint32\n…[4612 chars omitted]…\n 636\\t{\\n   637\\t\\tk_spinlock_key_t key = k_spin_lock(&buffer->lock);\\n   638\\t\\n   639\\t\\t/* One byte is left for full/empty distinction. */\\n   640\\t\\t*size = (buffer->size - 1) * sizeof(int);\\n   641\\t\\t*now = get_usage(buffer) * sizeof(int);\\n   642\\t\\n   643\\t\\tk_spin_unlock(&buffer->lock, key);\\n   644\\t}\\n   645\\t\\n   646\\tint mpsc_pbuf_get_max_utilization(struct mpsc_pbuf_buffer *buffer, uint32_t *max)\\n   647\\t{\\n   648\\t\\tint rc;\\n   649\\t\\tk_spinlock_key_t key = k_spin_lock(&buffer->lock);\\n   650\\t\\n   651\\t\\tif (buffer->flags & MPSC_PBUF_MAX_UTILIZATION) {\\n   652\\t\\t\\t*max = buffer->max_usage * sizeof(int);\\n   653\\t\\t\\trc = 0;\\n   654\\t\\t} else {\\n   655\\t\\t\\trc = -ENOTSUP;\\n   656\\t\\t}\\n   657\\t\\n   658\\t\\tk_spin_unlock(&buffer->lock, key);\\n   659\\t\\n   660\\t\\treturn rc;\\n   661\\t}\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/lib/os/mpsc_pbuf.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/tests/lib/mpsc_pbuf/src/main.c:\\n   251\\t\\n   252\\tZTEST(log_buffer, test_benchmark_item_put)\\n   253\\t{\\n   254\\t\\tbenchmark_item_put(true);\\n   255\\t\\tbenchmark_item_put(false);\\n   256\\t}\\n   257\\t\\n   258\\tvoid item_put_ext_no_overwrite(bool pow2)\\n   259\\t{\\n   260\\t\\tstruct mpsc_pbuf_buffer buffer;\\n   261\\t\\n   262\\t\\tinit(&buffer, 8 - !pow2, false);\\n   263\\t\\n   264\\t\\tint repeat = buffer.size * 2;\\n   265\\t\\tunion test_item test_ext_item = {\\n   266\\t\\t\\t.data = {\\n   267\\t\\t\\t\\t.valid = 1,\\n   268\\t\\t\\t\\t.len = PUT_EXT_LEN\\n   269\\t\\t\\t}\\n   270\\t\\t};\\n   271\\t\\tvoid *data;\\n   272\\t\\n   273\\t\\tfor (uintptr_t i = 0; i < repeat; i++) {\\n   274\\t\\t\\tunion test_item *t;\\n   275\\t\\n   276\\t\\t\\tdata = (void *)i;\\n   277\\t\\t\\ttest_ext_item.data.data = i;\\n   278\\t\\t\\tmpsc_pbuf_put_word_ext(&buffer, test_ext_item.item, data);\\n   279\\t\\n   280\\t\\t\\tt = (union\n…[13516 chars omitted]…\nhould be no packets\\n   682\\t\\t * available for reading.\\n   683\\t\\t */\\n   684\\t\\tmpsc_pbuf_commit(&buffer, (union mpsc_pbuf_generic *)p1);\\n   685\\t\\n   686\\t\\t/* Check that no packet is yet available */\\n   687\\t\\tp = (struct test_data_var *)mpsc_pbuf_claim(&buffer);\\n   688\\t\\tzassert_is_null(p);\\n   689\\t\\n   690\\t\\tmpsc_pbuf_commit(&buffer, (union mpsc_pbuf_generic *)p0);\\n   691\\t\\n   692\\t\\t/* Validate that p0 is the first one. */\\n   693\\t\\tp = (struct test_data_var *)mpsc_pbuf_claim(&buffer);\\n   694\\t\\tzassert_true(p);\\n   695\\t\\tzassert_equal(p->hdr.len, 10);\\n   696\\t\\tmpsc_pbuf_free(&buffer, (union mpsc_pbuf_generic *)p);\\n   697\\t\\n   698\\t\\t/* Validate that p1 is the next one. */\\n   699\\t\\tp = (struct test_data_var *)mpsc_pbuf_claim(&buffer);\\n   700\\t\\tzassert_true(p);\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/lib/mpsc_pbuf/src/main.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/lib/mpsc_pbuf/src/main.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [701, 1200], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/tests/lib/mpsc_pbuf/src/main.c:\\n   701\\t\\tzassert_equal(p->hdr.len, 20);\\n   702\\t\\tmpsc_pbuf_free(&buffer, (union mpsc_pbuf_generic *)p);\\n   703\\t\\n   704\\t\\t/* No more packets. */\\n   705\\t\\tp = (struct test_data_var *)mpsc_pbuf_claim(&buffer);\\n   706\\t\\tzassert_is_null(p);\\n   707\\t}\\n   708\\t\\n   709\\tZTEST(log_buffer, test_item_alloc_preemption)\\n   710\\t{\\n   711\\t\\titem_alloc_preemption(true);\\n   712\\t\\titem_alloc_preemption(false);\\n   713\\t}\\n   714\\t\\n   715\\tvoid overwrite(bool pow2)\\n   716\\t{\\n   717\\t\\tstruct test_data_var *p;\\n   718\\t\\tuint32_t fill_len = 5;\\n   719\\t\\tuint32_t len0, len1;\\n   720\\t\\tstruct mpsc_pbuf_buffer buffer;\\n   721\\t\\n   722\\t\\tinit(&buffer, 32 - !pow2, true);\\n   723\\t\\tuint32_t packet_cnt = saturate_buffer_uneven(&buffer, fill_len);\\n   724\\t\\n   725\\t\\tzassert_equal(drop_cnt, exp_drop_cnt);\\n   726\\t\\n   727\\t\\texp_\n…[16797 chars omitted]…\n176\\t{\\n  1177\\t\\tint prio = k_thread_priority_get(k_current_get());\\n  1178\\t\\tstruct mpsc_pbuf_buffer buffer;\\n  1179\\t\\tvoid *vt;\\n  1180\\t\\n  1181\\t\\tk_thread_priority_set(k_current_get(), 3);\\n  1182\\t\\n  1183\\t\\tinit(&buffer, ARRAY_SIZE(buf32) - 1, true);\\n  1184\\t\\n  1185\\t\\tuint32_t fill_len = 1;\\n  1186\\t\\tuint32_t packet_cnt = saturate_buffer_uneven(&buffer, fill_len);\\n  1187\\t\\n  1188\\t\\tstart_threads(&buffer);\\n  1189\\t\\n  1190\\t\\tk_sleep(K_MSEC(1));\\n  1191\\t\\n  1192\\t\\tfor (int i = 0; i < packet_cnt; i++) {\\n  1193\\t\\t\\tunion test_item *t = (union test_item *)mpsc_pbuf_claim(&buffer);\\n  1194\\t\\n  1195\\t\\t\\tmpsc_pbuf_free(&buffer, (union mpsc_pbuf_generic *)t);\\n  1196\\t\\t}\\n  1197\\t\\n  1198\\t\\n  1199\\t\\tfor (int i = 0; i < 2; i++) {\\n  1200\\t\\t\\tstruct test_data_ext *t =\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/lib/mpsc_pbuf/src/main.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"str_replace\", \"path\": \"/zephyrproject/zephyr/lib/os/mpsc_pbuf.c\", \"file_text\": null, \"old_str\": \"\\t\\t\\twrap = free_space(buffer, &free_wlen);\\n\\n\\t\\t\\tif (free_wlen > wlen) {\\n\\t\\t\\t\\tmemcpy(&buffer->buf[buffer->tmp_wr_idx], data,\\n\\t\\t\\t\\t\\twlen * sizeof(uint32_t));\", \"new_str\": \"\\t\\t\\twrap = free_space(buffer, &free_wlen);\\n\\n\\t\\t\\tif (free_wlen >= wlen) {\\n\\t\\t\\t\\tmemcpy(&buffer->buf[buffer->tmp_wr_idx], data,\\n\\t\\t\\t\\t\\twlen * sizeof(uint32_t));\", \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"No replacement was performed, old_str `wrap = free_space(buffer, &free_wlen);\\n\\n\\t\\t\\tif (free_wlen > wlen) {\\n\\t\\t\\t\\tmemcpy(&buffer->buf[buffer->tmp_wr_idx], data,\\n\\t\\t\\t\\t\\twlen * sizeof(uint32_t));` did not appear verbatim in /zephyrproject/zephyr/lib/os/mpsc_pbuf.c.\"}], \"is_error\": true, \"command\": \"str_replace\", \"path\": null, \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/lib/os/mpsc_pbuf.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [500, 520], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/lib/os/mpsc_pbuf.c:\\n   500\\t\\n   501\\t\\t\\tif (tmp_wr_idx_shift) {\\n   502\\t\\t\\t\\tpost_drop_action(buffer, tmp_wr_idx_val, tmp_wr_idx_shift);\\n   503\\t\\t\\t\\ttmp_wr_idx_shift = 0;\\n   504\\t\\t\\t}\\n   505\\t\\n   506\\t\\t\\twrap = free_space(buffer, &free_wlen);\\n   507\\t\\n   508\\t\\t\\tif (free_wlen > wlen) {\\n   509\\t\\t\\t\\tmemcpy(&buffer->buf[buffer->tmp_wr_idx], data,\\n   510\\t\\t\\t\\t\\twlen * sizeof(uint32_t));\\n   511\\t\\t\\t\\tbuffer->wr_idx = idx_inc(buffer, buffer->wr_idx, wlen);\\n   512\\t\\t\\t\\ttmp_wr_idx_inc(buffer, wlen);\\n   513\\t\\t\\t\\tcont = false;\\n   514\\t\\t\\t\\tmax_utilization_update(buffer);\\n   515\\t\\t\\t} else if (wrap) {\\n   516\\t\\t\\t\\tadd_skip_item(buffer, free_wlen);\\n   517\\t\\t\\t\\tcont = true;\\n   518\\t\\t\\t} else {\\n   519\\t\\t\\t\\ttmp_wr_idx_val = buffer->tmp_wr_idx;\\n   520\\t\\t\\t\\tcont = drop_item_locked(buffer, free_wlen,\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/lib/os/mpsc_pbuf.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"str_replace\", \"path\": \"/zephyrproject/zephyr/lib/os/mpsc_pbuf.c\", \"file_text\": null, \"old_str\": \"\\t\\t\\tif (free_wlen > wlen) {\\n\\t\\t\\t\\tmemcpy(&buffer->buf[buffer->tmp_wr_idx], data,\\n\\t\\t\\t\\t\\twlen * sizeof(uint32_t));\\n\\t\\t\\t\\tbuffer->wr_idx = idx_inc(buffer, buffer->wr_idx, wlen);\", \"new_str\": \"\\t\\t\\tif (free_wlen >= wlen) {\\n\\t\\t\\t\\tmemcpy(&buffer->buf[buffer->tmp_wr_idx], data,\\n\\t\\t\\t\\t\\twlen * sizeof(uint32_t));\\n\\t\\t\\t\\tbuffer->wr_idx = idx_inc(buffer, buffer->wr_idx, wlen);\", \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"cd /zephyrproject/zephyr/tests/lib/mpsc_pbuf && zephyr-run native_sim\", \"is_input\": false, \"timeout\": 600.0, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"No replacement was performed, old_str `if (free_wlen > wlen) {\\n\\t\\t\\t\\tmemcpy(&buffer->buf[buffer->tmp_wr_idx], data,\\n\\t\\t\\t\\t\\twlen * sizeof(uint32_t));\\n\\t\\t\\t\\tbuffer->wr_idx = idx_inc(buffer, buffer->wr_idx, wlen);` did not appear verbatim in /zephyrproject/zephyr/lib/os/mpsc_pbuf.c.\"}], \"is_error\": true, \"command\": \"str_replace\", \"path\": null, \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"-- west build: generating a build system\\nLoading Zephyr default modules (Zephyr base).\\n-- Application: /zephyrproject/zephyr/tests/lib/mpsc_pbuf\\n-- CMake version: 3.28.3\\n-- Found Python3: /opt/python/venv/bin/python3 (found suitable version \\\"3.12.3\\\", minimum required is \\\"3.12\\\") found components: Interpreter\\n-- Cache files will be written to: /root/.cache/zephyr\\n-- Zephyr version: 4.4.99 (/zephyrproject/zephyr)\\n-- Found west (found suitable version \\\"1.5.0\\\", minimum required is \\\"0.14.0\\\")\\n-- Board: native_sim, qualifiers: native\\n-- Found host-tools: zephyr 1.0.1 (/opt/toolchains/zephyr-sdk-1.0.1)\\n-- Found toolchain: host (gcc/ld)\\n-- Found Dtc: /opt/toolchains/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/bin/dtc (found suitable version \\\"1.7.0\\\", minimum required is \\\"1.4.6\\\")\\n-- Found BOARD.dts: /zephyrproject/zephyr/boards/native/native_sim/native_sim.dts\\n-- Generated zephyr.dts: /tmp/build\n…[19005 chars omitted]…\n[mpsc_pbuf_concurrent.test_stress_preemptions_high_consumer] duration = 0.000 seconds\\n - SKIP - [mpsc_pbuf_concurrent.test_stress_preemptions_low_consumer] duration = 0.000 seconds\\n - SKIP - [mpsc_pbuf_concurrent.test_stress_preemptions_mid_consumer] duration = 0.000 seconds\\n\\n------ TESTSUITE SUMMARY END ------\\n\\n===================================================================\\nPROJECT EXECUTION FAILED\\n[zephyr-run] full log: /tmp/zephyr-run.log\"}], \"is_error\": false, \"command\": \"cd /zephyrproject/zephyr/tests/lib/mpsc_pbuf && zephyr-run native_sim\", \"exit_code\": 0, \"timeout\": false, \"metadata\": {\"exit_code\": 0, \"pid\": -1, \"username\": \"root\", \"hostname\": \"2ce7e7ad1817\", \"working_dir\": \"/zephyrproject/zephyr/tests/lib/mpsc_pbuf\", \"py_interpreter_path\": \"/opt/python/venv/bin/python\", \"prefix\": \"\", \"suffix\": \"\\n[The command completed with exit code 0.]\"}, \"full_output_save_dir\": \"workspace/conversations/cd1c051568974eb2a2ae48e4f428a748/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"sed -i '508s/if (free_wlen > wlen)/if (free_wlen >= wlen)/' /zephyrproject/zephyr/lib/os/mpsc_pbuf.c && sed -n '505,516p' /zephyrproject/zephyr/lib/os/mpsc_pbuf.c && zephyr-run native_sim\", \"is_input\": false, \"timeout\": 600.0, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"wrap = free_space(buffer, &free_wlen);\\n\\n                if (free_wlen >= wlen) {\\n                        memcpy(&buffer->buf[buffer->tmp_wr_idx], data,\\n                                wlen * sizeof(uint32_t));\\n                        buffer->wr_idx = idx_inc(buffer, buffer->wr_idx, wlen);\\n                        tmp_wr_idx_inc(buffer, wlen);\\n                        cont = false;\\n                        max_utilization_update(buffer);\\n                } else if (wrap) {\\n                        add_skip_item(buffer, free_wlen);\\n-- west build: making build dir /tmp/build pristine\\n-- west build: generating a build system\\nLoading Zephyr default modules (Zephyr base).\\n-- Application: /zephyrproject/zephyr/tests/lib/mpsc_pbuf\\n-- CMake version: 3.28.3\\n-- Found Python3: /opt/python/venv/bin/python3 (found suitable version \\\"3.12.3\\\", minimum required is \\\"3.12\\\") found components: Interpreter\\n-- Cache files will be wr\n…[19602 chars omitted]…\nt_stress_preemptions_low_consumer] duration = 0.000 seconds\\n - SKIP - [mpsc_pbuf_concurrent.test_stress_preemptions_mid_consumer] duration = 0.000 seconds\\n\\n------ TESTSUITE SUMMARY END ------\\n\\n===================================================================\\nPROJECT EXECUTION SUCCESSFUL\\n[zephyr-run] full log: /tmp/zephyr-run.log\"}], \"is_error\": false, \"command\": \"sed -i '508s/if (free_wlen > wlen)/if (free_wlen >= wlen)/' /zephyrproject/zephyr/lib/os/mpsc_pbuf.c && sed -n '505,516p' /zephyrproject/zephyr/lib/os/mpsc_pbuf.c && zephyr-run native_sim\", \"exit_code\": 0, \"timeout\": false, \"metadata\": {\"exit_code\": 0, \"pid\": -1, \"username\": \"root\", \"hostname\": \"2ce7e7ad1817\", \"working_dir\": \"/zephyrproject/zephyr/tests/lib/mpsc_pbuf\", \"py_interpreter_path\": \"/opt/python/venv/bin/python\", \"prefix\": \"\", \"suffix\": \"\\n[The command completed with exit code 0.]\"}, \"full_output_save_dir\": \"workspace/conversations/cd1c051568974eb2a2ae48e4f428a748/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "finish",
+          "action": "{\"message\": \"Fixed the off-by-one space check in `mpsc_pbuf_put_data` (`/zephyrproject/zephyr/lib/os/mpsc_pbuf.c:508`) by changing `if (free_wlen > wlen)` to `if (free_wlen >= wlen)`, matching `mpsc_pbuf_alloc` and `mpsc_pbuf_put_word_ext`. Verified that the `tests/lib/mpsc_pbuf` test suite passes on `native_sim`.\", \"kind\": \"FinishAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "finish",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Fixed the off-by-one space check in `mpsc_pbuf_put_data` (`/zephyrproject/zephyr/lib/os/mpsc_pbuf.c:508`) by changing `if (free_wlen > wlen)` to `if (free_wlen >= wlen)`, matching `mpsc_pbuf_alloc` and `mpsc_pbuf_put_word_ext`. Verified that the `tests/lib/mpsc_pbuf` test suite passes on `native_sim`.\"}], \"is_error\": false, \"kind\": \"FinishObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        }
+      ]
+    },
+    "api_events": [],
+    "started_at": "2026-11-05T07:26:15+00:00",
+    "run_meta": {
+      "code_commit": "672630a410ff36ce8b860d741b1e6b5f6ebd66a1",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

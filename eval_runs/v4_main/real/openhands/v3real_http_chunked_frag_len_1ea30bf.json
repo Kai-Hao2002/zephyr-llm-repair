@@ -1,0 +1,338 @@
+[
+  {
+    "case_id": "v3real_http_chunked_frag_len_1ea30bf",
+    "category": "real_bug",
+    "pipeline": "openhands",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "resolved",
+    "iterations": 14,
+    "ttr_seconds": 594.132071018219,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": true,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "openhands",
+            "model": "gemini-4-argon",
+            "input_tokens": 395062,
+            "output_tokens": 4738,
+            "llm_calls": 12,
+            "cache_read_tokens": 336302,
+            "reasoning_tokens": 3333
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "success",
+          "patch": null,
+          "applied_files": [
+            "subsys/net/lib/http/http_client.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "Zephyr OS successfully booted.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_http1_client_get_headers_cb\nPASS - test_http1_client_get_headers_cb in 0.000 seconds\n===================================================================\nSTART - test_http1_client_get_no_resource\nPASS - test_http1_client_get_no_resource in 0.000 seconds\n===================================================================\nSTART - test_http1_client_get_status_cb\nPASS - test_http1_client_get_status_cb in 0.000 seconds\n===================================================================\nSTART - test_http1_client_post\nPASS - test_http1_client_post in 0.000 seconds\n===================================================================\nSTART - test_http1_client_post_payload_cb\nPASS - test_http1_client_post_payload_cb in 0.000 seconds\n===================================================================\nTESTSUITE http_client succeeded\nRunning TESTSUITE http_client_chunked_te\n===================================================================\nSTART - test_body_frag_len_chunked_te\nAssertion failed at WEST_TOPDIR/zephyr/tests/net/lib/http_client/src/main.c:556: http_client_chunked_te_test_body_frag_len_chunked_te: (ctx.offset not equal to CHUNKED_BODY_SIZE)",
+    "protected_file_count": 5,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_real_openhands/openhands/v3real_http_chunked_frag_len_1ea30bf",
+    "openhands": {
+      "status": "finished",
+      "error": null,
+      "steps": 14,
+      "llm_calls": 12,
+      "input_tokens": 395062,
+      "output_tokens": 4738,
+      "cache_read_tokens": 336302,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 3333,
+      "cost": 0.0,
+      "wall_seconds": 493.9921691417694,
+      "model": "gemini/gemini-4-argon",
+      "image": "zephyr-oh-agent:1.55.1-z2",
+      "max_steps": 50,
+      "timeout_min": 40.0,
+      "egress_allowed": [
+        "generativelanguage.googleapis.com:443"
+      ],
+      "egress_log": {
+        "allowed": 2,
+        "denied": [
+          "CONNECT raw.githubusercontent.com:443 HTTP/1.1"
+        ],
+        "upstream_errors": []
+      },
+      "changed_files": [
+        "subsys/net/lib/http/http_client.c"
+      ],
+      "final_contents": {
+        "subsys/net/lib/http/http_client.c": "/** @file\n * @brief HTTP client API\n *\n * An API for applications to send HTTP requests\n */\n\n/*\n * Copyright (c) 2019 Intel Corporation\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/logging/log.h>\nLOG_MODULE_REGISTER(net_http_client, CONFIG_NET_HTTP_LOG_LEVEL);\n\n#include <zephyr/kernel.h>\n#include <string.h>\n#include <strings.h>\n#include <errno.h>\n#include <stdbool.h>\n#include <stdlib.h>\n\n#include <zephyr/net/net_ip.h>\n#include <zephyr/net/net_log.h>\n#include <zephyr/net/socket.h>\n#include <zephyr/net/http/client.h>\n#include <zephyr/net/http/status.h>\n\n#include \"net_private.h\"\n\n#define HTTP_CONTENT_LEN_SIZE 11\n#define MAX_SEND_BUF_LEN 192\n\nstatic int sendall(int sock, const void *buf, size_t len,\n\t\t\tconst k_timepoint_t req_end_timepoint)\n{\n\twhile (len) {\n\t\tssize_t out_len = zsock_send(sock, buf, len, 0);\n\n\t\tif ((out_len == 0) || (out_len < 0 && errno == EAGAIN)) {\n\t\t\tstruct zsock_pollfd pfd;\n\t\t\tint pollres;\n\t\t\tk_ticks_t req_timeout_ticks =\n\t\t\t\tsys_timepoint_timeout(req_end_timepoint).ticks;\n\t\t\tint req_timeout_ms = k_ticks_to_ms_floor32(req_timeout_ticks);\n\n\t\t\tpfd.fd = sock;\n\t\t\tpfd.events = ZSOCK_POLLOUT;\n\t\t\tpollres = zsock_poll(&pfd, 1, req_timeout_ms);\n\t\t\tif (pollres == 0) {\n\t\t\t\treturn -ETIMEDOUT;\n\t\t\t} else if (pollres > 0) {\n\t\t\t\tcontinue;\n\t\t\t} else {\n\t\t\t\treturn -errno;\n\t\t\t}\n\t\t} else if (out_len < 0) {\n\t\t\treturn -errno;\n\t\t}\n\n\t\tbuf = (const char *)buf + out_len;\n\t\tlen -= out_len;\n\t}\n\n\treturn 0;\n}\n\nstatic int http_send_data(int sock, char *send_buf,\n\t\t\t  size_t send_buf_max_len, size_t *send_buf_pos,\n\t\t\t  const k_timepoint_t req_end_timepoint,\n\t\t\t  ...)\n{\n\tconst char *data;\n\tva_list va;\n\tint ret, end_of_send = *send_buf_pos;\n\tint end_of_data, remaining_len;\n\tint sent = 0;\n\n\tva_start(va, req_end_timepoint);\n\n\tdata = va_arg(va, const char *);\n\n\twhile (data) {\n\t\tend_of_data = 0;\n\n\t\tdo {\n\t\t\tint to_be_copied;\n\n\t\t\tremaining_len = strlen(data + end_of_data);\n\t\t\tto_be_copied = send_buf_max_len - end_of_send;\n\n\t\t\tif (remaining_len > to_be_copied) {\n\t\t\t\tstrncpy(send_buf + end_of_send,\n\t\t\t\t\tdata + end_of_data,\n\t\t\t\t\tto_be_copied);\n\n\t\t\t\tend_of_send += to_be_copied;\n\t\t\t\tend_of_data += to_be_copied;\n\t\t\t\tremaining_len -= to_be_copied;\n\n\t\t\t\tLOG_HEXDUMP_DBG(send_buf, end_of_send,\n\t\t\t\t\t\t\"Data to send\");\n\n\t\t\t\tret = sendall(sock, send_buf, end_of_send, req_end_timepoint);\n\t\t\t\tif (ret < 0) {\n\t\t\t\t\tNET_DBG(\"Cannot send %d bytes (%d)\",\n\t\t\t\t\t\tend_of_send, ret);\n\t\t\t\t\tgoto err;\n\t\t\t\t}\n\t\t\t\tsent += end_of_send;\n\t\t\t\tend_of_send = 0;\n\t\t\t\tcontinue;\n\t\t\t} else {\n\t\t\t\tmemcpy(send_buf + end_of_send,\n\t\t\t\t       data + end_of_data,\n\t\t\t\t       remaining_len);\n\t\t\t\tend_of_send += remaining_len;\n\t\t\t\tremaining_len = 0;\n\t\t\t}\n\t\t} while (remaining_len > 0);\n\n\t\tdata = va_arg(va, const char *);\n\t}\n\n\tva_end(va);\n\n\tif (end_of_send > (int)send_buf_max_len) {\n\t\tNET_ERR(\"Sending overflow (%d > %zd)\", end_of_send,\n\t\t\tsend_buf_max_len);\n\t\treturn -EMSGSIZE;\n\t}\n\n\t*send_buf_pos = end_of_send;\n\n\treturn sent;\n\nerr:\n\tva_end(va);\n\n\treturn ret;\n}\n\nstatic int http_flush_data(int sock, const char *send_buf, size_t send_buf_len,\n\t\t\t\tconst k_timepoint_t req_end_timepoint)\n{\n\tint ret;\n\n\tLOG_HEXDUMP_DBG(send_buf, send_buf_len, \"Data to send\");\n\n\tret = sendall(sock, send_buf, send_buf_len, req_end_timepoint);\n\tif (ret < 0) {\n\t\treturn ret;\n\t}\n\n\treturn (int)send_buf_len;\n}\n\nstatic void print_header_field(size_t len, const char *str)\n{\n\tif (IS_ENABLED(CONFIG_NET_HTTP_LOG_LEVEL_DBG)) {\n#define MAX_OUTPUT_LEN 128\n\t\tchar output[MAX_OUTPUT_LEN];\n\n\t\t/* The value of len does not count \\0 so we need to increase it\n\t\t * by one.\n\t\t */\n\t\tif ((len + 1) > sizeof(output)) {\n\t\t\tlen = sizeof(output) - 1;\n\t\t}\n\n\t\tsnprintk(output, len + 1, \"%s\", str);\n\n\t\tNET_DBG(\"[%zd] %s\", len, output);\n\t}\n}\n\nstatic int on_url(struct http_parser *parser, const char *at, size_t length)\n{\n\tstruct http_request *req = CONTAINER_OF(parser,\n\t\t\t\t\t\tstruct http_request,\n\t\t\t\t\t\tinternal.parser);\n\tprint_header_field(length, at);\n\n\tif (req->internal.response.http_cb &&\n\t    req->internal.response.http_cb->on_url) {\n\t\treq->internal.response.http_cb->on_url(parser, at, length);\n\t}\n\n\treturn 0;\n}\n\nstatic int on_status(struct http_parser *parser, const char *at, size_t length)\n{\n\tstruct http_request *req = CONTAINER_OF(parser,\n\t\t\t\t\t\tstruct http_request,\n\t\t\t\t\t\tinternal.parser);\n\tuint16_t len;\n\n\tlen = MIN(length, sizeof(req->internal.response.http_status) - 1);\n\tmemcpy(req->internal.response.http_status, at, len);\n\treq->internal.response.http_status[len] = 0;\n\treq->internal.response.http_status_code =\n\t\t(uint16_t)parser->status_code;\n\n\tNET_DBG(\"HTTP response status %d %s\", parser->status_code,\n\t\treq->internal.response.http_status);\n\n\tif (req->internal.response.http_cb &&\n\t    req->internal.response.http_cb->on_status) {\n\t\treq->internal.response.http_cb->on_status(parser, at, length);\n\t}\n\n\treturn 0;\n}\n\nstatic int on_header_field(struct http_parser *parser, const char *at,\n\t\t\t   size_t length)\n{\n\tstruct http_request *req = CONTAINER_OF(parser,\n\t\t\t\t\t\tstruct http_request,\n\t\t\t\t\t\tinternal.parser);\n\tstatic const char content_len[] = \"Content-Length\";\n\tstatic const char content_range[] = \"Content-Range\";\n\n\tuint16_t content_len_len = sizeof(content_len) - 1;\n\tuint16_t content_range_len = sizeof(content_range) - 1;\n\n\tif (length >= content_len_len && strncasecmp(at, content_len, content_len_len) == 0) {\n\t\treq->internal.response.cl_present = true;\n\t} else if (length >= content_range_len &&\n\t\t   strncasecmp(at, content_range, content_range_len) == 0) {\n\t\treq->internal.response.cr_present = true;\n\t}\n\n\tprint_header_field(length, at);\n\n\tif (req->internal.response.http_cb &&\n\t    req->internal.response.http_cb->on_header_field) {\n\t\treq->internal.response.http_cb->on_header_field(parser, at,\n\t\t\t\t\t\t\t\tlength);\n\t}\n\n\treturn 0;\n}\n\n#define MAX_NUM_DIGITS\t16\n\nstatic int on_header_value(struct http_parser *parser, const char *at,\n\t\t\t   size_t length)\n{\n\tstruct http_request *req = CONTAINER_OF(parser,\n\t\t\t\t\t\tstruct http_request,\n\t\t\t\t\t\tinternal.parser);\n\tchar str[MAX_NUM_DIGITS];\n\n\tif (req->internal.response.cl_present) {\n\t\tif (length <= MAX_NUM_DIGITS - 1) {\n\t\t\tlong int num;\n\n\t\t\tmemcpy(str, at, length);\n\t\t\tstr[length] = 0;\n\n\t\t\tnum = strtol(str, NULL, 10);\n\t\t\tif (num == LONG_MIN || num == LONG_MAX) {\n\t\t\t\treturn -EINVAL;\n\t\t\t}\n\n\t\t\treq->internal.response.content_length = num;\n\t\t}\n\n\t\treq->internal.response.cl_present = false;\n\t}\n\n\tif (req->internal.response.cr_present) {\n\t\treq->internal.response.content_range.start = parser->content_range.start;\n\t\treq->internal.response.content_range.end = parser->content_range.end;\n\t\treq->internal.response.content_range.total = parser->content_range.total;\n\t\treq->internal.response.cr_present = false;\n\t}\n\n\tif (req->internal.response.http_cb &&\n\t    req->internal.response.http_cb->on_header_value) {\n\t\treq->internal.response.http_cb->on_header_value(parser, at,\n\t\t\t\t\t\t\t\tlength);\n\t}\n\n\tprint_header_field(length, at);\n\n\treturn 0;\n}\n\nstatic int on_body(struct http_parser *parser, const char *at, size_t length)\n{\n\tstruct http_request *req = CONTAINER_OF(parser,\n\t\t\t\t\t\tstruct http_request,\n\t\t\t\t\t\tinternal.parser);\n\n\treq->internal.response.body_found = 1;\n\treq->internal.response.processed += length;\n\n\tNET_DBG(\"Processed %zd length %zd\", req->internal.response.processed,\n\t\tlength);\n\n\tif (req->internal.response.http_cb &&\n\t    req->internal.response.http_cb->on_body) {\n\t\treq->internal.response.http_cb->on_body(parser, at, length);\n\t}\n\n\t/* Reset the body_frag_start pointer for each fragment. */\n\tif (!req->internal.response.body_frag_start) {\n\t\treq->internal.response.body_frag_start = (uint8_t *)at;\n\t}\n\n\t/* Calculate the length of the body contained in the recv_buf */\n\treq->internal.response.body_frag_len += length;\n\n\treturn 0;\n}\n\nstatic int on_headers_complete(struct http_parser *parser)\n{\n\tstruct http_request *req = CONTAINER_OF(parser,\n\t\t\t\t\t\tstruct http_request,\n\t\t\t\t\t\tinternal.parser);\n\n\tif (req->internal.response.http_cb &&\n\t    req->internal.response.http_cb->on_headers_complete) {\n\t\treq->internal.response.http_cb->on_headers_complete(parser);\n\t}\n\n\tif (parser->status_code == HTTP_101_SWITCHING_PROTOCOLS) {\n\t\tNET_DBG(\"Switching protocols, skipping body\");\n\t\treturn 1;\n\t}\n\n\tif (parser->status_code >= 500 && parser->status_code < 600) {\n\t\tNET_DBG(\"Status %d, skipping body\", parser->status_code);\n\t\treturn 1;\n\t}\n\n\tif ((req->method == HTTP_HEAD || req->method == HTTP_OPTIONS) &&\n\t    req->internal.response.content_length > 0) {\n\t\tNET_DBG(\"No body expected\");\n\t\treturn 1;\n\t}\n\n\tNET_DBG(\"Headers complete\");\n\n\treturn 0;\n}\n\nstatic int on_message_begin(struct http_parser *parser)\n{\n\tstruct http_request *req = CONTAINER_OF(parser,\n\t\t\t\t\t\tstruct http_request,\n\t\t\t\t\t\tinternal.parser);\n\n\tif (req->internal.response.http_cb &&\n\t    req->internal.response.http_cb->on_message_begin) {\n\t\treq->internal.response.http_cb->on_message_begin(parser);\n\t}\n\n\tNET_DBG(\"-- HTTP %s response (headers) --\",\n\t\thttp_method_str(req->method));\n\n\treturn 0;\n}\n\nstatic int on_message_complete(struct http_parser *parser)\n{\n\tstruct http_request *req = CONTAINER_OF(parser,\n\t\t\t\t\t\tstruct http_request,\n\t\t\t\t\t\tinternal.parser);\n\n\tif (req->internal.response.http_cb &&\n\t    req->internal.response.http_cb->on_message_complete) {\n\t\treq->internal.response.http_cb->on_message_complete(parser);\n\t}\n\n\tNET_DBG(\"-- HTTP %s response (complete) --\",\n\t\thttp_method_str(req->method));\n\n\treq->internal.response.message_complete = 1;\n\n\treturn 0;\n}\n\nstatic int on_chunk_header(struct http_parser *parser)\n{\n\tstruct http_request *req = CONTAINER_OF(parser,\n\t\t\t\t\t\tstruct http_request,\n\t\t\t\t\t\tinternal.parser);\n\n\tif (req->internal.response.http_cb &&\n\t    req->internal.response.http_cb->on_chunk_header) {\n\t\treq->internal.response.http_cb->on_chunk_header(parser);\n\t}\n\n\treturn 0;\n}\n\nstatic int on_chunk_complete(struct http_parser *parser)\n{\n\tstruct http_request *req = CONTAINER_OF(parser,\n\t\t\t\t\t\tstruct http_request,\n\t\t\t\t\t\tinternal.parser);\n\n\tif (req->internal.response.http_cb &&\n\t    req->internal.response.http_cb->on_chunk_complete) {\n\t\treq->internal.response.http_cb->on_chunk_complete(parser);\n\t}\n\n\treturn 0;\n}\n\nstatic void http_client_init_parser(struct http_parser *parser,\n\t\t\t\t    struct http_parser_settings *settings)\n{\n\thttp_parser_init(parser, HTTP_RESPONSE);\n\n\tsettings->on_body = on_body;\n\tsettings->on_chunk_complete = on_chunk_complete;\n\tsettings->on_chunk_header = on_chunk_header;\n\tsettings->on_headers_complete = on_headers_complete;\n\tsettings->on_header_field = on_header_field;\n\tsettings->on_header_value = on_header_value;\n\tsettings->on_message_begin = on_message_begin;\n\tsettings->on_message_complete = on_message_complete;\n\tsettings->on_status = on_status;\n\tsettings->on_url = on_url;\n}\n\n/* Report a NULL HTTP response to the caller.\n * A NULL response is when the HTTP server intentionally closes the TLS socket (using FINACK)\n * without sending any HTTP payload.\n */\nstatic void http_report_null(struct http_request *req)\n{\n\tif (req->internal.response.cb) {\n\t\tNET_DBG(\"Calling callback for Final Data\"\n\t\t\t\"(NULL HTTP response)\");\n\n\t\t/* Status code 0 representing a null response */\n\t\treq->internal.response.http_status_code = 0;\n\n\t\t/* Zero out related response metrics */\n\t\treq->internal.response.processed = 0;\n\t\treq->internal.response.data_len = 0;\n\t\treq->internal.response.content_length = 0;\n\t\treq->internal.response.body_frag_start = NULL;\n\t\tmemset(req->internal.response.http_status, 0, HTTP_STATUS_STR_SIZE);\n\n\t\treq->internal.response.cb(&req->internal.response, HTTP_DATA_FINAL,\n\t\t\t\t\t  req->internal.user_data);\n\t}\n}\n\n/* Report a completed HTTP transaction (with no error) to the caller */\nstatic void http_report_complete(struct http_request *req)\n{\n\tif (req->internal.response.cb) {\n\t\tNET_DBG(\"Calling callback for %zd len data\", req->internal.response.data_len);\n\t\t(void)req->internal.response.cb(&req->internal.response,\n\t\t\t\t\t\tHTTP_DATA_FINAL,\n\t\t\t\t\t\treq->internal.user_data);\n\t}\n}\n\n/* Report that some data has been received, but the HTTP transaction is still ongoing. */\nstatic int http_report_progress(struct http_request *req)\n{\n\tif (req->internal.response.cb) {\n\t\tNET_DBG(\"Calling callback for partitioned %zd len data\",\n\t\t\treq->internal.response.data_len);\n\n\t\treturn req->internal.response.cb(&req->internal.response,\n\t\t\t\t\t\t HTTP_DATA_MORE,\n\t\t\t\t\t\t req->internal.user_data);\n\t}\n\n\treturn 0;\n}\n\nstatic int http_wait_data(int sock, struct http_request *req, const k_timepoint_t req_end_timepoint)\n{\n\tint total_received = 0;\n\tsize_t offset = 0, processed = 0;\n\tint received, ret;\n\tstruct zsock_pollfd fds[1];\n\tint nfds = 1;\n\n\tfds[0].fd = sock;\n\tfds[0].events = ZSOCK_POLLIN;\n\n\tdo {\n\t\tk_ticks_t req_timeout_ticks =\n\t\t\tsys_timepoint_timeout(req_end_timepoint).ticks;\n\t\tint req_timeout_ms = k_ticks_to_ms_floor32(req_timeout_ticks);\n\n\t\tret = zsock_poll(fds, nfds, req_timeout_ms);\n\t\tif (ret == 0) {\n\t\t\tLOG_DBG(\"Timeout\");\n\t\t\tret = -ETIMEDOUT;\n\t\t\tgoto error;\n\t\t} else if (ret < 0) {\n\t\t\tret = -errno;\n\t\t\tgoto error;\n\t\t}\n\n\t\tif (fds[0].revents & ZSOCK_POLLERR) {\n\t\t\tint sock_err;\n\t\t\tnet_socklen_t optlen = sizeof(sock_err);\n\n\t\t\t(void)zsock_getsockopt(sock, ZSOCK_SOL_SOCKET, ZSOCK_SO_ERROR,\n\t\t\t\t\t       &sock_err, &optlen);\n\t\t\tret = -sock_err;\n\t\t\tgoto error;\n\t\t} else if (fds[0].revents & ZSOCK_POLLNVAL) {\n\t\t\tret = -EBADF;\n\t\t\tgoto error;\n\t\t} else if (fds[0].revents & ZSOCK_POLLIN) {\n\t\t\treceived = zsock_recv(sock, req->internal.response.recv_buf + offset,\n\t\t\t\t\t      req->internal.response.recv_buf_len - offset, 0);\n\t\t\tif (received == 0 && total_received == 0) {\n\t\t\t\t/* Connection closed, no data received */\n\t\t\t\tgoto closed;\n\t\t\t} else if (received < 0) {\n\t\t\t\tret = -errno;\n\t\t\t\tgoto error;\n\t\t\t}\n\n\t\t\ttotal_received += received;\n\t\t\toffset += received;\n\n\t\t\t/* Initialize the data length with the received data length. */\n\t\t\treq->internal.response.data_len = offset;\n\n\t\t\t/* In case of EOF on a socket, indicate this by passing\n\t\t\t * 0 length to the parser.\n\t\t\t */\n\t\t\tprocessed = http_parser_execute(\n\t\t\t\t&req->internal.parser, &req->internal.parser_settings,\n\t\t\t\treq->internal.response.recv_buf, received > 0 ? offset : 0);\n\n\t\t\tif (processed > offset) {\n\t\t\t\tLOG_ERR(\"HTTP parser error, too much data consumed\");\n\t\t\t\tret = -EBADMSG;\n\t\t\t\tgoto error;\n\t\t\t}\n\n\t\t\tif (req->internal.parser.http_errno != HPE_OK) {\n\t\t\t\tLOG_ERR(\"HTTP parsing error, %d\",\n\t\t\t\t\treq->internal.parser.http_errno);\n\t\t\t\tret = -EBADMSG;\n\t\t\t\tgoto error;\n\t\t\t}\n\n\t\t\t/* Update the response data length with the actually\n\t\t\t * processed bytes.\n\t\t\t */\n\t\t\treq->internal.response.data_len = processed;\n\t\t\toffset -= processed;\n\n\t\t\tif (offset >= req->internal.response.recv_buf_len) {\n\t\t\t\t/* This means the parser did not consume any data\n\t\t\t\t * and we can't fit any more in the buffer.\n\t\t\t\t */\n\t\t\t\tLOG_ERR(\"HTTP RX buffer full, cannot proceed\");\n\t\t\t\tret = -ENOMEM;\n\t\t\t\tgoto error;\n\t\t\t}\n\n\t\t\tif (req->internal.response.message_complete) {\n\t\t\t\thttp_report_complete(req);\n\t\t\t} else {\n\t\t\t\tret = http_report_progress(req);\n\t\t\t\tif (ret < 0) {\n\t\t\t\t\tLOG_DBG(\"Connection aborted by the application (%d)\",\n\t\t\t\t\t\tret);\n\t\t\t\t\treturn -ECONNABORTED;\n\t\t\t\t}\n\n\t\t\t\t/* Re-use the result buffer and start to fill it again */\n\t\t\t\treq->internal.response.data_len = 0;\n\t\t\t\treq->internal.response.body_frag_start = NULL;\n\t\t\t\treq->internal.response.body_frag_len = 0;\n\t\t\t}\n\n\t\t\tif (offset > 0) {\n\t\t\t\t/* In case there are any unprocessed data left,\n\t\t\t\t * move them to the front of the buffer.\n\t\t\t\t */\n\t\t\t\tmemmove(req->internal.response.recv_buf,\n\t\t\t\t\treq->internal.response.recv_buf + processed,\n\t\t\t\t\toffset);\n\t\t\t}\n\t\t} else if (fds[0].revents & ZSOCK_POLLHUP) {\n\t\t\t/* Connection closed */\n\t\t\tgoto closed;\n\t\t}\n\n\t} while (!req->internal.response.message_complete);\n\n\t/* If there's still some data left in the buffer after HTTP processing,\n\t * reflect this in data_len variable.\n\t */\n\treq->data_len = offset;\n\n\treturn total_received;\n\nclosed:\n\tLOG_DBG(\"Connection closed\");\n\n\t/* If connection was closed with no data sent, this is a NULL response, and is a special\n\t * case valid response.\n\t */\n\tif (total_received == 0) {\n\t\thttp_report_null(req);\n\t\treturn total_received;\n\t}\n\n\t/* Otherwise, connection was closed mid-way through response, and this should be\n\t * considered an error.\n\t */\n\tret = -ECONNRESET;\n\nerror:\n\tLOG_DBG(\"Connection error (%d)\", ret);\n\treturn ret;\n}\n\nint http_client_req(int sock, struct http_request *req,\n\t\t    int32_t timeout, void *user_data)\n{\n\t/* Utilize the network usage by sending data in bigger blocks */\n\tchar send_buf[MAX_SEND_BUF_LEN];\n\tconst size_t send_buf_max_len = sizeof(send_buf);\n\tsize_t send_buf_pos = 0;\n\tint total_sent = 0;\n\tint ret, total_recv, i;\n\tconst char *method;\n\tk_timeout_t req_timeout = (timeout == SYS_FOREVER_MS) ? K_FOREVER : K_MSEC(timeout);\n\tk_timepoint_t req_end_timepoint = sys_timepoint_calc(req_timeout);\n\n\tif (sock < 0 || req == NULL || req->response == NULL ||\n\t    req->recv_buf == NULL || req->recv_buf_len == 0) {\n\t\treturn -EINVAL;\n\t}\n\n\tmemset(&req->internal.response, 0, sizeof(req->internal.response));\n\n\treq->internal.response.http_cb = req->http_cb;\n\treq->internal.response.cb = req->response;\n\treq->internal.response.recv_buf = req->recv_buf;\n\treq->internal.response.recv_buf_len = req->recv_buf_len;\n\treq->internal.user_data = user_data;\n\treq->internal.sock = sock;\n\n\tmethod = http_method_str(req->method);\n\n\tret = http_send_data(sock, send_buf, send_buf_max_len, &send_buf_pos,\n\t\t\t\treq_end_timepoint, method,\n\t\t\t\t\" \", req->url, \" \", req->protocol,\n\t\t\t\tHTTP_CRLF, NULL);\n\tif (ret < 0) {\n\t\tgoto out;\n\t}\n\n\ttotal_sent += ret;\n\n\tif (req->port) {\n\t\tret = http_send_data(sock, send_buf, send_buf_max_len,\n\t\t\t\t\t&send_buf_pos, req_end_timepoint, \"Host\", \": \", req->host,\n\t\t\t\t\t\":\", req->port, HTTP_CRLF, NULL);\n\n\t\tif (ret < 0) {\n\t\t\tgoto out;\n\t\t}\n\n\t\ttotal_sent += ret;\n\t} else {\n\t\tret = http_send_data(sock, send_buf, send_buf_max_len,\n\t\t\t\t     &send_buf_pos, req_end_timepoint, \"Host\", \": \", req->host,\n\t\t\t\t     HTTP_CRLF, NULL);\n\n\t\tif (ret < 0) {\n\t\t\tgoto out;\n\t\t}\n\n\t\ttotal_sent += ret;\n\t}\n\n\tif (req->optional_headers_cb) {\n\t\tret = http_flush_data(sock, send_buf, send_buf_pos, req_end_timepoint);\n\t\tif (ret < 0) {\n\t\t\tgoto out;\n\t\t}\n\n\t\tsend_buf_pos = 0;\n\t\ttotal_sent += ret;\n\n\t\tret = req->optional_headers_cb(sock, req, user_data);\n\t\tif (ret < 0) {\n\t\t\tgoto out;\n\t\t}\n\n\t\ttotal_sent += ret;\n\t} else {\n\t\tfor (i = 0; req->optional_headers && req->optional_headers[i];\n\t\t     i++) {\n\t\t\tret = http_send_data(sock, send_buf, send_buf_max_len,\n\t\t\t\t\t     &send_buf_pos, req_end_timepoint,\n\t\t\t\t\t     req->optional_headers[i], NULL);\n\t\t\tif (ret < 0) {\n\t\t\t\tgoto out;\n\t\t\t}\n\n\t\t\ttotal_sent += ret;\n\t\t}\n\t}\n\n\tfor (i = 0; req->header_fields && req->header_fields[i]; i++) {\n\t\tret = http_send_data(sock, send_buf, send_buf_max_len,\n\t\t\t\t     &send_buf_pos, req_end_timepoint, req->header_fields[i],\n\t\t\t\t     NULL);\n\t\tif (ret < 0) {\n\t\t\tgoto out;\n\t\t}\n\n\t\ttotal_sent += ret;\n\t}\n\n\tif (req->content_type_value) {\n\t\tret = http_send_data(sock, send_buf, send_buf_max_len,\n\t\t\t\t     &send_buf_pos, req_end_timepoint, \"Content-Type\", \": \",\n\t\t\t\t     req->content_type_value, HTTP_CRLF, NULL);\n\t\tif (ret < 0) {\n\t\t\tgoto out;\n\t\t}\n\n\t\ttotal_sent += ret;\n\t}\n\n\tif (req->payload || req->payload_cb) {\n\t\tif (req->payload_len) {\n\t\t\tchar content_len_str[HTTP_CONTENT_LEN_SIZE];\n\n\t\t\tret = snprintk(content_len_str, HTTP_CONTENT_LEN_SIZE,\n\t\t\t\t       \"%zd\", req->payload_len);\n\t\t\tif (ret <= 0 || ret >= HTTP_CONTENT_LEN_SIZE) {\n\t\t\t\tret = -ENOMEM;\n\t\t\t\tgoto out;\n\t\t\t}\n\n\t\t\tret = http_send_data(sock, send_buf, send_buf_max_len,\n\t\t\t\t\t\t&send_buf_pos, req_end_timepoint,\n\t\t\t\t\t\t\"Content-Length\", \": \",\n\t\t\t\t\t\tcontent_len_str, HTTP_CRLF,\n\t\t\t\t\t\tHTTP_CRLF, NULL);\n\t\t} else {\n\t\t\tret = http_send_data(sock, send_buf, send_buf_max_len,\n\t\t\t\t     &send_buf_pos, req_end_timepoint, HTTP_CRLF, NULL);\n\t\t}\n\n\t\tif (ret < 0) {\n\t\t\tgoto out;\n\t\t}\n\n\t\ttotal_sent += ret;\n\n\t\tret = http_flush_data(sock, send_buf, send_buf_pos, req_end_timepoint);\n\t\tif (ret < 0) {\n\t\t\tgoto out;\n\t\t}\n\n\t\tsend_buf_pos = 0;\n\t\ttotal_sent += ret;\n\n\t\tif (req->payload_cb) {\n\t\t\tret = req->payload_cb(sock, req, user_data);\n\t\t\tif (ret < 0) {\n\t\t\t\tgoto out;\n\t\t\t}\n\n\t\t\ttotal_sent += ret;\n\t\t} else {\n\t\t\tuint32_t length;\n\n\t\t\tif (req->payload_len == 0) {\n\t\t\t\tlength = strlen(req->payload);\n\t\t\t} else {\n\t\t\t\tlength = req->payload_len;\n\t\t\t}\n\n\t\t\tret = sendall(sock, req->payload, length, req_end_timepoint);\n\t\t\tif (ret < 0) {\n\t\t\t\tgoto out;\n\t\t\t}\n\n\t\t\ttotal_sent += length;\n\t\t}\n\t} else {\n\t\tret = http_send_data(sock, send_buf, send_buf_max_len,\n\t\t\t\t     &send_buf_pos, req_end_timepoint, HTTP_CRLF, NULL);\n\t\tif (ret < 0) {\n\t\t\tgoto out;\n\t\t}\n\n\t\ttotal_sent += ret;\n\t}\n\n\tif (send_buf_pos > 0) {\n\t\tret = http_flush_data(sock, send_buf, send_buf_pos, req_end_timepoint);\n\t\tif (ret < 0) {\n\t\t\tgoto out;\n\t\t}\n\n\t\ttotal_sent += ret;\n\t}\n\n\tNET_DBG(\"Sent %d bytes\", total_sent);\n\n\thttp_client_init_parser(&req->internal.parser,\n\t\t\t\t&req->internal.parser_settings);\n\n\t/* Request is sent, now wait data to be received */\n\ttotal_recv = http_wait_data(sock, req, req_end_timepoint);\n\tif (total_recv < 0) {\n\t\tNET_DBG(\"Wait data failure (%d)\", total_recv);\n\t\tret = total_recv;\n\t\tgoto out;\n\t}\n\n\tNET_DBG(\"Received %d bytes\", total_recv);\n\n\treturn total_sent;\n\nout:\n\treturn ret;\n}\n"
+      },
+      "events": [
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "SystemPromptEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "MessageEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/net/lib/http_client/src/main.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [450, 580], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/net/lib/http/http_client.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [1, 300], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"NOTE: We only show up to 564 since there're only 564 lines in this file.\\nHere's the result of running `cat -n` on /zephyrproject/zephyr/tests/net/lib/http_client/src/main.c:\\n   450\\t\\n   451\\t\\tARG_UNUSED(p1);\\n   452\\t\\tARG_UNUSED(p2);\\n   453\\t\\tARG_UNUSED(p3);\\n   454\\t\\n   455\\t\\tsrv = zsock_socket(NET_AF_INET6, NET_SOCK_STREAM, NET_IPPROTO_TCP);\\n   456\\t\\tif (srv < 0) {\\n   457\\t\\t\\treturn;\\n   458\\t\\t}\\n   459\\t\\n   460\\t\\tsa.sin6_family = NET_AF_INET6;\\n   461\\t\\tsa.sin6_port = net_htons(CHUNKED_SERVER_PORT);\\n   462\\t\\tret = zsock_inet_pton(NET_AF_INET6, SERVER_IPV6_ADDR, &sa.sin6_addr.s6_addr);\\n   463\\t\\tif (ret != 1) {\\n   464\\t\\t\\tzsock_close(srv);\\n   465\\t\\t\\treturn;\\n   466\\t\\t}\\n   467\\t\\n   468\\t\\tret = zsock_bind(srv, (struct net_sockaddr *)&sa, sizeof(sa));\\n   469\\t\\tif (ret < 0) {\\n   470\\t\\t\\tzsock_close(srv);\\n   471\\t\\t\\treturn;\\n   472\\t\\t}\\n   473\\t\\n   474\\t\\tzsock_listen(srv, 1);\\n   475\\t\\tk_s\n…[2795 chars omitted]…\n sizeof(chunked_response_buf);\\n   550\\t\\n   551\\t\\tret = http_client_req(chunked_client_fd, &req, -1, &ctx);\\n   552\\t\\tzassert_true(ret > 0, \\\"http_client_req() failed (%d)\\\", ret);\\n   553\\t\\tzassert_true(ctx.final, \\\"No final event received\\\");\\n   554\\t\\tzassert_equal(ctx.status, 206, \\\"Unexpected HTTP status code\\\");\\n   555\\t\\n   556\\t\\tzassert_equal(ctx.offset, CHUNKED_BODY_SIZE,\\n   557\\t\\t\\t      \\\"body_frag_len overcount: got %zu, expected %d\\\",\\n   558\\t\\t\\t      ctx.offset, CHUNKED_BODY_SIZE);\\n   559\\t\\tzassert_mem_equal(chunked_response_buf, \\\"AAAAAAAAAAAAAAAA\\\",\\n   560\\t\\t\\t\\t  CHUNKED_BODY_SIZE, \\\"Body content mismatch\\\");\\n   561\\t}\\n   562\\t\\n   563\\tZTEST_SUITE(http_client_chunked_te, NULL, NULL,\\n   564\\t\\t    chunked_tests_before, chunked_tests_after, NULL);\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/net/lib/http_client/src/main.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/subsys/net/lib/http/http_client.c:\\n     1\\t/** @file\\n     2\\t * @brief HTTP client API\\n     3\\t *\\n     4\\t * An API for applications to send HTTP requests\\n     5\\t */\\n     6\\t\\n     7\\t/*\\n     8\\t * Copyright (c) 2019 Intel Corporation\\n     9\\t *\\n    10\\t * SPDX-License-Identifier: Apache-2.0\\n    11\\t */\\n    12\\t\\n    13\\t#include <zephyr/logging/log.h>\\n    14\\tLOG_MODULE_REGISTER(net_http_client, CONFIG_NET_HTTP_LOG_LEVEL);\\n    15\\t\\n    16\\t#include <zephyr/kernel.h>\\n    17\\t#include <string.h>\\n    18\\t#include <strings.h>\\n    19\\t#include <errno.h>\\n    20\\t#include <stdbool.h>\\n    21\\t#include <stdlib.h>\\n    22\\t\\n    23\\t#include <zephyr/net/net_ip.h>\\n    24\\t#include <zephyr/net/net_log.h>\\n    25\\t#include <zephyr/net/socket.h>\\n    26\\t#include <zephyr/net/http/client.h>\\n    27\\t#include <zephyr/net/http/status.h>\\n    28\\t\\n    29\\t#i\n…[8641 chars omitted]…\nrange.total;\\n   278\\t\\t\\treq->internal.response.cr_present = false;\\n   279\\t\\t}\\n   280\\t\\n   281\\t\\tif (req->internal.response.http_cb &&\\n   282\\t\\t    req->internal.response.http_cb->on_header_value) {\\n   283\\t\\t\\treq->internal.response.http_cb->on_header_value(parser, at,\\n   284\\t\\t\\t\\t\\t\\t\\t\\t\\tlength);\\n   285\\t\\t}\\n   286\\t\\n   287\\t\\tprint_header_field(length, at);\\n   288\\t\\n   289\\t\\treturn 0;\\n   290\\t}\\n   291\\t\\n   292\\tstatic int on_body(struct http_parser *parser, const char *at, size_t length)\\n   293\\t{\\n   294\\t\\tstruct http_request *req = CONTAINER_OF(parser,\\n   295\\t\\t\\t\\t\\t\\t\\tstruct http_request,\\n   296\\t\\t\\t\\t\\t\\t\\tinternal.parser);\\n   297\\t\\n   298\\t\\treq->internal.response.body_found = 1;\\n   299\\t\\treq->internal.response.processed += length;\\n   300\\t\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/net/lib/http/http_client.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/net/lib/http/http_client.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [301, 700], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/net/lib/http_client/src/main.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [1, 450], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/subsys/net/lib/http/http_client.c:\\n   301\\t\\tNET_DBG(\\\"Processed %zd length %zd\\\", req->internal.response.processed,\\n   302\\t\\t\\tlength);\\n   303\\t\\n   304\\t\\tif (req->internal.response.http_cb &&\\n   305\\t\\t    req->internal.response.http_cb->on_body) {\\n   306\\t\\t\\treq->internal.response.http_cb->on_body(parser, at, length);\\n   307\\t\\t}\\n   308\\t\\n   309\\t\\t/* Reset the body_frag_start pointer for each fragment. */\\n   310\\t\\tif (!req->internal.response.body_frag_start) {\\n   311\\t\\t\\treq->internal.response.body_frag_start = (uint8_t *)at;\\n   312\\t\\t}\\n   313\\t\\n   314\\t\\t/* Calculate the length of the body contained in the recv_buf */\\n   315\\t\\treq->internal.response.body_frag_len = req->internal.response.data_len -\\n   316\\t\\t\\t(req->internal.response.body_frag_start - req->internal.response.recv_buf);\\n   317\\t\\n   318\\t\\treturn 0;\\n   319\\t}\\n   320\\t\\\n…[13624 chars omitted]…\nHost\\\", \\\": \\\", req->host,\\n   675\\t\\t\\t\\t\\t\\t\\\":\\\", req->port, HTTP_CRLF, NULL);\\n   676\\t\\n   677\\t\\t\\tif (ret < 0) {\\n   678\\t\\t\\t\\tgoto out;\\n   679\\t\\t\\t}\\n   680\\t\\n   681\\t\\t\\ttotal_sent += ret;\\n   682\\t\\t} else {\\n   683\\t\\t\\tret = http_send_data(sock, send_buf, send_buf_max_len,\\n   684\\t\\t\\t\\t\\t     &send_buf_pos, req_end_timepoint, \\\"Host\\\", \\\": \\\", req->host,\\n   685\\t\\t\\t\\t\\t     HTTP_CRLF, NULL);\\n   686\\t\\n   687\\t\\t\\tif (ret < 0) {\\n   688\\t\\t\\t\\tgoto out;\\n   689\\t\\t\\t}\\n   690\\t\\n   691\\t\\t\\ttotal_sent += ret;\\n   692\\t\\t}\\n   693\\t\\n   694\\t\\tif (req->optional_headers_cb) {\\n   695\\t\\t\\tret = http_flush_data(sock, send_buf, send_buf_pos, req_end_timepoint);\\n   696\\t\\t\\tif (ret < 0) {\\n   697\\t\\t\\t\\tgoto out;\\n   698\\t\\t\\t}\\n   699\\t\\n   700\\t\\t\\tsend_buf_pos = 0;\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/net/lib/http/http_client.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/tests/net/lib/http_client/src/main.c:\\n     1\\t/*\\n     2\\t * Copyright (c) 2025 Nordic Semiconductor ASA\\n     3\\t *\\n     4\\t * SPDX-License-Identifier: Apache-2.0\\n     5\\t */\\n     6\\t\\n     7\\t#include <zephyr/misc/lorem_ipsum.h>\\n     8\\t#include <zephyr/net/http/client.h>\\n     9\\t#include <zephyr/net/http/service.h>\\n    10\\t#include <zephyr/ztest.h>\\n    11\\t\\n    12\\t#define SERVER_IPV6_ADDR \\\"::1\\\"\\n    13\\t#define SERVER_PORT 8080\\n    14\\t#define TEST_BUF_SIZE 1200\\n    15\\t\\n    16\\tstatic uint16_t test_http_service_port = SERVER_PORT;\\n    17\\tHTTP_SERVICE_DEFINE(test_http_service, SERVER_IPV6_ADDR,\\n    18\\t\\t\\t    &test_http_service_port, 1, 10, NULL, NULL, NULL);\\n    19\\t\\n    20\\tstatic const char static_resource_payload[] = LOREM_IPSUM_SHORT;\\n    21\\tstruct http_resource_detail_static static_resource_detail = {\\n    22\\t\\t.common = {\\n    23\n…[14278 chars omitted]…\n_PORT 8082\\n   428\\t#define CHUNKED_BODY_SIZE   16\\n   429\\t\\n   430\\tstatic const char chunked_te_response[] =\\n   431\\t\\t\\\"HTTP/1.1 206 Partial Content\\\\r\\\\n\\\"\\n   432\\t\\t\\\"Content-Range: bytes 0-15/16\\\\r\\\\n\\\"\\n   433\\t\\t\\\"Transfer-Encoding: chunked\\\\r\\\\n\\\"\\n   434\\t\\t\\\"\\\\r\\\\n\\\"\\n   435\\t\\t\\\"10\\\\r\\\\n\\\"\\n   436\\t\\t\\\"AAAAAAAAAAAAAAAA\\\"\\n   437\\t\\t\\\"\\\\r\\\\n\\\"\\n   438\\t\\t\\\"0\\\\r\\\\n\\\"\\n   439\\t\\t\\\"\\\\r\\\\n\\\";\\n   440\\t\\n   441\\tstatic K_THREAD_STACK_DEFINE(chunked_srv_stack, 1024);\\n   442\\tstatic struct k_thread chunked_srv_thread;\\n   443\\tstatic K_SEM_DEFINE(chunked_srv_ready, 0, 1);\\n   444\\t\\n   445\\tstatic void chunked_srv_fn(void *p1, void *p2, void *p3)\\n   446\\t{\\n   447\\t\\tstruct net_sockaddr_in6 sa = { 0 };\\n   448\\t\\tchar req_buf[256];\\n   449\\t\\tint srv, conn, ret;\\n   450\\t\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/net/lib/http_client/src/main.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/include/zephyr/net/http/client.h\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [1, 300], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/net/lib/http/http_parser.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [1600, 1950], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/include/zephyr/net/http/client.h:\\n     1\\t/** @file\\n     2\\t * @brief HTTP client API\\n     3\\t *\\n     4\\t * An API for applications do HTTP requests\\n     5\\t */\\n     6\\t\\n     7\\t/*\\n     8\\t * Copyright (c) 2019 Intel Corporation\\n     9\\t *\\n    10\\t * SPDX-License-Identifier: Apache-2.0\\n    11\\t */\\n    12\\t\\n    13\\t#ifndef ZEPHYR_INCLUDE_NET_HTTP_CLIENT_H_\\n    14\\t#define ZEPHYR_INCLUDE_NET_HTTP_CLIENT_H_\\n    15\\t\\n    16\\t/**\\n    17\\t * @brief HTTP client API\\n    18\\t * @defgroup http_client HTTP client API\\n    19\\t * @since 2.1\\n    20\\t * @version 0.2.0\\n    21\\t * @ingroup networking\\n    22\\t * @{\\n    23\\t */\\n    24\\t\\n    25\\t#include <zephyr/kernel.h>\\n    26\\t#include <zephyr/net/net_ip.h>\\n    27\\t#include <zephyr/net/http/parser.h>\\n    28\\t\\n    29\\t#ifdef __cplusplus\\n    30\\textern \\\"C\\\" {\\n    31\\t#endif\\n    32\\t\\n    33\\t/** @co\n…[10544 chars omitted]…\n's\\n   283\\t\\t * life cycle. This is a NULL terminated list of header fields.\\n   284\\t\\t */\\n   285\\t\\tconst char * const *header_fields;\\n   286\\t\\n   287\\t\\t/** The value of the Content-Type header field, may be NULL */\\n   288\\t\\tconst char *content_type_value;\\n   289\\t\\n   290\\t\\t/** Hostname to be used in the request */\\n   291\\t\\tconst char *host;\\n   292\\t\\n   293\\t\\t/** Port number to be used in the request */\\n   294\\t\\tconst char *port;\\n   295\\t\\n   296\\t\\t/** User supplied callback function to call when payload\\n   297\\t\\t * needs to be sent. This can be NULL in which case the payload field\\n   298\\t\\t * in http_request is used. The idea of this payload callback is to\\n   299\\t\\t * allow user to send more data that is practical to store in allocated\\n   300\\t\\t * memory.\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/include/zephyr/net/http/client.h\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/subsys/net/lib/http/http_parser.c:\\n  1600\\t\\t\\t}\\n  1601\\t\\n  1602\\t\\t\\t/* first digit of minor HTTP version */\\n  1603\\t\\t\\tcase s_req_first_http_minor:\\n  1604\\t\\t\\t\\tif (UNLIKELY(!IS_NUM(ch))) {\\n  1605\\t\\t\\t\\t\\tSET_ERRNO(HPE_INVALID_VERSION);\\n  1606\\t\\t\\t\\t\\tgoto error;\\n  1607\\t\\t\\t\\t}\\n  1608\\t\\n  1609\\t\\t\\t\\tparser->http_minor = ch - '0';\\n  1610\\t\\t\\t\\tUPDATE_STATE(s_req_http_minor);\\n  1611\\t\\t\\t\\tbreak;\\n  1612\\t\\n  1613\\t\\t\\t/* minor HTTP version or end of request line */\\n  1614\\t\\t\\tcase s_req_http_minor: {\\n  1615\\t\\t\\t\\tif (ch == CR) {\\n  1616\\t\\t\\t\\t\\tUPDATE_STATE(s_req_line_almost_done);\\n  1617\\t\\t\\t\\t\\tbreak;\\n  1618\\t\\t\\t\\t}\\n  1619\\t\\n  1620\\t\\t\\t\\tif (ch == LF) {\\n  1621\\t\\t\\t\\t\\tUPDATE_STATE(s_header_field_start);\\n  1622\\t\\t\\t\\t\\tbreak;\\n  1623\\t\\t\\t\\t}\\n  1624\\t\\n  1625\\t\\t\\t\\t/* XXX allow spaces after digit? */\\n  1626\\t\\n  1627\\t\\t\\t\\\n…[9449 chars omitted]…\ntif (ch == ' ' || ch == '\\\\t') {\\n  1929\\t\\t\\t\\t\\tUPDATE_STATE(s_header_value_start);\\n  1930\\t\\t\\t\\t\\tgoto reexecute;\\n  1931\\t\\t\\t\\t}\\n  1932\\t\\n  1933\\t\\t\\t\\t/* finished the header */\\n  1934\\t\\t\\t\\tswitch (parser->header_state) {\\n  1935\\t\\t\\t\\tcase h_connection_keep_alive:\\n  1936\\t\\t\\t\\t\\tparser->flags |= F_CONNECTION_KEEP_ALIVE;\\n  1937\\t\\t\\t\\t\\tbreak;\\n  1938\\t\\t\\t\\tcase h_connection_close:\\n  1939\\t\\t\\t\\t\\tparser->flags |= F_CONNECTION_CLOSE;\\n  1940\\t\\t\\t\\t\\tbreak;\\n  1941\\t\\t\\t\\tcase h_transfer_encoding_chunked:\\n  1942\\t\\t\\t\\t\\tparser->flags |= F_CHUNKED;\\n  1943\\t\\t\\t\\t\\tbreak;\\n  1944\\t\\t\\t\\tcase h_connection_upgrade:\\n  1945\\t\\t\\t\\t\\tparser->flags |= F_CONNECTION_UPGRADE;\\n  1946\\t\\t\\t\\t\\tbreak;\\n  1947\\t\\t\\t\\tdefault:\\n  1948\\t\\t\\t\\t\\tbreak;\\n  1949\\t\\t\\t\\t}\\n  1950\\t\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/net/lib/http/http_parser.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/net/lib/http/http_parser.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [1951, 2400], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/subsys/net/lib/http/http_parser.c:\\n  1951\\t\\t\\t\\tUPDATE_STATE(s_header_field_start);\\n  1952\\t\\t\\t\\tgoto reexecute;\\n  1953\\t\\t\\t}\\n  1954\\t\\n  1955\\t\\t\\tcase s_header_value_discard_ws_almost_done: {\\n  1956\\t\\t\\t\\trc = strict_check(parser, ch != LF);\\n  1957\\t\\t\\t\\tif (rc != 0) {\\n  1958\\t\\t\\t\\t\\tgoto error;\\n  1959\\t\\t\\t\\t}\\n  1960\\t\\t\\t\\tUPDATE_STATE(s_header_value_discard_lws);\\n  1961\\t\\t\\t\\tbreak;\\n  1962\\t\\t\\t}\\n  1963\\t\\n  1964\\t\\t\\tcase s_header_value_discard_lws: {\\n  1965\\t\\t\\t\\tif (ch == ' ' || ch == '\\\\t') {\\n  1966\\t\\t\\t\\t\\tUPDATE_STATE(s_header_value_discard_ws);\\n  1967\\t\\t\\t\\t\\tbreak;\\n  1968\\t\\t\\t\\t}\\n  1969\\t\\t\\t\\tswitch (parser->header_state) {\\n  1970\\t\\t\\t\\tcase h_connection_keep_alive:\\n  1971\\t\\t\\t\\t\\tparser->flags |=\\n  1972\\t\\t\\t\\t\\t\\tF_CONNECTION_KEEP_ALIVE;\\n  1973\\t\\t\\t\\t\\tbreak;\\n  1974\\t\\t\\t\\tcase h_connection_close:\\n  1975\\t\\t\\t\\\n…[14121 chars omitted]…\nATE);\\n  2382\\t\\t\\t\\tgoto error;\\n  2383\\t\\t\\t}\\n  2384\\t\\t}\\n  2385\\t\\n  2386\\t\\t/* Run callbacks for any marks that we have leftover after we ran our of\\n  2387\\t\\t * bytes. There should be at most one of these set, so it's OK to invoke\\n  2388\\t\\t * them in series (unset marks will not result in callbacks).\\n  2389\\t\\t *\\n  2390\\t\\t * We use the NOADVANCE() variety of callbacks here because 'p' has\\n  2391\\t\\t * already\\n  2392\\t\\t * overflowed 'data' and this allows us to correct for the off-by-one\\n  2393\\t\\t * that\\n  2394\\t\\t * we'd otherwise have (since CALLBACK_DATA() is meant to be run with a\\n  2395\\t\\t * 'p'\\n  2396\\t\\t * value that's in-bounds).\\n  2397\\t\\t */\\n  2398\\t\\n  2399\\t\\t__ASSERT_NO_MSG(((header_field_mark ? 1 : 0) +\\n  2400\\t\\t\\t\\t(header_value_mark ? 1 : 0) +\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/net/lib/http/http_parser.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"grep -rn \\\"body_frag\\\" /zephyrproject/zephyr/\", \"is_input\": false, \"timeout\": null, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"/zephyrproject/zephyr/include/zephyr/net/http/client.h:122:      *                                   |←-------- body_frag_len ---------→|\\n/zephyrproject/zephyr/include/zephyr/net/http/client.h:128:      *             recv_buf          body_frag_start\\n/zephyrproject/zephyr/include/zephyr/net/http/client.h:134:      *                 |←------------------ body_frag_len ------------------→|\\n/zephyrproject/zephyr/include/zephyr/net/http/client.h:141:      *          body_frag_start\\n/zephyrproject/zephyr/include/zephyr/net/http/client.h:143:      * body_frag_start >= recv_buf\\n/zephyrproject/zephyr/include/zephyr/net/http/client.h:144:      * body_frag_len = data_len - (body_frag_start - recv_buf)\\n/zephyrproject/zephyr/include/zephyr/net/http/client.h:147:     uint8_t *body_frag_start;\\n/zephyrproject/zephyr/include/zephyr/net/http/client.h:150:     size_t body_frag_len;\\n/zephyrproject/zephyr/subsys/mgmt/hawkbit/hawkbit.c:93\n…[2226 chars omitted]…\nject/zephyr/tests/net/lib/http_client/src/main.c:534:ZTEST(http_client_chunked_te, test_body_frag_len_chunked_te)\\n/zephyrproject/zephyr/tests/net/lib/http_client/src/main.c:557:               \\\"body_frag_len overcount: got %zu, expected %d\\\",\"}], \"is_error\": false, \"command\": \"grep -rn \\\"body_frag\\\" /zephyrproject/zephyr/\", \"exit_code\": -1, \"timeout\": false, \"metadata\": {\"exit_code\": -1, \"pid\": -1, \"username\": null, \"hostname\": null, \"working_dir\": null, \"py_interpreter_path\": null, \"prefix\": \"\", \"suffix\": \"\\n[The command has no new output after 30 seconds. You may wait longer to see additional output by sending empty command '', send other commands to interact with the current process, send keys (\\\"C-c\\\", \\\"C-z\\\", \\\"C-d\\\") to interrupt/kill the previous command before sending your new command, or use the timeout parameter in terminal for future commands.]\"}, \"full_output_save_dir\": \"workspace/conversations/27a4fb1b1c26434da2266b958344718c/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"C-c\", \"is_input\": true, \"timeout\": null, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"No previous running command to interact with.\"}], \"is_error\": true, \"command\": \"C-c\", \"exit_code\": null, \"timeout\": false, \"metadata\": {\"exit_code\": -1, \"pid\": -1, \"username\": null, \"hostname\": null, \"working_dir\": null, \"py_interpreter_path\": null, \"prefix\": \"\", \"suffix\": \"\"}, \"full_output_save_dir\": \"workspace/conversations/27a4fb1b1c26434da2266b958344718c/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"ls -la --time-style=full-iso /zephyrproject/zephyr/subsys/net/lib/http/ /zephyrproject/zephyr/include/zephyr/net/http/ /zephyrproject/zephyr/tests/net/lib/http_client/src/\", \"is_input\": false, \"timeout\": null, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"/zephyrproject/zephyr/include/zephyr/net/http/:\\ntotal 92\\ndrwxr-xr-x  12 root root   384 2026-08-30 00:00:00.000000000 +0000 .\\ndrwxr-xr-x 105 root root  3360 2026-08-30 00:00:00.000000000 +0000 ..\\n-rw-r--r--   1 root root 11292 2026-08-30 00:00:00.000000000 +0000 client.h\\n-rw-r--r--   1 root root  2119 2026-08-30 00:00:00.000000000 +0000 frame.h\\n-rw-r--r--   1 root root  4172 2026-08-30 00:00:00.000000000 +0000 hpack.h\\n-rw-r--r--   1 root root  1715 2026-08-30 00:00:00.000000000 +0000 method.h\\n-rw-r--r--   1 root root  8746 2026-08-30 00:00:00.000000000 +0000 parser.h\\n-rw-r--r--   1 root root  2849 2026-08-30 00:00:00.000000000 +0000 parser_state.h\\n-rw-r--r--   1 root root  2668 2026-08-30 00:00:00.000000000 +0000 parser_url.h\\n-rw-r--r--   1 root root 17331 2026-08-30 00:00:00.000000000 +0000 server.h\\n-rw-r--r--   1 root root 14820 2026-08-30 00:00:00.000000000 +0000 service.h\\n-rw-r--r--   1 root root  4510 2026-\n…[1480 chars omitted]…\nype.ld\\n-rw-r--r--  1 root root   191 2026-08-30 00:00:00.000000000 +0000 iterables_header_capture.ld\\n\\n/zephyrproject/zephyr/tests/net/lib/http_client/src/:\\ntotal 16\\ndrwxr-xr-x 3 root root    96 2026-08-30 00:00:00.000000000 +0000 .\\ndrwxr-xr-x 7 root root   224 2026-08-30 00:00:00.000000000 +0000 ..\\n-rw-r--r-- 1 root root 14563 2026-08-30 00:00:00.000000000 +0000 main.c\"}], \"is_error\": false, \"command\": \"ls -la --time-style=full-iso /zephyrproject/zephyr/subsys/net/lib/http/ /zephyrproject/zephyr/include/zephyr/net/http/ /zephyrproject/zephyr/tests/net/lib/http_client/src/\", \"exit_code\": 0, \"timeout\": false, \"metadata\": {\"exit_code\": 0, \"pid\": -1, \"username\": \"root\", \"hostname\": \"651f044f9479\", \"working_dir\": \"/workspace/project\", \"py_interpreter_path\": \"/opt/python/venv/bin/python\", \"prefix\": \"\", \"suffix\": \"\\n[The command completed with exit code 0.]\"}, \"full_output_save_dir\": \"workspace/conversations/27a4fb1b1c26434da2266b958344718c/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/net/lib/http/http_client.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": [700, 820], \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/subsys/net/lib/http/http_client.c:\\n   700\\t\\t\\tsend_buf_pos = 0;\\n   701\\t\\t\\ttotal_sent += ret;\\n   702\\t\\n   703\\t\\t\\tret = req->optional_headers_cb(sock, req, user_data);\\n   704\\t\\t\\tif (ret < 0) {\\n   705\\t\\t\\t\\tgoto out;\\n   706\\t\\t\\t}\\n   707\\t\\n   708\\t\\t\\ttotal_sent += ret;\\n   709\\t\\t} else {\\n   710\\t\\t\\tfor (i = 0; req->optional_headers && req->optional_headers[i];\\n   711\\t\\t\\t     i++) {\\n   712\\t\\t\\t\\tret = http_send_data(sock, send_buf, send_buf_max_len,\\n   713\\t\\t\\t\\t\\t\\t     &send_buf_pos, req_end_timepoint,\\n   714\\t\\t\\t\\t\\t\\t     req->optional_headers[i], NULL);\\n   715\\t\\t\\t\\tif (ret < 0) {\\n   716\\t\\t\\t\\t\\tgoto out;\\n   717\\t\\t\\t\\t}\\n   718\\t\\n   719\\t\\t\\t\\ttotal_sent += ret;\\n   720\\t\\t\\t}\\n   721\\t\\t}\\n   722\\t\\n   723\\t\\tfor (i = 0; req->header_fields && req->header_fields[i]; i++) {\\n   724\\t\\t\\tret = http_send_data(sock, send_buf, sen\n…[2304 chars omitted]…\neq->payload_len;\\n   794\\t\\t\\t\\t}\\n   795\\t\\n   796\\t\\t\\t\\tret = sendall(sock, req->payload, length, req_end_timepoint);\\n   797\\t\\t\\t\\tif (ret < 0) {\\n   798\\t\\t\\t\\t\\tgoto out;\\n   799\\t\\t\\t\\t}\\n   800\\t\\n   801\\t\\t\\t\\ttotal_sent += length;\\n   802\\t\\t\\t}\\n   803\\t\\t} else {\\n   804\\t\\t\\tret = http_send_data(sock, send_buf, send_buf_max_len,\\n   805\\t\\t\\t\\t\\t     &send_buf_pos, req_end_timepoint, HTTP_CRLF, NULL);\\n   806\\t\\t\\tif (ret < 0) {\\n   807\\t\\t\\t\\tgoto out;\\n   808\\t\\t\\t}\\n   809\\t\\n   810\\t\\t\\ttotal_sent += ret;\\n   811\\t\\t}\\n   812\\t\\n   813\\t\\tif (send_buf_pos > 0) {\\n   814\\t\\t\\tret = http_flush_data(sock, send_buf, send_buf_pos, req_end_timepoint);\\n   815\\t\\t\\tif (ret < 0) {\\n   816\\t\\t\\t\\tgoto out;\\n   817\\t\\t\\t}\\n   818\\t\\n   819\\t\\t\\ttotal_sent += ret;\\n   820\\t\\t}\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/net/lib/http/http_client.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"str_replace\", \"path\": \"/zephyrproject/zephyr/subsys/net/lib/http/http_client.c\", \"file_text\": null, \"old_str\": \"\\t/* Calculate the length of the body contained in the recv_buf */\\n\\treq->internal.response.body_frag_len = req->internal.response.data_len -\\n\\t\\t(req->internal.response.body_frag_start - req->internal.response.recv_buf);\", \"new_str\": \"\\t/* Calculate the length of the body contained in the recv_buf */\\n\\treq->internal.response.body_frag_len += length;\", \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"The file /zephyrproject/zephyr/subsys/net/lib/http/http_client.c has been edited. Here's the result of running `cat -n` on a snippet of /zephyrproject/zephyr/subsys/net/lib/http/http_client.c:\\n   311\\t\\t\\treq->internal.response.body_frag_start = (uint8_t *)at;\\n   312\\t\\t}\\n   313\\t\\n   314\\t\\t/* Calculate the length of the body contained in the recv_buf */\\n   315\\t\\treq->internal.response.body_frag_len += length;\\n   316\\t\\n   317\\t\\treturn 0;\\n   318\\t}\\n   319\\t\\nReview the changes and make sure they are as expected. Edit the file again if necessary.\"}], \"is_error\": false, \"command\": \"str_replace\", \"path\": \"/zephyrproject/zephyr/subsys/net/lib/http/http_client.c\", \"prev_exist\": true, \"old_content\": \"/** @file\\n * @brief HTTP client API\\n *\\n * An API for applications to send HTTP requests\\n */\\n\\n/*\\n * Copyright (c) 2019 Intel Corporation\\n *\\n * SPDX-License-Identifier: Apache-2.0\\n */\\n\\n#include <zephyr/logging/log.\n…[45448 chars omitted]…\n);\\n\\t\\t\\tif (ret < 0) {\\n\\t\\t\\t\\tgoto out;\\n\\t\\t\\t}\\n\\n\\t\\t\\ttotal_sent += length;\\n\\t\\t}\\n\\t} else {\\n\\t\\tret = http_send_data(sock, send_buf, send_buf_max_len,\\n\\t\\t\\t\\t     &send_buf_pos, req_end_timepoint, HTTP_CRLF, NULL);\\n\\t\\tif (ret < 0) {\\n\\t\\t\\tgoto out;\\n\\t\\t}\\n\\n\\t\\ttotal_sent += ret;\\n\\t}\\n\\n\\tif (send_buf_pos > 0) {\\n\\t\\tret = http_flush_data(sock, send_buf, send_buf_pos, req_end_timepoint);\\n\\t\\tif (ret < 0) {\\n\\t\\t\\tgoto out;\\n\\t\\t}\\n\\n\\t\\ttotal_sent += ret;\\n\\t}\\n\\n\\tNET_DBG(\\\"Sent %d bytes\\\", total_sent);\\n\\n\\thttp_client_init_parser(&req->internal.parser,\\n\\t\\t\\t\\t&req->internal.parser_settings);\\n\\n\\t/* Request is sent, now wait data to be received */\\n\\ttotal_recv = http_wait_data(sock, req, req_end_timepoint);\\n\\tif (total_recv < 0) {\\n\\t\\tNET_DBG(\\\"Wait data failure (%d)\\\", total_recv);\\n\\t\\tret = total_recv;\\n\\t\\tgoto out;\\n\\t}\\n\\n\\tNET_DBG(\\\"Received %d bytes\\\", total_recv);\\n\\n\\treturn total_sent;\\n\\nout:\\n\\treturn ret;\\n}\\n\", \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"cd /zephyrproject/zephyr/tests/net/lib/http_client && timeout 600 west build -b native_sim -d /tmp/build -p always -t run .\", \"is_input\": false, \"timeout\": 600.0, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"-- west build: generating a build system\\nLoading Zephyr default modules (Zephyr base).\\n-- Application: /zephyrproject/zephyr/tests/net/lib/http_client\\n-- CMake version: 3.28.3\\n-- Found Python3: /opt/python/venv/bin/python3 (found suitable version \\\"3.12.3\\\", minimum required is \\\"3.12\\\") found components: Interpreter\\n-- Cache files will be written to: /root/.cache/zephyr\\n-- Zephyr version: 4.4.0-rc2 (/zephyrproject/zephyr)\\n-- Found west (found suitable version \\\"1.5.0\\\", minimum required is \\\"0.14.0\\\")\\n-- Board: native_sim, qualifiers: native\\n-- Found host-tools: zephyr 1.0.1 (/opt/toolchains/zephyr-sdk-1.0.1)\\n-- Found toolchain: host (gcc/ld)\\n-- Found Dtc: /opt/toolchains/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/bin/dtc (found suitable version \\\"1.7.0\\\", minimum required is \\\"1.4.6\\\")\\n-- Found BOARD.dts: /zephyrproject/zephyr/boards/native/native_sim/native_sim.dts\\n-- Generated zephyr.dts: /\n…[4329 chars omitted]…\np1_client_post_payload_cb] duration = 0.000 seconds\\n\\nSUITE PASS - 100.00% [http_client_chunked_te]: pass = 1, fail = 0, skip = 0, total = 1 duration = 0.000 seconds\\n - PASS - [http_client_chunked_te.test_body_frag_len_chunked_te] duration = 0.000 seconds\\n\\n------ TESTSUITE SUMMARY END ------\\n\\n===================================================================\\nPROJECT EXECUTION SUCCESSFUL\"}], \"is_error\": false, \"command\": \"cd /zephyrproject/zephyr/tests/net/lib/http_client && timeout 600 west build -b native_sim -d /tmp/build -p always -t run .\", \"exit_code\": 0, \"timeout\": false, \"metadata\": {\"exit_code\": 0, \"pid\": -1, \"username\": \"root\", \"hostname\": \"651f044f9479\", \"working_dir\": \"/zephyrproject/zephyr/tests/net/lib/http_client\", \"py_interpreter_path\": \"/opt/python/venv/bin/python\", \"prefix\": \"\", \"suffix\": \"\\n[The command completed with exit code 0.]\"}, \"full_output_save_dir\": \"workspace/conversations/27a4fb1b1c26434da2266b958344718c/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "finish",
+          "action": "{\"message\": \"Fixed the `body_frag_len` calculation in `/zephyrproject/zephyr/subsys/net/lib/http/http_client.c`.\\n\\n### Cause of Defect\\nIn `on_body()`, `req->internal.response.body_frag_len` was calculated as `req->internal.response.data_len - (req->internal.response.body_frag_start - req->internal.response.recv_buf)`. When `Transfer-Encoding: chunked` is used and chunk framing bytes (such as trailing `\\\\r\\\\n0\\\\r\\\\n\\\\r\\\\n`) are present in `recv_buf` after the body data, `data_len` includes those framing bytes, causing `body_frag_len` to overcount the body length.\\n\\n### Fix\\nUpdated `on_body()` in `subsys/net/lib/http/http_client.c` to accumulate the parsed body length directly (`req->internal.response.body_frag_len += length;`).\", \"kind\": \"FinishAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "finish",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Fixed the `body_frag_len` calculation in `/zephyrproject/zephyr/subsys/net/lib/http/http_client.c`.\\n\\n### Cause of Defect\\nIn `on_body()`, `req->internal.response.body_frag_len` was calculated as `req->internal.response.data_len - (req->internal.response.body_frag_start - req->internal.response.recv_buf)`. When `Transfer-Encoding: chunked` is used and chunk framing bytes (such as trailing `\\\\r\\\\n0\\\\r\\\\n\\\\r\\\\n`) are present in `recv_buf` after the body data, `data_len` includes those framing bytes, causing `body_frag_len` to overcount the body length.\\n\\n### Fix\\nUpdated `on_body()` in `subsys/net/lib/http/http_client.c` to accumulate the parsed body length directly (`req->internal.response.body_frag_len += length;`).\"}], \"is_error\": false, \"kind\": \"FinishObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        }
+      ]
+    },
+    "api_events": [],
+    "started_at": "2026-11-05T09:32:06+00:00",
+    "run_meta": {
+      "code_commit": "b57a922d0be3f2bf3bcaf530f3123daaa1b1b88d",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

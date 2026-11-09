@@ -101,7 +101,12 @@ _TRANSIENT_TYPES = _transient_exception_types()
 # EmbedContentRequestsPerDay...PerModel-FreeTier, observed 2026-09-26) is
 # also a 429 but only resets the next day; a 15-minute backoff is pointless,
 # so it counts as non-transient.
-_DAILY_QUOTA_RE = re.compile(r"PerDay", re.IGNORECASE)
+# 2026-11-08：預付額度或預算用完 (Anthropic 回 400 "credit balance is too low"；LiteLLM 代理回
+# "Budget has been exceeded") 也同樣處理：停下整批、不算成結果。
+# 2026-11-08: an exhausted prepaid credit or budget (Anthropic's 400 "credit balance is too low", the LiteLLM
+# proxy's "Budget has been exceeded") is handled the same way: stop the batch, never count it as a result.
+_DAILY_QUOTA_RE = re.compile(r"PerDay|credit balance is too low|Budget has been exceeded|insufficient_quota",
+                             re.IGNORECASE)
 
 
 def is_daily_quota(exc: BaseException) -> bool:

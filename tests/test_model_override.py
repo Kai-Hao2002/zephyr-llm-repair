@@ -34,7 +34,7 @@ def test_blank_override_ignored():
 
 
 def test_override_does_not_touch_other_providers():
-    assert _models("gemini-2.5-flash", False, "anthropic") == ("claude-haiku-4-5-20251001", "claude-sonnet-5")
+    assert _models("gemini-2.5-flash", False, "anthropic") == ("claude-haiku-5-5", "claude-sonnet-5-5")
 
 
 if __name__ == "__main__":

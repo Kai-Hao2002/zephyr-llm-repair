@@ -1,0 +1,93 @@
+[
+  {
+    "case_id": "v3_c_api_substitute_backends_tty_54ee8ec",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 115.00171279907227,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": false,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 874,
+            "output_tokens": 2847
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "crash",
+          "patch": {
+            "filepath": "subsys/modem/backends/modem_backend_tty.c",
+            "content": "/*\n * Copyright (c) 2022 Trackunit Corporation\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/modem/backend/tty.h>\n#include <zephyr/logging/log.h>\n\n#include <fcntl.h>\n#include <unistd.h>\n#include <poll.h>\n#include <string.h>\n\nLOG_MODULE_REGISTER(modem_backend_tty, CONFIG_MODEM_MODULES_LOG_LEVEL);\n\n#define MODEM_BACKEND_TTY_THREAD_PRIO (10)\n#define MODEM_BACKEND_TTY_THREAD_RUN_PERIOD_MS (100)\n#define MODEM_BACKEND_TTY_THREAD_POLL_TIMEOUT_MS (0)\n#define MODEM_BACKEND_TTY_STATE_RUN_BIT (0)\n#define MODEM_BACKEND_TTY_STATE_IDLE_BIT (1)\n\nstatic void modem_backend_tty_routine(void *p1, void *p2, void *p3)\n{\n\tstruct modem_backend_tty *backend = (struct modem_backend_tty *)p1;\n\tstruct pollfd pd;\n\n\tARG_UNUSED(p2);\n\tARG_UNUSED(p3);\n\n\tpd.fd = backend->tty_fd;\n\tpd.events = POLLIN;\n\n\tmodem_pipe_notify_opened(&backend->pipe);\n\n\twhile (atomic_test_bit(&backend->state, MODEM_BACKEND_TTY_STATE_RUN_BIT)) {\n\t\tk_sleep(K_MSEC(MODEM_BACKEND_TTY_THREAD_RUN_PERIOD_MS));\n\n\t\tif (!atomic_test_bit(&backend->state, MODEM_BACKEND_TTY_STATE_IDLE_BIT)) {\n\t\t\tcontinue;\n\t\t}\n\n\t\tpd.revents = 0;\n\n\t\tif (poll(&pd, 1, MODEM_BACKEND_TTY_THREAD_POLL_TIMEOUT_MS) < 0) {\n\t\t\tLOG_WRN(\"Poll operation failed\");\n\t\t\tcontinue;\n\t\t}\n\n\t\tif (pd.revents & POLLIN) {\n\t\t\tatomic_clear_bit(&backend->state, MODEM_BACKEND_TTY_STATE_IDLE_BIT);\n\t\t\tmodem_pipe_notify_receive_ready(&backend->pipe);\n\t\t}\n\t}\n\n\tclose(backend->tty_fd);\n\tmodem_pipe_notify_closed(&backend->pipe);\n}\n\nstatic int modem_backend_tty_open(void *data)\n{\n\tstruct modem_backend_tty *backend = (struct modem_backend_tty *)data;\n\n\tif (atomic_test_and_set_bit(&backend->state, MODEM_BACKEND_TTY_STATE_RUN_BIT)) {\n\t\treturn -EALREADY;\n\t}\n\n\tbackend->tty_fd = open(backend->tty_path, (O_RDWR | O_NONBLOCK), 0644);\n\tif (backend->tty_fd < 0) {\n\t\tatomic_clear_bit(&backend->state, MODEM_BACKEND_TTY_STATE_RUN_BIT);\n\t\treturn -EPERM;\n\t}\n\n\tatomic_set_bit(&backend->state, MODEM_BACKEND_TTY_STATE_IDLE_BIT);\n\n\tk_thread_create(&backend->thread, backend->stack, backend->stack_size,\n\t\t\tmodem_backend_tty_routine, backend, NULL, NULL,\n\t\t\tMODEM_BACKEND_TTY_THREAD_PRIO, 0, K_NO_WAIT);\n\n\treturn 0;\n}\n\nstatic int modem_backend_tty_transmit(void *data, const uint8_t *buf, size_t size)\n{\n\tstruct modem_backend_tty *backend = (struct modem_backend_tty *)data;\n\tint ret;\n\n\tret = write(backend->tty_fd, buf, size);\n\tmodem_pipe_notify_transmit_idle(&backend->pipe);\n\treturn (ret < 0) ? 0 : ret;\n}\n\nstatic int modem_backend_tty_receive(void *data, uint8_t *buf, size_t size)\n{\n\tstruct modem_backend_tty *backend = (struct modem_backend_tty *)data;\n\tint ret;\n\n\tret = read(backend->tty_fd, buf, size);\n\tatomic_set_bit(&backend->state, MODEM_BACKEND_TTY_STATE_IDLE_BIT);\n\treturn (ret < 0) ? 0 : ret;\n}\n\nstatic int modem_backend_tty_close(void *data)\n{\n\tstruct modem_backend_tty *backend = (struct modem_backend_tty *)data;\n\n\tif (!atomic_test_and_clear_bit(&backend->state, MODEM_BACKEND_TTY_STATE_RUN_BIT)) {\n\t\treturn -EALREADY;\n\t}\n\n\treturn 0;\n}\n\nstruct modem_pipe_api modem_backend_tty_api = {\n\t.open = modem_backend_tty_open,\n\t.transmit = modem_backend_tty_transmit,\n\t.receive = modem_backend_tty_receive,\n\t.close = modem_backend_tty_close,\n};\n\nstruct modem_pipe *modem_backend_tty_init(struct modem_backend_tty *backend,\n\t\t\t\t\t  const struct modem_backend_tty_config *config)\n{\n\t__ASSERT_NO_MSG(backend != NULL);\n\t__ASSERT_NO_MSG(config != NULL);\n\t__ASSERT_NO_MSG(config->tty_path != NULL);\n\t__ASSERT_NO_MSG(config->stack != NULL);\n\t__ASSERT_NO_MSG(config->stack_size > 0);\n\n\tmemset(backend, 0x00, sizeof(*backend));\n\tbackend->tty_path = config->tty_path;\n\tbackend->stack = config->stack;\n\tbackend->stack_size = config->stack_size;\n\tatomic_set(&backend->state, 0);\n\tmodem_pipe_init(&backend->pipe, backend, &modem_backend_tty_api);\n\n\treturn &backend->pipe;\n}\n"
+          },
+          "applied_files": [
+            "subsys/modem/backends/modem_backend_tty.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "[Runtime Log Tail]\nSTART - test_receive\nASSERTION FAIL [!sys_dnode_is_linked(&to->node)] @ WEST_TOPDIR/zephyr/kernel/timeout.c:100\n@ WEST_TOPDIR/zephyr/lib/os/assert.c:43\n[00:00:00.000,000] <err> os: >>> ZEPHYR FATAL ERROR 4: Kernel panic on CPU 0\n[00:00:00.000,000] <err> os: Current thread: 0x806652c (unknown)\n[00:00:00.000,000] <err> os: Halting system\nExiting due to fatal error\nFAILED: zephyr/CMakeFiles/run_native /tmp/build/zephyr/CMakeFiles/run_native\ncd /tmp/build && /tmp/build/zephyr/zephyr.exe\nninja: build stopped: subcommand failed.\nFATAL ERROR: command exited with status 1: /usr/bin/cmake --build /tmp/build --target run\n\n[Build Messages]\n[Ninja Build Stopped]\nninja: build stopped: subcommand failed.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[111/115] Linking C static library zephyr/kernel/libkernel.a\n[112/115] Linking C executable zephyr/zephyr.elf\nGenerating files from /tmp/build/zephyr/zephyr.elf for board: native_sim/native\n[113/115] Building native simulator runner, and linking final executable\n[114/115] Running utility command for native_runner_executable\n[114/115] cd /tmp/build && /tmp/build/zephyr/zephyr.exe\n*** Booting Zephyr OS build 4.4.0-rc1 ***\nRunning TESTSUITE modem_backend_tty_suite\n===================================================================\nSTART - test_close_open\nPASS - test_close_open in 0.000 seconds\n===================================================================\nSTART - test_receive\nPASS - test_receive in 1.010 seconds\n===================================================================\nSTART - test_receive_ready_event_not_raised\nPASS - test_receive_ready_event_not_raised in 1.010 seconds\n===================================================================\nSTART - test_receive_ready_event_raised\nAssertion failed at WEST_TOPDIR/zephyr/tests/subsys/modem/backends/tty/src/main.c:162: modem_backend_tty_suite_test_receive_ready_event_raised: (result == true is false)",
+    "protected_file_count": 3,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3_c_api_substitute_backends_tty_54ee8ec",
+    "api_events": [],
+    "started_at": "2026-11-05T20:25:43+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

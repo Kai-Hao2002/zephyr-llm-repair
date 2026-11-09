@@ -8,9 +8,9 @@
 
 ## 📖 Introduction / 專案簡介
 
-**[EN]** This project is an LLM-driven multi-agent closed-loop debugging framework designed specifically for the open-source RTOS, Zephyr. Utilizing LangGraph for a directed graph state machine, this system integrates "Domain-Specific Graph RAG" for Kconfig and DTS files. It performs deterministic builds and QEMU runtime verification within fully isolated Docker containers to achieve highly autonomous and precise bug repair.
+**[EN]** This project is an LLM-driven multi-agent closed-loop debugging framework designed specifically for the open-source RTOS, Zephyr. Utilizing LangGraph for a directed graph state machine, this system retrieves Zephyr source, Kconfig and DTS context with Hybrid RAG (BM25 + semantic embedding); the domain-specific Graph RAG for Kconfig/DTS is kept in the code but off by default (future work). It performs deterministic builds and QEMU runtime verification within fully isolated Docker containers to achieve highly autonomous and precise bug repair.
 
-**[中]** 本專案是一個基於大型語言模型 (LLM) 的多代理人閉環除錯框架，專為開源即時作業系統 (RTOS) Zephyr 設計。本系統利用 LangGraph 構建有向圖狀態機，結合針對 Kconfig 與 DTS 檔案的「領域特定圖譜檢索 (Graph RAG)」，並在完全隔離的 Docker 容器中進行決定性的建置與 QEMU 執行期驗證，實現高度自主且精確的錯誤修復。
+**[中]** 本專案是一個基於大型語言模型 (LLM) 的多代理人閉環除錯框架，專為開源即時作業系統 (RTOS) Zephyr 設計。本系統利用 LangGraph 構建有向圖狀態機，以 Hybrid RAG (BM25 + 語意 embedding) 檢索 Zephyr 原始碼、Kconfig 與 DTS 上下文 (針對 Kconfig/DTS 的領域圖譜檢索 Graph RAG 仍保留在程式中，但預設關閉，列為未來工作)，並在完全隔離的 Docker 容器中進行決定性的建置與 QEMU 執行期驗證，實現高度自主且精確的錯誤修復。
 
 ---
 
@@ -27,77 +27,118 @@ To ensure high scalability and maintainability, the codebase is deeply decoupled
 ```text
 zephyr-llm-repair/
 │
-├── main.py                     # 系統進入點：初始化參數、啟動 LangGraph 狀態機
-├── requirements.txt            # Python 依賴清單 (langgraph, langchain-google-genai, 等)
-├── Dockerfile                  # 決定性建置環境：打包 Zephyr SDK 與相關依賴
-├── .env                        # 環境變數設定檔 (如 API Key)
+├── evaluate.py                 # 評測進入點：逐筆準備 workspace、執行 pipeline、判定結果
+├── analyze_results.py          # results.json → RQ 指標 (TTR、RQ2 檢索命中等)
+├── requirements.txt / Dockerfile / .env_example
 │
-├── core/                       # 核心狀態機與工作流程 (LangGraph)
-│   ├── state.py                # 定義全域狀態 (Global State)，包含錯誤日誌、重試次數等
-│   └── workflow.py             # LangGraph 節點連接與條件邊緣 (Conditional Edges) 路由邏輯
+├── core/                       # 各 pipeline 的執行迴圈與共用基礎
+│   ├── workflow.py             # Proposed：LangGraph 多代理人閉環
+│   ├── proposed_opt.py         # Proposed 優化設定 (ZEPHYR_PROPOSED_OPT)
+│   ├── baseline_pipelines.py   # B1 / B2 / B3 執行迴圈
+│   ├── agentless_pipeline.py   # Agentless (定位 → 多候選 patch → 驗證)
+│   ├── openhands_pipeline.py   # OpenHands (容器內 agent，見 docs/openhands_changes.md)
+│   ├── llm_provider.py         # 模型供應商 (gemini / anthropic / openai / qwen)
+│   ├── llm_retry.py            # 重試、暫時性錯誤與額度用完 (daily_quota) 判定
+│   ├── llm_usage.py            # token 用量紀錄
+│   ├── protected_files.py      # 受保護檔案 (測試/規格) 在判定前還原
+│   ├── state.py / trajectory.py
 │
-├── agents/                     # 多代理人節點實作 (LangGraph Nodes)
-│   ├── supervisor.py           # 中央調度：負責判斷是否超過最大重試次數
-│   ├── analyzer.py             # 錯誤分析：解讀 DevOps 傳回的精簡日誌，決定檢索策略
-│   ├── knowledge_expert.py     # 知識檢索：與 graph_rag 模組互動，取得圖譜上下文
-│   └── patch_expert.py         # 修補生成：生成嚴格的 <<<<SEARCH 與>>>>REPLACE 區塊
+├── agents/                     # LLM 呼叫
+│   ├── supervisor.py           # 重試上限與跨迭代記憶壓縮
+│   ├── analyzer.py             # 錯誤分析 (結構化輸出)，決定檢索策略
+│   ├── knowledge_expert.py     # 檢索：Hybrid RAG (預設) / Graph RAG (預設關閉)
+│   ├── patch_expert.py         # 產生 SEARCH/REPLACE patch
+│   ├── baselines.py            # B1/B2/B3 的 LLM 呼叫
+│   ├── agentless.py            # Agentless 的 LLM 呼叫
+│   └── spec_rule.py            # 所有 patch prompt 共用的測試規格說明 (受保護檔案會被還原)
 │
-├── graph_rag/                  # 領域特定圖譜檢索模組
-│   ├── build_graph.py          # 負責將專案的設定檔轉換為 NetworkX 記憶體圖譜
-│   ├── parsers/                # Kconfig 與 DTS 解析器
-│   └── retriever.py            # 圖譜走訪 (Graph Traversal) 與上下文格式化
+├── graph_rag/
+│   ├── hybrid_retriever.py     # Hybrid RAG：BM25 + Gemini embedding (FAISS)
+│   ├── case_graph.py / build_case_graph.py   # 逐案例 Kconfig/DTS 圖 (ZEPHYR_GRAPH_RAG，預設 0)
+│   ├── build_graph.py / retriever.py / parsers/   # 早期全域圖譜 (未用於正式評測)
 │
-├── tools/                      # 代理人呼叫的外部工具鏈
-│   ├── patch_applier.py        # 在本地或容器內執行精確的字串匹配與替換
-│   ├── log_filter.py           # 分層日誌過濾：剔除常規輸出，提取 Fatal Error
-│   └── qemu_oracle.py          # 測試預言：監控 QEMU stdout，捕捉啟動或崩潰特徵
+├── tools/                      # 評測工具鏈與批次腳本 (被 .gitignore，追蹤中的檔案要 git add -f)
+│   ├── patch_applier.py / log_filter.py / qemu_oracle.py / static_checker.py / devops_analyzer.py
+│   ├── mutate_inject.py / fault_injector.py / probe_mutants.py   # 注入 bug
+│   ├── validate_v3_cases.py / gold_patch_check.py / flaky_check.py   # 資料集驗證
+│   ├── analyze_v3.py / failure_taxonomy.py / failure_by_category.py / replay_patches.py   # 離線分析
+│   ├── run_batch.sh / run_with_key_rotation.sh   # 批次執行與金鑰輪替
+│   ├── openhands_runner.py / egress_proxy.py / openhands_image/   # OpenHands 容器與白名單 proxy
+│   ├── v4/                     # Gemini 4 主實驗的批次腳本
+│   └── xmodel/                 # 跨模型實驗 (Claude / Qwen)，偏差說明見 tools/xmodel/README.md
 │
-├── env_manager/                # 隔離環境與建置管理
-│   ├── docker_manager.py       # 負責啟動/重置 Docker 容器
-│   └── west_executor.py        # 封裝執行 west build 與 west build -t run 的指令
+├── dataset/
+│   ├── cases/                  # final_dataset_v3.json (139)、real_bugs_v3.json (13)；final_dataset.json 為 v2
+│   ├── v3/                     # v3 的產生過程檔，說明見 dataset/v3/README.md
+│   ├── scripts/                # 組裝 v3 資料集的腳本與注入素材
+│   ├── dev_v2/                 # 開發集 (調參用，不與正式資料集重疊)
+│   └── legacy/                 # v2 的挖礦與驗證腳本、完整驗證池
 │
-└── dataset/                    # Zephyr-Eval 評估資料集
-    ├── scripts/                # 自動化探勘 GitHub 提交記錄的腳本
-    └── cases/                  # 測試案例 (包含 broken commit, error log, golden patch)
+├── docs/openhands_changes.md   # OpenHands 整合的改動紀錄 (不改 SDK)
+├── tests/                      # pytest 單元測試
+└── eval_runs/                  # 評測結果 (被 .gitignore，commit 時用 git add -f)
 ```
+
+### Pipelines (`evaluate.py --pipeline`)
+
+| pipeline | 說明 / Description |
+|---|---|
+| `b1` | 單一 agent、單發、無檢索 (結構化輸出) / single agent, single shot, no retrieval |
+| `b2` | B1 + Hybrid RAG (單發) / B1 + Hybrid RAG |
+| `b3` | B2 + 閉環重試，每輪重新檢索 (`ZEPHYR_B3_GATE=1`：不合格的 patch 還原後在本輪重試) / B2 + closed-loop retries |
+| `proposed` | B3 + 多代理人分工 (Analyzer / Knowledge / Patch / DevOps / QA / Supervisor) |
+| `agentless` | Agentless 式：定位、多候選 patch、以建置/執行結果挑選 |
+| `openhands` | OpenHands agent 在容器內自行操作，只能經白名單 proxy 連到 LLM API |
+
+B1 → B2 → B3 → Proposed 每一步只多一個變因 (2026-11-hybrid 定義，見 `core/baseline_pipelines.py`)。
+2.5 Flash 的 v3 結果用的是舊定義 (B2 只有 BM25、B3 無檢索)。
+
+### 主要環境變數 / Main environment variables
+
+| 變數 | 預設 | 用途 |
+|---|---|---|
+| `GEMINI_API_KEY` | — | Gemini 生成；未設 `GEMINI_EMBEDDING_API_KEY` 時也用於 embedding |
+| `GEMINI_API_KEY2` | — | `run_with_key_rotation.sh` 在第一把碰到每日額度後換用 |
+| `GEMINI_EMBEDDING_API_KEY` | — | Hybrid RAG embedding 專用金鑰 |
+| `ANTHROPIC_API_KEY` 或 `Claude_API_KEY` | — | `--model-provider anthropic` |
+| `QWEN_API_KEY` 或 `Bedrock_API_KEY` | — | `--model-provider qwen` (TUM proxy，需 TUM 網路/VPN) |
+| `ZEPHYR_GEMINI_MODEL` | — | 覆寫 Gemini 模型名稱 |
+| `ZEPHYR_PROPOSED_OPT` | `0` | Proposed 架構優化：不合格 patch 不耗輪次、上下文排序、記住無效方向 (正式實驗為 1) |
+| `ZEPHYR_B3_GATE` | `0` | B3 套用閘門 (正式實驗為 1) |
+| `ZEPHYR_HYBRID_RAG` | `1` | Hybrid RAG 開關 |
+| `ZEPHYR_GRAPH_RAG` | `0` | Graph RAG 開關 (預設關閉) |
+| `ZEPHYR_AGENTLESS_N` | `4` | Agentless 候選 patch 數 |
+| `ZEPHYR_OH_IMAGE` / `ZEPHYR_OH_MAX_STEPS` / `ZEPHYR_OH_TIMEOUT_MIN` | 見 `core/openhands_pipeline.py` | OpenHands 設定 |
+| `ZEPHYR_ANTHROPIC_MAX_TOKENS` / `ZEPHYR_QWEN_MAX_TOKENS` / `ZEPHYR_QWEN_BASE_URL` | 見 `core/llm_provider.py` | 跨模型設定 |
+| `DATASET` | — | `tools/run_batch.sh` 使用的資料集路徑 |
+| `GITHUB_TOKEN` | — | 只有 legacy 挖礦腳本用到 |
+
 ## 🛠️ Environment Setup
 The execution of this system is divided into the "Host" (running LLM agent logic) and the "Container" (running Zephyr compilation and QEMU simulation).
 
 本系統的執行分為「主機端 (Host)」(執行 LLM 代理人邏輯) 與「容器端 (Container)」(執行 Zephyr 編譯與 QEMU 模擬)。
-1. Prerequisites (先決條件)
-* Python 3.10+
-```bash
-# Create and activate virtual environment
-python3.10 -m venv venv
-# Windows: .\venv\Scripts\activate
-# macOS/Linux: source venv/bin/activate
 
-# Install dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
-```
+1. 先決條件 (Prerequisites)
+* Python 3.10+
 * Docker Desktop / Docker Engine (用於啟動 Zephyr 決定性沙盒)
-* Google Gemini API Key (Or relevant LLM provider key)
-  
+* 至少一個 LLM 供應商的金鑰；Hybrid RAG 的 embedding 一律用 Gemini
+
 2. 主機端安裝 (Host Setup)
 ```bash
-# Clone the repository (複製專案原始碼)
-git clone [https://github.com/yourusername/zephyr-llm-repair.git](https://github.com/yourusername/zephyr-llm-repair.git)
+git clone https://github.com/yourusername/zephyr-llm-repair.git
 cd zephyr-llm-repair
 
-# Create and activate a virtual environment (建立並啟動虛擬環境)
 python3.10 -m venv venv
 # Windows: .\venv\Scripts\activate
 # macOS/Linux: source venv/bin/activate
-
-# Install dependencies (安裝 Python 依賴)
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# Configure environment variables (設定環境變數)
-# Create a .env file and add your API key (建立 .env 檔案並寫入 API Key)
-echo 'GEMINI_API_KEY="your-api-key-here"' > .env
+# 從範本建立 .env，再填入金鑰 (.env 不會進 git)
+# Create .env from the template and fill in your keys (.env is gitignored)
+cp .env_example .env
 ```
+
 3. 建置決定性沙盒 (Build Deterministic Sandbox)
 The system uses a Docker image to ensure every west build is executed in a clean environment to prevent cache contamination.
 系統將使用 Docker 映像檔來確保每次編譯都在乾淨的環境下執行，避免快取污染。
@@ -108,14 +149,20 @@ docker build -t zephyr-sandbox -f Dockerfile .
 ```
 
 ## 🚀 使用方式 / Usage
-You can start the repair process by passing the path of the broken Zephyr project or a specific dataset case via the CLI.
-您可以直接透過指令列 (CLI) 傳入發生錯誤的 Zephyr 專案路徑，來啟動修復流程。
+Run a pipeline on dataset cases through `evaluate.py`; results go to `--runs-dir` (default `eval_runs/<timestamp>`).
+透過 `evaluate.py` 對資料集案例執行指定 pipeline，結果寫到 `--runs-dir` (預設 `eval_runs/<時間>`)。
 ```bash
-# Run a single repair task (執行單一端到端修復任務)
-python main.py --target ./dataset/cases/bug_001 --max_retries 5
+# Run a single case (執行單一案例)
+python evaluate.py --dataset dataset/cases/final_dataset_v3.json --pipeline proposed --case-id <case_id>
 
-# Run automated benchmark evaluation (啟動自動化基準測試 - 開發中)
-python evaluate.py --dataset ./dataset/cases/ --model gemini-2.5-pro
+# Run the whole dataset (跑整個資料集)
+python evaluate.py --dataset dataset/cases/final_dataset_v3.json --pipeline proposed --all
+
+# Another model provider (換模型供應商；只用 pro 模型)
+python evaluate.py --dataset dataset/cases/final_dataset_v3.json --pipeline b1 --model-provider anthropic --single-model --all
+
+# Batch with resume + key rotation (批次執行，已完成的案例會跳過)
+tools/run_with_key_rotation.sh <pipeline> <out_dir> <work_dir> --single-model
 ```
 
 ### ⚠️ `evaluate.py` 設計要求：禁止把 `.git` 暴露給待測 agent / Design requirement: never expose `.git` to the agent under evaluation
@@ -172,37 +219,29 @@ When building `evaluate.py`, this is a hard requirement:
 2. `target_test`/`category`/`board`/`target_app` are safe to expose (they don't reveal what was actually changed) if needed; `broken_commit`/`fixed_commit` need to be considered alongside the `.git` rule above — if the agent ever sees `fixed_commit`, that directly leaks the upstream commit containing the answer, so it must never appear anywhere agent-visible either.
 3. Turn "everything agent-visible is allowlist-filtered, with no `injection`/`injections`/`fixed_commit`" into one of `evaluate.py`'s own pre-flight assertions, not something only checked by hand — the same discipline as point 3 of the `.git` rule above.
 
-### 🕒 Baseline commit 多樣性 / Baseline commit diversity
+## 📦 資料集 / Datasets
 
-**[中]** `verified_zephyr_bugs.json`（150 筆，截至 2026-08-24）的案例目前分散在 3 個已驗證乾淨的 pinned commit 上：主要的 `bc460feabe7038dc876782557e39be791d6c24e9`（2026-07-24，139 筆／92.7%）、`SECOND_BASELINE_COMMIT` `4b02c5d60ae620fb23cbea58516e3ea7388c2f75`（2026-05-14，5 筆）、`THIRD_BASELINE_COMMIT` `5286027c85945d043a814d2d1783b3e935e5256e`（2026-03-20，5 筆），另有 1 筆挖礦案例帶著自己的歷史 PR base commit。這仍然是一種多樣性風險：任何在 2026-07-24 之後訓練、且訓練資料涵蓋公開 GitHub 歷史的通用 LLM，都可能對主要那個特定原始碼快照本身有先驗記憶，跟它是否真的理解注入的 bug 機制無關——92.7% 集中在單一 commit，離真正緩解這個風險還有一段距離。`dataset/legacy/scripts/mine_commits.py` 的 `INJECTION_CATALOG` 支援任意 entry 帶 `"baseline_commit"` 覆蓋預設共用的 commit（見該檔案裡 `SECOND_BASELINE_COMMIT`/`THIRD_BASELINE_COMMIT` 常數上方的註解，包含挑選歷史 commit 時要注意的 Zephyr SDK 版本相容性陷阱）——`tools/fault_injector.py`/`dataset/legacy/scripts/verify_cases.py` 本來就是逐案例讀取 `broken_commit`，從來就沒有「整批必須共用同一個 commit」的架構限制。未來要真正緩解「絕大多數案例集中在單一 commit」這個統計，需要之後的 session 持續把新案例分散注入到多個已驗證乾淨的 pinned commit（或新增第四個 pin），而不是預設一律沿用最早那一個。
+| 檔案 | 筆數 | 內容 |
+|---|---|---|
+| `dataset/cases/final_dataset_v3.json` | 139 | 正式資料集 (v3)：runtime_crash 63、c_syntax / kconfig / dts / compound 各 19；共 26 個 base commit |
+| `dataset/cases/real_bugs_v3.json` | 13 | 真實 bug 對照集，每筆各自的 commit |
+| `dataset/v3/eval/repeat_subset_40.json` | 40 | 依類別分層抽樣的重複實驗子集 (`tools/sample_repeat_subset.py`) |
+| `dataset/cases/final_dataset.json` | 143 | v2 資料集 (已凍結，保留給 v2 結果) |
 
-**[EN]** Cases in `verified_zephyr_bugs.json` (150 total, as of 2026-08-24) are currently spread across 3 verified-clean pinned commits: the primary `bc460feabe7038dc876782557e39be791d6c24e9` (2026-07-24, 139 cases / 92.7%), `SECOND_BASELINE_COMMIT` `4b02c5d60ae620fb23cbea58516e3ea7388c2f75` (2026-05-14, 5 cases), `THIRD_BASELINE_COMMIT` `5286027c85945d043a814d2d1783b3e935e5256e` (2026-03-20, 5 cases), plus 1 mined case carrying its own historical PR-base commit. This remains a real diversity risk: any general-purpose LLM trained after 2026-07-24 on public GitHub history could have prior exposure to that primary snapshot, independent of whether it understands the injected bug's mechanism — 92.7% concentration on one commit is still far from resolving this. `dataset/legacy/scripts/mine_commits.py`'s `INJECTION_CATALOG` supports any entry carrying a `"baseline_commit"` override (see the comments above the `SECOND_BASELINE_COMMIT`/`THIRD_BASELINE_COMMIT` constants in that file, including a Zephyr-SDK-version-compatibility trap worth knowing about when picking a historical commit) — `tools/fault_injector.py`/`dataset/legacy/scripts/verify_cases.py` already read `broken_commit` per-case; there was never an architectural requirement for a whole batch to share one commit. Actually moving the needle on "the large majority of cases concentrated on one commit" needs future sessions to keep spreading new cases across multiple verified-clean pinned commits (or add a fourth pin), instead of defaulting back to the earliest one.
+**[中]** v3 的產生流程、驗證 (重現預期失敗、gold patch 119/119 resolved、穩定性檢查) 與 2026-10 的稽核修正，都記在 `dataset/v3/README.md`。
+v3 把 base commit 從 v2 的 3 個 (其中一個佔 92.7%) 擴成以 24 個每週 commit (2026-03 至 08) 為主、共 26 個，以降低模型對單一原始碼快照的記憶風險。
+統計時 runtime_crash 佔 63/139，所以除了整體，也報五類等權與 runtime 抽成 19 筆的敏感度分析。
 
-## 📦 最終資料集 `final_dataset.json` / The curated final dataset
+**[EN]** How v3 was built and validated (reproduces the expected failure, gold patch 119/119 resolved, stability checks) and the 2026-10 audit fixes are in `dataset/v3/README.md`.
+v3 spreads cases over 26 base commits, mostly 24 weekly ones (2026-03..08), instead of v2's 3 (one holding 92.7%), reducing the risk of a model memorizing one source snapshot.
+Because runtime_crash is 63/139, results are reported overall, category-balanced, and with runtime subsampled to 19.
 
-**[中]** `verified_zephyr_bugs.json`（158 筆，截至 2026-08-27）是這個專案從一開始累積至今、從未刪減過的**完整驗證池**——任何通過雙向驗證閘（合成注入）或單向重現閘（真實挖礦）的案例都會留在這裡，做為未來擴充、重新篩選的原始素材。`final_dataset.json`（143 筆，全數為合成注入）則是從這個池子裡**策展**出來、實際支撐 thesis proposal 的最終資料集。兩者的差異分兩類：（a）移除幾乎完全重複的內容，不涉及刪除任何真正獨立的 bug；（b）排除全部 9 筆真實挖礦案例——這是方法論範圍決定，不是這些案例品質有問題（見下方「挖礦擴充」一節）：
+### v2 歷史 / v2 history
 
-1. **`thread_priority_swap` 的 4 板驗證，砍到 2 板**：`inject_thread_priority_swap_semaphore` 這組 mutation 曾在 native_sim/qemu_riscv32/qemu_cortex_a53/qemu_xtensa 上驗證過完全相同的字面文字置換，用來證明 operator 本身能跨架構運作。保留 native_sim + qemu_riscv32 兩個代表（仍然涵蓋兩種不同指令集），移除 cortex_a53/xtensa 兩筆——4 份逐字相同的「答案」對評估沒有額外資訊量，只是同一題重複問 4 次。
-2. **kconfig `*_EMUL` 模板集中度砍半**：這次 session 為了稀釋 `runtime_crash` 的 operator 集中度，密集挖了 10 個「反轉 `depends on DT_HAS_ZEPHYR_..._ENABLED`」的 `*_EMUL` kconfig 案例（ADC/DAC/DMA/ESPI/I2C/RTC/BBRAM/BIOMETRICS/GPIO/GNSS），結果讓 `kconfig` 分類本身變成另一種模板集中（62.5% 用同一招）。保留 `DAC_EMUL`（同時涵蓋兩個 baseline commit，具備多樣性價值）與這次新挖的 3 個最新穎的驅動家族（GPIO/GNSS/BIOMETRICS），移除 4 筆（RTC/ESPI/DMA/ADC_EMUL 的**獨立 kconfig 版本**——它們在 `compound` 分類裡跟 DTS mutation 搭配的版本完全不受影響，那是不同的案例）。
-
-**特別強調：所有跨 `SECOND_BASELINE_COMMIT`/`THIRD_BASELINE_COMMIT` 的「同一個 mutation、不同 baseline commit」配對（10 組）全部保留在兩邊**——這些不是重複，是這個專案花了好幾個 session 才建立起來的 baseline commit 多樣性證據，砍掉任何一邊都會直接侵蝕這個已經很辛苦才往前推進的統計。
-
-**[EN]** `verified_zephyr_bugs.json` (158 cases, as of 2026-08-27) is this project's complete, never-pruned **verification pool** — every case that passes either the two-sided gate (synthetic injection) or the one-sided reproduction gate (real mining) stays here as raw material for future expansion or re-curation. `final_dataset.json` (143 cases, 100% synthetic injection) is the **curated** final release that actually backs the thesis proposal. The two files differ in two ways: (a) removing near-total content duplication, not deleting any genuinely independent bug; (b) excluding all 9 real mined cases — a methodology scope decision, not a quality judgment on those cases (see "Mining expansion" below):
-
-1. **`thread_priority_swap`'s 4-board proof capped to 2**: the `inject_thread_priority_swap_semaphore` mutation was verified with the identical literal text swap on native_sim/qemu_riscv32/qemu_cortex_a53/qemu_xtensa, proving the operator works cross-architecture. Kept native_sim + qemu_riscv32 (still 2 distinct instruction sets) and dropped the cortex_a53/xtensa pair — 4 byte-identical "answers" add no extra information to an evaluation, they're the same question asked 4 times.
-2. **kconfig's `*_EMUL` template concentration halved**: this session mined 10 "invert `depends on DT_HAS_ZEPHYR_..._ENABLED`" `*_EMUL` kconfig cases (ADC/DAC/DMA/ESPI/I2C/RTC/BBRAM/BIOMETRICS/GPIO/GNSS) to dilute `runtime_crash`'s operator concentration, which incidentally made `kconfig` itself a template monoculture (62.5% one trick). Kept `DAC_EMUL` (spans both baseline commits, real diversity value) plus the 3 newest, most distinct driver families from this session (GPIO/GNSS/BIOMETRICS); dropped 4 (RTC/ESPI/DMA/ADC_EMUL's **standalone kconfig** versions — their `compound`-category siblings paired with a DTS mutation are untouched, different cases entirely).
-
-**Explicitly preserved**: all 10 "same mutation, different pinned baseline commit" pairs across `SECOND_BASELINE_COMMIT`/`THIRD_BASELINE_COMMIT` are kept on *both* sides — these aren't duplication, they're the hard-won baseline-commit-diversity evidence this project took several sessions to build; dropping either side would directly erode a statistic that's already difficult to move.
-
-### 挖礦擴充 / Mining expansion
-
-**[中]** 稽核一開始發現最嚴重的失衡不是任何注入分類太小，而是**整個資料集幾乎 100% 是合成注入**——真實挖礦案例從 session 開始時的 1 筆（0.7%），到這次用 `.env` 裡本來就設好、但過去 session 一直沒用上的 `GITHUB_TOKEN`（解除了 GitHub API 60 次/小時的速率限制），重新對 `label:bug` 搜尋範圍外的 PR（標題含 `fix:`、或記憶體安全關鍵字如 NULL pointer/use-after-free/double-free/buffer-overflow/out-of-bounds）挖礦，手動篩掉「猜到 `samples/hello_world`」與「明顯需要特定廠商硬體」的候選後，對 22 個候選跑真實 Docker 驗證閘，其中 8 個通過、**2 個雖然一開始通過但複查完整 log 後發現是環境假陽性**（一個是 backport 到舊分支、需要 SDK 0.16 的歷史 commit；一個是 mining pipeline 猜出的板子名稱在 Zephyr 新版板子命名規則下其實不合法）而移除，淨增 6 筆真實案例，把挖礦比例從 0.7% 拉到 5.7%。
-
-**後續決定：thesis proposal 明確主張「Zephyr-Eval 以 controlled fault injection 作為唯一建構方式」，用來對照 SWE-bench 之類挖礦式 benchmark 的記憶風險——即使只混入一小部分（6%）真實案例，也會跟這個已經寫死、當作賣點的方法論主張產生內部矛盾，且 9 筆案例對任何一個研究問題的統計檢定力都可忽略不計。因此最終決定：`final_dataset.json` 不納入這 9 筆挖礦案例，維持 100% 合成注入、143 筆，完整落在提案的 100–150 目標區間內。這 9 筆已驗證的真實 bug 保留在 `verified_zephyr_bugs.json` 完整驗證池中，供未來若決定額外做 real-world generalization check 時使用，不會被刪除。**
-
-**[EN]** The audit's initial finding wasn't any injected category being too small — it was that the dataset was **almost 100% synthetic injection**. Real mined cases went from 1 (0.7%) at session start to 8 accepted (after removing 2 that initially passed but turned out to be environment false positives on full-log review — one a backport to an old branch requiring Zephyr SDK 0.16, one a board name the mining pipeline guessed that's actually invalid under Zephyr's current board-naming scheme) out of 22 real candidates verified via Docker, once this session discovered `GITHUB_TOKEN` was already configured in `.env` (removing the 60/hr unauthenticated GitHub API rate limit that constrained prior mining sessions) and searched beyond the near-exhausted `label:bug` query (titles containing `fix:`, or memory-safety keywords like NULL pointer/use-after-free/double-free/buffer-overflow/out-of-bounds), manually filtering out `samples/hello_world` fallback guesses and vendor-hardware-specific drivers before spending Docker time. Net 6 new genuine cases, lifting the mined fraction from 0.7% to 5.7%.
-
-**Follow-up decision**: the thesis proposal explicitly claims Zephyr-Eval uses controlled fault injection as its *sole* construction method, contrasted against SWE-bench-style mined benchmarks' memorization risk — even a small (6%) mined slice would create an internal contradiction with that stated, load-bearing methodological claim, and 9 cases carry negligible statistical power for any of the research questions anyway. Final decision: `final_dataset.json` excludes all 9 mined cases, staying 100% synthetic injection at 143 cases, comfortably inside the proposal's 100–150 target. These 9 verified real bugs remain intact in the `verified_zephyr_bugs.json` full pool, not deleted, in case a future real-world generalization check is ever wanted.
+v2 的 `final_dataset.json` (143 筆，100% 合成注入) 是從 `dataset/legacy/cases/verified_zephyr_bugs.json` 完整驗證池策展而來：
+移除幾乎重複的案例 (`thread_priority_swap` 的 4 板驗證只留 2 板、kconfig `*_EMUL` 模板減半)，並排除 9 筆真實挖礦案例，
+以符合提案「只用 controlled fault injection 建構」的方法論。挖礦腳本在 `dataset/legacy/scripts/` (需要 `GITHUB_TOKEN`)。
+v3 之後真實 bug 改成獨立的對照集 (`real_bugs_v3.json`)，不混入主資料集。
 
 ## 📄 License (授權)
 MIT License. See LICENSE for more information.

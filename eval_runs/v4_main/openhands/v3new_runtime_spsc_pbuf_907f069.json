@@ -1,0 +1,268 @@
+[
+  {
+    "case_id": "v3new_runtime_spsc_pbuf_907f069",
+    "category": "runtime_crash",
+    "pipeline": "openhands",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "resolved",
+    "iterations": 9,
+    "ttr_seconds": 306.3850061893463,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": true,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "openhands",
+            "model": "gemini-4-argon",
+            "input_tokens": 140436,
+            "output_tokens": 3367,
+            "llm_calls": 7,
+            "cache_read_tokens": 105913,
+            "reasoning_tokens": 2487
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "success",
+          "patch": null,
+          "applied_files": [
+            "lib/os/spsc_pbuf.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "Zephyr OS successfully booted.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nSTART - test_0cpy\nPASS - test_0cpy in 0.000 seconds\n===================================================================\nSTART - test_0cpy_corner1\nPASS - test_0cpy_corner1 in 0.000 seconds\n===================================================================\nSTART - test_0cpy_corner2\nPASS - test_0cpy_corner2 in 0.000 seconds\n===================================================================\nSTART - test_0cpy_discard\nPASS - test_0cpy_discard in 0.000 seconds\n===================================================================\nSTART - test_0cpy_smaller\nPASS - test_0cpy_smaller in 0.000 seconds\n===================================================================\nSTART - test_largest_alloc\nPASS - test_largest_alloc in 0.000 seconds\n===================================================================\nSTART - test_spsc_pbuf_ut\nAssertion failed at WEST_TOPDIR/zephyr/tests/lib/spsc_pbuf/src/main.c:76: test_spsc_pbuf_flags: wlen not equal to -ENOMEM",
+    "protected_file_count": 4,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_openhands/openhands/v3new_runtime_spsc_pbuf_907f069",
+    "openhands": {
+      "status": "finished",
+      "error": null,
+      "steps": 9,
+      "llm_calls": 7,
+      "input_tokens": 140436,
+      "output_tokens": 3367,
+      "cache_read_tokens": 105913,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 2487,
+      "cost": 0.0,
+      "wall_seconds": 222.499440908432,
+      "model": "gemini/gemini-4-argon",
+      "image": "zephyr-oh-agent:1.55.1-z2",
+      "max_steps": 50,
+      "timeout_min": 40.0,
+      "egress_allowed": [
+        "generativelanguage.googleapis.com:443"
+      ],
+      "egress_log": {
+        "allowed": 2,
+        "denied": [
+          "CONNECT raw.githubusercontent.com:443 HTTP/1.1"
+        ],
+        "upstream_errors": []
+      },
+      "changed_files": [
+        "lib/os/spsc_pbuf.c"
+      ],
+      "final_contents": {
+        "lib/os/spsc_pbuf.c": "/*\n * Copyright (c) 2022 Nordic Semiconductor ASA\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/kernel.h>\n#include <string.h>\n#include <errno.h>\n#include <zephyr/cache.h>\n#include <zephyr/sys/minmax.h>\n#include <zephyr/sys/spsc_pbuf.h>\n#include <zephyr/sys/barrier.h>\n#include <zephyr/sys/byteorder.h>\n\n#define LEN_SZ sizeof(uint32_t)\n/* Amount of data that is left unused to distinguish between empty and full. */\n#define FREE_SPACE_DISTANCE sizeof(uint32_t)\n\n#define PADDING_MARK 0xFF\n\n#define GET_UTILIZATION(flags) \\\n\t(((flags) >> SPSC_PBUF_UTILIZATION_OFFSET) & BIT_MASK(SPSC_PBUF_UTILIZATION_BITS))\n\n#define SET_UTILIZATION(flags, val) \\\n\t((flags & ~(BIT_MASK(SPSC_PBUF_UTILIZATION_BITS) << \\\n\t\t\t     SPSC_PBUF_UTILIZATION_OFFSET)) | \\\n\t\t\t((val) << SPSC_PBUF_UTILIZATION_OFFSET))\n\n/*\n * In order to allow allocation of continuous buffers (in zero copy manner) buffer\n * is handling wrapping. When it is detected that request space cannot be allocated\n * at the end of the buffer but it is available at the beginning, a padding must\n * be added. Padding is marked using 0xFF byte. Packet length is stored on 2 bytes\n * but padding marker must be byte long as it is possible that only 1 byte padding\n * is required. In order to distinguish padding marker from length field following\n * measures are taken: Length is stored in big endian (MSB byte first). Maximum\n * packet length is limited to 0XFEFF.\n */\n\n/* Helpers */\nstatic uint32_t idx_occupied(uint32_t len, uint32_t a, uint32_t b)\n{\n\t/* It is implicitly assumed a and b cannot differ by more then len. */\n\treturn (b > a) ? (len - (b - a)) : (a - b);\n}\n\nstatic inline void cache_wb(void *data, size_t len, uint32_t flags)\n{\n\tif (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_ALWAYS) ||\n\t    (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_FLAG) && (flags & SPSC_PBUF_CACHE))) {\n\t\tsys_cache_data_flush_range(data, len);\n\t}\n}\n\nstatic inline void cache_inv(void *data, size_t len, uint32_t flags)\n{\n\tif (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_ALWAYS) ||\n\t    (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_FLAG) && (flags & SPSC_PBUF_CACHE))) {\n\t\tsys_cache_data_invd_range(data, len);\n\t}\n}\n\nstatic uint32_t *get_rd_idx_loc(struct spsc_pbuf *pb, uint32_t flags)\n{\n\treturn &pb->common.rd_idx;\n}\n\nstatic uint32_t *get_wr_idx_loc(struct spsc_pbuf *pb, uint32_t flags)\n{\n\tif (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_ALWAYS) ||\n\t    (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_FLAG) && (flags & SPSC_PBUF_CACHE))) {\n\t\treturn &pb->ext.cache.wr_idx;\n\t}\n\n\treturn &pb->ext.nocache.wr_idx;\n}\n\nstatic uint8_t *get_data_loc(struct spsc_pbuf *pb, uint32_t flags)\n{\n\tif (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_ALWAYS) ||\n\t    (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_FLAG) && (flags & SPSC_PBUF_CACHE))) {\n\t\treturn pb->ext.cache.data;\n\t}\n\n\treturn pb->ext.nocache.data;\n}\n\nstatic uint32_t get_len(size_t blen, uint32_t flags)\n{\n\tuint32_t len = blen - sizeof(struct spsc_pbuf_common);\n\n\tif (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_ALWAYS) ||\n\t    (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_FLAG) && (flags & SPSC_PBUF_CACHE))) {\n\t\treturn len - sizeof(struct spsc_pbuf_ext_cache);\n\t}\n\n\treturn len - sizeof(struct spsc_pbuf_ext_nocache);\n}\n\nstatic bool check_alignment(void *buf, uint32_t flags)\n{\n\tif ((Z_SPSC_PBUF_DCACHE_LINE > 0) && (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_ALWAYS) ||\n\t    (IS_ENABLED(CONFIG_SPSC_PBUF_CACHE_FLAG) && (flags & SPSC_PBUF_CACHE)))) {\n\t\treturn ((uintptr_t)buf & (Z_SPSC_PBUF_DCACHE_LINE - 1)) == 0;\n\t}\n\n\treturn (((uintptr_t)buf & (sizeof(uint32_t) - 1)) == 0) ? true : false;\n}\n\nstruct spsc_pbuf *spsc_pbuf_init(void *buf, size_t blen, uint32_t flags)\n{\n\tif (!check_alignment(buf, flags)) {\n\t\t__ASSERT(false, \"Failed to initialize due to memory misalignment\");\n\t\treturn NULL;\n\t}\n\n\t/* blen must be big enough to contain spsc_pbuf struct, byte of data\n\t * and message len (2 bytes).\n\t */\n\tstruct spsc_pbuf *pb = buf;\n\tuint32_t *wr_idx_loc = get_wr_idx_loc(pb, flags);\n\n\t__ASSERT_NO_MSG(blen > (sizeof(*pb) + LEN_SZ));\n\n\tpb->common.len = get_len(blen, flags);\n\tpb->common.rd_idx = 0;\n\tpb->common.flags = flags;\n\t*wr_idx_loc = 0;\n\n\tbarrier_sync_synchronize();\n\tcache_wb(&pb->common, sizeof(pb->common), flags);\n\tcache_wb(wr_idx_loc, sizeof(*wr_idx_loc), flags);\n\n\treturn pb;\n}\n\nint spsc_pbuf_alloc(struct spsc_pbuf *pb, uint16_t len, char **buf)\n{\n\t/* Length of the buffer and flags are immutable - avoid reloading. */\n\tconst uint32_t pblen = pb->common.len;\n\tconst uint32_t flags = pb->common.flags;\n\tuint32_t *rd_idx_loc = get_rd_idx_loc(pb, flags);\n\tuint32_t *wr_idx_loc = get_wr_idx_loc(pb, flags);\n\tuint8_t *data_loc = get_data_loc(pb, flags);\n\n\tuint32_t space = len + LEN_SZ; /* data + length field */\n\n\tif (len == 0 || len > SPSC_PBUF_MAX_LEN) {\n\t\t/* Incorrect call. */\n\t\treturn -EINVAL;\n\t}\n\n\tcache_inv(rd_idx_loc, sizeof(*rd_idx_loc), flags);\n\tbarrier_sync_synchronize();\n\n\tuint32_t wr_idx = *wr_idx_loc;\n\tuint32_t rd_idx = *rd_idx_loc;\n\tint32_t free_space;\n\n\tif (wr_idx >= rd_idx) {\n\t\tint32_t remaining = pblen - wr_idx;\n\t\t/* If SPSC_PBUF_MAX_LEN is set as length try to allocate maximum\n\t\t * possible packet till wrap or from the beginning.\n\t\t * If len is bigger than SPSC_PBUF_MAX_LEN then try to allocate\n\t\t * maximum packet length even if that results in adding a padding.\n\t\t */\n\t\tif (len == SPSC_PBUF_MAX_LEN) {\n\t\t\t/* At least space for 1 byte packet. */\n\t\t\tspace = LEN_SZ + 1;\n\t\t}\n\n\t\tif ((remaining >= space) || (rd_idx <= space)) {\n\t\t\t/* Packet will fit at the end. Free space depends on\n\t\t\t * presence of data at the beginning of the buffer since\n\t\t\t * there must be one word not used to distinguish between\n\t\t\t * empty and full state.\n\t\t\t */\n\t\t\tfree_space = remaining - ((rd_idx > 0) ? 0 : FREE_SPACE_DISTANCE);\n\t\t} else {\n\t\t\t/* Padding must be added. */\n\t\t\tdata_loc[wr_idx] = PADDING_MARK;\n\t\t\tbarrier_sync_synchronize();\n\t\t\tcache_wb(&data_loc[wr_idx], sizeof(uint8_t), flags);\n\n\t\t\twr_idx = 0;\n\t\t\t*wr_idx_loc = wr_idx;\n\n\t\t\t/* Obligatory one word empty space. */\n\t\t\tfree_space = rd_idx - FREE_SPACE_DISTANCE;\n\t\t}\n\t} else {\n\t\t/* Obligatory one word empty space. */\n\t\tfree_space = rd_idx - wr_idx - FREE_SPACE_DISTANCE;\n\t}\n\n\tlen = min(len, max(free_space - (int32_t)LEN_SZ, 0));\n\t*buf = &data_loc[wr_idx + LEN_SZ];\n\n\treturn len;\n}\n\nvoid spsc_pbuf_commit(struct spsc_pbuf *pb, uint16_t len)\n{\n\tif (len == 0) {\n\t\treturn;\n\t}\n\n\t/* Length of the buffer and flags are immutable - avoid reloading. */\n\tconst uint32_t pblen = pb->common.len;\n\tconst uint32_t flags = pb->common.flags;\n\tuint32_t *wr_idx_loc = get_wr_idx_loc(pb, flags);\n\tuint8_t *data_loc = get_data_loc(pb, flags);\n\n\tuint32_t wr_idx = *wr_idx_loc;\n\n\tsys_put_be16(len, &data_loc[wr_idx]);\n\tbarrier_sync_synchronize();\n\tcache_wb(&data_loc[wr_idx], len + LEN_SZ, flags);\n\n\twr_idx += len + LEN_SZ;\n\twr_idx = ROUND_UP(wr_idx, sizeof(uint32_t));\n\twr_idx = wr_idx == pblen ? 0 : wr_idx;\n\n\t*wr_idx_loc = wr_idx;\n\tbarrier_sync_synchronize();\n\tcache_wb(wr_idx_loc, sizeof(*wr_idx_loc), flags);\n}\n\nint spsc_pbuf_write(struct spsc_pbuf *pb, const char *buf, uint16_t len)\n{\n\tchar *pbuf;\n\tint outlen;\n\n\tif (len >= SPSC_PBUF_MAX_LEN) {\n\t\treturn -EINVAL;\n\t}\n\n\toutlen = spsc_pbuf_alloc(pb, len, &pbuf);\n\tif (outlen != len) {\n\t\treturn outlen < 0 ? outlen : -ENOMEM;\n\t}\n\n\tmemcpy(pbuf, buf, len);\n\n\tspsc_pbuf_commit(pb, len);\n\n\treturn len;\n}\n\nuint16_t spsc_pbuf_claim(struct spsc_pbuf *pb, char **buf)\n{\n\t/* Length of the buffer and flags are immutable - avoid reloading. */\n\tconst uint32_t pblen = pb->common.len;\n\tconst uint32_t flags = pb->common.flags;\n\tuint32_t *rd_idx_loc = get_rd_idx_loc(pb, flags);\n\tuint32_t *wr_idx_loc = get_wr_idx_loc(pb, flags);\n\tuint8_t *data_loc = get_data_loc(pb, flags);\n\n\tcache_inv(wr_idx_loc, sizeof(*wr_idx_loc), flags);\n\tbarrier_sync_synchronize();\n\n\tuint32_t wr_idx = *wr_idx_loc;\n\tuint32_t rd_idx = *rd_idx_loc;\n\n\tif (rd_idx == wr_idx) {\n\t\treturn 0;\n\t}\n\n\tuint32_t bytes_stored = idx_occupied(pblen, wr_idx, rd_idx);\n\n\t/* Utilization is calculated at claiming to handle cache case when flags\n\t * and rd_idx is in the same cache line thus it should be modified only\n\t * by the consumer.\n\t */\n\tif (IS_ENABLED(CONFIG_SPSC_PBUF_UTILIZATION) && (bytes_stored > GET_UTILIZATION(flags))) {\n\t\t__ASSERT_NO_MSG(bytes_stored <= BIT_MASK(SPSC_PBUF_UTILIZATION_BITS));\n\t\tpb->common.flags = SET_UTILIZATION(flags, bytes_stored);\n\t\tbarrier_sync_synchronize();\n\t\tcache_wb(&pb->common.flags, sizeof(pb->common.flags), flags);\n\t}\n\n\t/* Read message len. */\n\tuint16_t len;\n\n\tcache_inv(&data_loc[rd_idx], LEN_SZ, flags);\n\tif (data_loc[rd_idx] == PADDING_MARK) {\n\t\t/* If padding is found we must check if we are interrupted\n\t\t * padding injection procedure which has 2 steps (adding padding,\n\t\t * changing write index). If padding is added but index is not\n\t\t * yet changed, it indicates that there is no data after the\n\t\t * padding (at the beginning of the buffer).\n\t\t */\n\t\tcache_inv(wr_idx_loc, sizeof(*wr_idx_loc), flags);\n\t\tif (rd_idx == *wr_idx_loc) {\n\t\t\treturn 0;\n\t\t}\n\n\t\t*rd_idx_loc = rd_idx = 0;\n\t\tbarrier_sync_synchronize();\n\t\tcache_wb(rd_idx_loc, sizeof(*rd_idx_loc), flags);\n\t\t/* After reading padding we may find out that buffer is empty. */\n\t\tif (rd_idx == wr_idx) {\n\t\t\treturn 0;\n\t\t}\n\n\t\tcache_inv(&data_loc[rd_idx], sizeof(len), flags);\n\t}\n\n\tlen = sys_get_be16(&data_loc[rd_idx]);\n\n\t(void)bytes_stored;\n\t__ASSERT_NO_MSG(bytes_stored >= (len + LEN_SZ));\n\n\tcache_inv(&data_loc[rd_idx + LEN_SZ], len, flags);\n\t*buf = &data_loc[rd_idx + LEN_SZ];\n\n\treturn len;\n}\n\nvoid spsc_pbuf_free(struct spsc_pbuf *pb, uint16_t len)\n{\n\t/* Length of the buffer and flags are immutable - avoid reloading. */\n\tconst uint32_t pblen = pb->common.len;\n\tconst uint32_t flags = pb->common.flags;\n\tuint32_t *rd_idx_loc = get_rd_idx_loc(pb, flags);\n\tuint32_t *wr_idx_loc = get_wr_idx_loc(pb, flags);\n\tuint16_t rd_idx = *rd_idx_loc + len + LEN_SZ;\n\tuint8_t *data_loc = get_data_loc(pb, flags);\n\n\trd_idx = ROUND_UP(rd_idx, sizeof(uint32_t));\n\t/* Handle wrapping or the fact that next packet is a padding. */\n\tif (rd_idx != pblen) {\n\t\tcache_inv(&data_loc[rd_idx], sizeof(uint8_t), flags);\n\t\tif (data_loc[rd_idx] == PADDING_MARK) {\n\t\t\tcache_inv(wr_idx_loc, sizeof(*wr_idx_loc), flags);\n\t\t\t/* We may hit the case when producer is in the middle of adding\n\t\t\t * a padding (which happens in 2 steps: writing padding, resetting\n\t\t\t * write index) and in that case we cannot consume this padding.\n\t\t\t */\n\t\t\tif (rd_idx != *wr_idx_loc) {\n\t\t\t\trd_idx = 0;\n\t\t\t}\n\t\t}\n\t} else {\n\t\trd_idx = 0;\n\t}\n\n\t*rd_idx_loc = rd_idx;\n\tbarrier_sync_synchronize();\n\tcache_wb(rd_idx_loc, sizeof(*rd_idx_loc), flags);\n}\n\nint spsc_pbuf_read(struct spsc_pbuf *pb, char *buf, uint16_t len)\n{\n\tchar *pkt;\n\tuint16_t plen = spsc_pbuf_claim(pb, &pkt);\n\n\tif (plen == 0) {\n\t\treturn 0;\n\t}\n\n\tif (buf == NULL) {\n\t\treturn plen;\n\t}\n\n\tif (len < plen) {\n\t\treturn -ENOMEM;\n\t}\n\n\tmemcpy(buf, pkt, plen);\n\n\tspsc_pbuf_free(pb, plen);\n\n\treturn plen;\n}\n\nint spsc_pbuf_get_utilization(struct spsc_pbuf *pb)\n{\n\tif (!IS_ENABLED(CONFIG_SPSC_PBUF_UTILIZATION)) {\n\t\treturn -ENOTSUP;\n\t}\n\n\tcache_inv(&pb->common.flags, sizeof(pb->common.flags), pb->common.flags);\n\tbarrier_sync_synchronize();\n\n\treturn GET_UTILIZATION(pb->common.flags);\n}\n"
+      },
+      "events": [
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "SystemPromptEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "MessageEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/lib/spsc_pbuf/src/main.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"find /zephyrproject/zephyr -name \\\"*spsc_pbuf*\\\"\", \"is_input\": false, \"timeout\": null, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/tests/lib/spsc_pbuf/src/main.c:\\n     1\\t/*\\n     2\\t * Copyright (c) 2022 Nordic Semiconductor ASA\\n     3\\t *\\n     4\\t * SPDX-License-Identifier: Apache-2.0\\n     5\\t */\\n     6\\t\\n     7\\t#include <zephyr/ztest.h>\\n     8\\t#include <zephyr/ztress.h>\\n     9\\t#include <zephyr/sys/spsc_pbuf.h>\\n    10\\t#include <zephyr/random/random.h>\\n    11\\t\\n    12\\t#define HDR_LEN sizeof(uint32_t)\\n    13\\t#define TLEN(len) ROUND_UP(HDR_LEN + len, sizeof(uint32_t))\\n    14\\t#define STRESS_TIMEOUT_MS ((CONFIG_SYS_CLOCK_TICKS_PER_SEC < 10000) ? 1000 : 15000)\\n    15\\t\\n    16\\t/* The buffer size itself would be 199 bytes.\\n    17\\t * 212 - sizeof(struct spsc_pbuf) - 1 = 199.\\n    18\\t * -1 because internal rd/wr_idx is reserved to mean the buffer is empty.\\n    19\\t */\\n    20\\tstatic bool use_cache(uint32_t flags)\\n    21\\t{\\n    22\\t\\treturn IS_ENABLED(CONFIG_SPSC_PBUF_CA\n…[18476 chars omitted]…\nuct stress_data ctx;\\n   541\\t\\tuint32_t repeat = 0;\\n   542\\t\\n   543\\t\\tctx.write_cnt = 0;\\n   544\\t\\tctx.read_cnt = 0;\\n   545\\t\\tctx.pbuf = spsc_pbuf_init(buffer, sizeof(buffer), 0);\\n   546\\t\\tctx.capacity = spsc_pbuf_capacity(ctx.pbuf);\\n   547\\t\\n   548\\t\\tztress_set_timeout(K_MSEC(STRESS_TIMEOUT_MS));\\n   549\\t\\tZTRESS_EXECUTE(ZTRESS_THREAD(stress_claim_free, &ctx, repeat, 0, Z_TIMEOUT_TICKS(4)),\\n   550\\t\\t\\t       ZTRESS_THREAD(stress_alloc_commit, &ctx, repeat, 1000, Z_TIMEOUT_TICKS(4)));\\n   551\\t\\n   552\\t\\tZTRESS_EXECUTE(ZTRESS_THREAD(stress_alloc_commit, &ctx, repeat, 0, Z_TIMEOUT_TICKS(4)),\\n   553\\t\\t\\t       ZTRESS_THREAD(stress_claim_free, &ctx, repeat, 1000, Z_TIMEOUT_TICKS(4)));\\n   554\\t}\\n   555\\t\\n   556\\tZTEST_SUITE(test_spsc_pbuf, NULL, NULL, NULL, NULL, NULL);\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/lib/spsc_pbuf/src/main.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"/zephyrproject/zephyr/include/zephyr/sys/spsc_pbuf.h\\n/zephyrproject/zephyr/tests/lib/spsc_pbuf\\n/zephyrproject/zephyr/lib/os/spsc_pbuf.c\\n/zephyrproject/zephyr/doc/kernel/data_structures/spsc_pbuf.rst\"}], \"is_error\": false, \"command\": \"find /zephyrproject/zephyr -name \\\"*spsc_pbuf*\\\"\", \"exit_code\": 0, \"timeout\": false, \"metadata\": {\"exit_code\": 0, \"pid\": -1, \"username\": \"root\", \"hostname\": \"4cca9d609c77\", \"working_dir\": \"/workspace/project\", \"py_interpreter_path\": \"/opt/python/venv/bin/python\", \"prefix\": \"\", \"suffix\": \"\\n[The command completed with exit code 0.]\"}, \"full_output_save_dir\": \"workspace/conversations/1c582fa99b2a491db26ed6d79cd68fda/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/include/zephyr/sys/spsc_pbuf.h\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/lib/os/spsc_pbuf.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/include/zephyr/sys/spsc_pbuf.h:\\n     1\\t/*\\n     2\\t * Copyright (c) 2022 Nordic Semiconductor ASA\\n     3\\t *\\n     4\\t * SPDX-License-Identifier: Apache-2.0\\n     5\\t */\\n     6\\t\\n     7\\t#ifndef ZEPHYR_INCLUDE_SYS_SPSC_PBUF_H_\\n     8\\t#define ZEPHYR_INCLUDE_SYS_SPSC_PBUF_H_\\n     9\\t\\n    10\\t#include <zephyr/cache.h>\\n    11\\t#include <zephyr/devicetree.h>\\n    12\\t\\n    13\\t#ifdef __cplusplus\\n    14\\textern \\\"C\\\" {\\n    15\\t#endif\\n    16\\t\\n    17\\t/**\\n    18\\t * @brief Single producer, single consumer packet buffer API\\n    19\\t * @defgroup spsc_buf SPSC (Single producer, single consumer) packet buffer API\\n    20\\t * @ingroup datastructure_apis\\n    21\\t * @{\\n    22\\t */\\n    23\\t\\n    24\\t/**@defgroup SPSC_PBUF_FLAGS SPSC packet buffer flags\\n    25\\t * @{\\n    26\\t */\\n    27\\t\\n    28\\t/** @brief Flag indicating that cache shall be handled.\\n    \n…[10217 chars omitted]…\n49\\t * @param len\\tClaimed packet length.\\n   250\\t */\\n   251\\tvoid spsc_pbuf_free(struct spsc_pbuf *pb, uint16_t len);\\n   252\\t\\n   253\\t/**\\n   254\\t * @brief Get maximum utilization of the packet buffer.\\n   255\\t *\\n   256\\t * Function can be used to tune the buffer size. Feature is enabled by\\n   257\\t * CONFIG_SPSC_PBUF_UTILIZATION. Utilization is updated by the consumer.\\n   258\\t *\\n   259\\t * @param pb\\tA packet buffer.\\n   260\\t *\\n   261\\t * @retval -ENOTSUP\\tFeature not enabled.\\n   262\\t * @return non-negative\\tMaximum utilization.\\n   263\\t */\\n   264\\tint spsc_pbuf_get_utilization(struct spsc_pbuf *pb);\\n   265\\t/**\\n   266\\t * @}\\n   267\\t */\\n   268\\t\\n   269\\t#ifdef __cplusplus\\n   270\\t}\\n   271\\t#endif\\n   272\\t\\n   273\\t#endif /* ZEPHYR_INCLUDE_SYS_SPSC_PBUF_H_ */\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/include/zephyr/sys/spsc_pbuf.h\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/lib/os/spsc_pbuf.c:\\n     1\\t/*\\n     2\\t * Copyright (c) 2022 Nordic Semiconductor ASA\\n     3\\t *\\n     4\\t * SPDX-License-Identifier: Apache-2.0\\n     5\\t */\\n     6\\t\\n     7\\t#include <zephyr/kernel.h>\\n     8\\t#include <string.h>\\n     9\\t#include <errno.h>\\n    10\\t#include <zephyr/cache.h>\\n    11\\t#include <zephyr/sys/minmax.h>\\n    12\\t#include <zephyr/sys/spsc_pbuf.h>\\n    13\\t#include <zephyr/sys/barrier.h>\\n    14\\t#include <zephyr/sys/byteorder.h>\\n    15\\t\\n    16\\t#define LEN_SZ sizeof(uint32_t)\\n    17\\t/* Amount of data that is left unused to distinguish between empty and full. */\\n    18\\t#define FREE_SPACE_DISTANCE sizeof(uint32_t)\\n    19\\t\\n    20\\t#define PADDING_MARK 0xFF\\n    21\\t\\n    22\\t#define GET_UTILIZATION(flags) \\\\\\n    23\\t\\t(((flags) >> SPSC_PBUF_UTILIZATION_OFFSET) & BIT_MASK(SPSC_PBUF_UTILIZATION_BITS))\\n    24\\t\\n    25\\t#def\n…[13205 chars omitted]…\nt\\tuint16_t plen = spsc_pbuf_claim(pb, &pkt);\\n   358\\t\\n   359\\t\\tif (plen == 0) {\\n   360\\t\\t\\treturn 0;\\n   361\\t\\t}\\n   362\\t\\n   363\\t\\tif (buf == NULL) {\\n   364\\t\\t\\treturn plen;\\n   365\\t\\t}\\n   366\\t\\n   367\\t\\tif (len < plen) {\\n   368\\t\\t\\treturn -ENOMEM;\\n   369\\t\\t}\\n   370\\t\\n   371\\t\\tmemcpy(buf, pkt, plen);\\n   372\\t\\n   373\\t\\tspsc_pbuf_free(pb, plen);\\n   374\\t\\n   375\\t\\treturn plen;\\n   376\\t}\\n   377\\t\\n   378\\tint spsc_pbuf_get_utilization(struct spsc_pbuf *pb)\\n   379\\t{\\n   380\\t\\tif (!IS_ENABLED(CONFIG_SPSC_PBUF_UTILIZATION)) {\\n   381\\t\\t\\treturn -ENOTSUP;\\n   382\\t\\t}\\n   383\\t\\n   384\\t\\tcache_inv(&pb->common.flags, sizeof(pb->common.flags), pb->common.flags);\\n   385\\t\\tbarrier_sync_synchronize();\\n   386\\t\\n   387\\t\\treturn GET_UTILIZATION(pb->common.flags);\\n   388\\t}\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/lib/os/spsc_pbuf.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/lib/spsc_pbuf\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the files and directories up to 2 levels deep in /zephyrproject/zephyr/tests/lib/spsc_pbuf, excluding hidden items:\\n/zephyrproject/zephyr/tests/lib/spsc_pbuf/\\n/zephyrproject/zephyr/tests/lib/spsc_pbuf/CMakeLists.txt\\n/zephyrproject/zephyr/tests/lib/spsc_pbuf/prj.conf\\n/zephyrproject/zephyr/tests/lib/spsc_pbuf/src/\\n/zephyrproject/zephyr/tests/lib/spsc_pbuf/src/main.c\\n/zephyrproject/zephyr/tests/lib/spsc_pbuf/testcase.yaml\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/lib/spsc_pbuf\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"str_replace\", \"path\": \"/zephyrproject/zephyr/lib/os/spsc_pbuf.c\", \"file_text\": null, \"old_str\": \"\\toutlen = spsc_pbuf_alloc(pb, len, &pbuf);\\n\\tif (outlen != len) {\\n\\t\\treturn outlen <= 0 ? outlen : -ENOMEM;\\n\\t}\", \"new_str\": \"\\toutlen = spsc_pbuf_alloc(pb, len, &pbuf);\\n\\tif (outlen != len) {\\n\\t\\treturn outlen < 0 ? outlen : -ENOMEM;\\n\\t}\", \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"cd /zephyrproject/zephyr/tests/lib/spsc_pbuf && timeout 600 west build -b native_sim -d /tmp/build -p always -t run .\", \"is_input\": false, \"timeout\": null, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"The file /zephyrproject/zephyr/lib/os/spsc_pbuf.c has been edited. Here's the result of running `cat -n` on a snippet of /zephyrproject/zephyr/lib/os/spsc_pbuf.c:\\n   236\\t\\t\\treturn -EINVAL;\\n   237\\t\\t}\\n   238\\t\\n   239\\t\\toutlen = spsc_pbuf_alloc(pb, len, &pbuf);\\n   240\\t\\tif (outlen != len) {\\n   241\\t\\t\\treturn outlen < 0 ? outlen : -ENOMEM;\\n   242\\t\\t}\\n   243\\t\\n   244\\t\\tmemcpy(pbuf, buf, len);\\n   245\\t\\n   246\\t\\tspsc_pbuf_commit(pb, len);\\nReview the changes and make sure they are as expected. Edit the file again if necessary.\"}], \"is_error\": false, \"command\": \"str_replace\", \"path\": \"/zephyrproject/zephyr/lib/os/spsc_pbuf.c\", \"prev_exist\": true, \"old_content\": \"/*\\n * Copyright (c) 2022 Nordic Semiconductor ASA\\n *\\n * SPDX-License-Identifier: Apache-2.0\\n */\\n\\n#include <zephyr/kernel.h>\\n#include <string.h>\\n#include <errno.h>\\n#include <zephyr/cache.h>\\n#include <zephyr/sys/minmax.h>\\n#include <zephyr/sys/sp\n…[22331 chars omitted]…\n, resetting\\n\\t\\t\\t * write index) and in that case we cannot consume this padding.\\n\\t\\t\\t */\\n\\t\\t\\tif (rd_idx != *wr_idx_loc) {\\n\\t\\t\\t\\trd_idx = 0;\\n\\t\\t\\t}\\n\\t\\t}\\n\\t} else {\\n\\t\\trd_idx = 0;\\n\\t}\\n\\n\\t*rd_idx_loc = rd_idx;\\n\\tbarrier_sync_synchronize();\\n\\tcache_wb(rd_idx_loc, sizeof(*rd_idx_loc), flags);\\n}\\n\\nint spsc_pbuf_read(struct spsc_pbuf *pb, char *buf, uint16_t len)\\n{\\n\\tchar *pkt;\\n\\tuint16_t plen = spsc_pbuf_claim(pb, &pkt);\\n\\n\\tif (plen == 0) {\\n\\t\\treturn 0;\\n\\t}\\n\\n\\tif (buf == NULL) {\\n\\t\\treturn plen;\\n\\t}\\n\\n\\tif (len < plen) {\\n\\t\\treturn -ENOMEM;\\n\\t}\\n\\n\\tmemcpy(buf, pkt, plen);\\n\\n\\tspsc_pbuf_free(pb, plen);\\n\\n\\treturn plen;\\n}\\n\\nint spsc_pbuf_get_utilization(struct spsc_pbuf *pb)\\n{\\n\\tif (!IS_ENABLED(CONFIG_SPSC_PBUF_UTILIZATION)) {\\n\\t\\treturn -ENOTSUP;\\n\\t}\\n\\n\\tcache_inv(&pb->common.flags, sizeof(pb->common.flags), pb->common.flags);\\n\\tbarrier_sync_synchronize();\\n\\n\\treturn GET_UTILIZATION(pb->common.flags);\\n}\\n\", \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"-- west build: generating a build system\\nLoading Zephyr default modules (Zephyr base).\\n-- Application: /zephyrproject/zephyr/tests/lib/spsc_pbuf\\n-- CMake version: 3.28.3\\n-- Found Python3: /opt/python/venv/bin/python3 (found suitable version \\\"3.12.3\\\", minimum required is \\\"3.12\\\") found components: Interpreter\\n-- Cache files will be written to: /root/.cache/zephyr\\n-- Zephyr version: 4.4.99 (/zephyrproject/zephyr)\\n-- Found west (found suitable version \\\"1.5.0\\\", minimum required is \\\"0.14.0\\\")\\n-- Board: native_sim, qualifiers: native\\n-- Found host-tools: zephyr 1.0.1 (/opt/toolchains/zephyr-sdk-1.0.1)\\n-- Found toolchain: host (gcc/ld)\\n-- Found Dtc: /opt/toolchains/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/bin/dtc (found suitable version \\\"1.7.0\\\", minimum required is \\\"1.4.6\\\")\\n-- Found BOARD.dts: /zephyrproject/zephyr/boards/native/native_sim/native_sim.dts\\n-- Generated zephyr.dts: /tmp/build\n…[5828 chars omitted]…\ntest_spsc_pbuf.test_spsc_pbuf_ut_cache] duration = 0.000 seconds\\n - PASS - [test_spsc_pbuf.test_stress] duration = 2.180 seconds\\n - PASS - [test_spsc_pbuf.test_stress_0cpy] duration = 2.180 seconds\\n - PASS - [test_spsc_pbuf.test_utilization] duration = 0.000 seconds\\n\\n------ TESTSUITE SUMMARY END ------\\n\\n===================================================================\\nPROJECT EXECUTION SUCCESSFUL\"}], \"is_error\": false, \"command\": \"cd /zephyrproject/zephyr/tests/lib/spsc_pbuf && timeout 600 west build -b native_sim -d /tmp/build -p always -t run .\", \"exit_code\": 0, \"timeout\": false, \"metadata\": {\"exit_code\": 0, \"pid\": -1, \"username\": \"root\", \"hostname\": \"4cca9d609c77\", \"working_dir\": \"/zephyrproject/zephyr/tests/lib/spsc_pbuf\", \"py_interpreter_path\": \"/opt/python/venv/bin/python\", \"prefix\": \"\", \"suffix\": \"\\n[The command completed with exit code 0.]\"}, \"full_output_save_dir\": \"workspace/conversations/1c582fa99b2a491db26ed6d79cd68fda/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/lib/spsc_pbuf/testcase.yaml\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/tests/lib/spsc_pbuf/testcase.yaml:\\n     1\\ttests:\\n     2\\t  libraries.spsc_pbuf:\\n     3\\t    integration_platforms:\\n     4\\t      - native_sim\\n     5\\t    # Exclude platform which does not link with cache functions\\n     6\\t    platform_exclude: ast1030_evb\\n     7\\t    timeout: 120\\n     8\\t\\n     9\\t  libraries.spsc_pbuf.cache:\\n    10\\t    integration_platforms:\\n    11\\t      - native_sim\\n    12\\t    # This configuration only make sense for interprocessor data sharing so\\n    13\\t    # configuration can only be verified against compilation errors on a single core.\\n    14\\t    platform_allow: native_sim\\n    15\\t    build_only: true\\n    16\\t    extra_configs:\\n    17\\t      - CONFIG_SPSC_PBUF_CACHE_ALWAYS=y\\n    18\\t\\n    19\\t  libraries.spsc_pbuf.nocache.:\\n    20\\t    integration_platforms:\\n    21\\t      - native_sim\\n    22\\t    # Exclude platform which does not link with cache functions\\n    23\\t    platform_exclude: ast1030_evb\\n    24\\t    timeout: 120\\n    25\\t    extra_configs:\\n    26\\t      - CONFIG_SPSC_PBUF_CACHE_NEVER=y\\n    27\\t\\n    28\\t  libraries.spsc_pbuf.utilization:\\n    29\\t    integration_platforms:\\n    30\\t      - native_sim\\n    31\\t    # Exclude platform which does not link with cache functions\\n    32\\t    platform_exclude: ast1030_evb\\n    33\\t    timeout: 120\\n    34\\t    extra_configs:\\n    35\\t      - CONFIG_SPSC_PBUF_UTILIZATION=y\\n    36\\t\\n    37\\t  libraries.spsc_pbuf.stress:\\n    38\\t    platform_allow: qemu_x86\\n    39\\t    timeout: 120\\n    40\\t    extra_configs:\\n    41\\t      - CONFIG_SYS_CLOCK_TICKS_PER_SEC=100000\\n    42\\t    integration_platforms:\\n    43\\t      - qemu_x86\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/lib/spsc_pbuf/testcase.yaml\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "finish",
+          "action": "{\"message\": \"Fixed the defect in `spsc_pbuf_write` in `/zephyrproject/zephyr/lib/os/spsc_pbuf.c` where an `outlen` of `0` returned by `spsc_pbuf_alloc` (indicating 0 available bytes in the buffer) was returned directly instead of `-ENOMEM`. Changed the condition `outlen <= 0 ? outlen : -ENOMEM` to `outlen < 0 ? outlen : -ENOMEM` so that negative error codes from `spsc_pbuf_alloc` are propagated while insufficient space (including `0`) returns `-ENOMEM`. All tests in `tests/lib/spsc_pbuf` now pass.\", \"kind\": \"FinishAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "finish",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Fixed the defect in `spsc_pbuf_write` in `/zephyrproject/zephyr/lib/os/spsc_pbuf.c` where an `outlen` of `0` returned by `spsc_pbuf_alloc` (indicating 0 available bytes in the buffer) was returned directly instead of `-ENOMEM`. Changed the condition `outlen <= 0 ? outlen : -ENOMEM` to `outlen < 0 ? outlen : -ENOMEM` so that negative error codes from `spsc_pbuf_alloc` are propagated while insufficient space (including `0`) returns `-ENOMEM`. All tests in `tests/lib/spsc_pbuf` now pass.\"}], \"is_error\": false, \"kind\": \"FinishObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        }
+      ]
+    },
+    "api_events": [],
+    "started_at": "2026-11-05T07:59:44+00:00",
+    "run_meta": {
+      "code_commit": "672630a410ff36ce8b860d741b1e6b5f6ebd66a1",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

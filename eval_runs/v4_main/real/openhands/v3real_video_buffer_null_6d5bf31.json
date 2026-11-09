@@ -1,0 +1,340 @@
+[
+  {
+    "case_id": "v3real_video_buffer_null_6d5bf31",
+    "category": "real_bug",
+    "pipeline": "openhands",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "resolved",
+    "iterations": 15,
+    "ttr_seconds": 340.56069231033325,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": true,
+        "resolved": true,
+        "tool_invocation_error": false,
+        "token_usage": [
+          {
+            "node": "openhands",
+            "model": "gemini-4-argon",
+            "input_tokens": 238506,
+            "output_tokens": 1983,
+            "llm_calls": 9,
+            "cache_read_tokens": 150664,
+            "reasoning_tokens": 673
+          }
+        ],
+        "trajectory": {
+          "stage": "run",
+          "status": "success",
+          "patch": null,
+          "applied_files": [
+            "subsys/video/buffer.c"
+          ],
+          "apply_error": null,
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": "Zephyr OS successfully booted.",
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000001 to 0x04\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000020 to 0x05\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x0000007f to 0x09\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_set_mode: Applying mode 0x8062180 at 15 FPS\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000032 to 0x04\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000024 to 0x05\n[00:00:00.000,000] <dbg> video_emul_imager.emul_imager_write_reg: Placeholder for I2C write 0x00000001 to 0x0a\n*** Booting Zephyr OS build 4.4.99 ***\nRunning TESTSUITE video_common\n===================================================================\nSTART - test_video_buffer_alloc_release\n[00:00:00.000,000] <err> video_buffer: Buffer 0 is already released\nPASS - test_video_buffer_alloc_release in 0.000 seconds\n===================================================================\nSTART - test_video_buffer_release_bad_index\n[00:00:00.000,000] <err> video_buffer: Invalid buffer index: 1\nPASS - test_video_buffer_release_bad_index in 0.000 seconds\n===================================================================\nSTART - test_video_buffer_release_null\nSegmentation fault",
+    "protected_file_count": 7,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_real_openhands/openhands/v3real_video_buffer_null_6d5bf31",
+    "openhands": {
+      "status": "finished",
+      "error": null,
+      "steps": 15,
+      "llm_calls": 9,
+      "input_tokens": 238506,
+      "output_tokens": 1983,
+      "cache_read_tokens": 150664,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 673,
+      "cost": 0.0,
+      "wall_seconds": 245.46798276901245,
+      "model": "gemini/gemini-4-argon",
+      "image": "zephyr-oh-agent:1.55.1-z2",
+      "max_steps": 50,
+      "timeout_min": 40.0,
+      "egress_allowed": [
+        "generativelanguage.googleapis.com:443"
+      ],
+      "egress_log": {
+        "allowed": 2,
+        "denied": [
+          "CONNECT raw.githubusercontent.com:443 HTTP/1.1"
+        ],
+        "upstream_errors": []
+      },
+      "changed_files": [
+        "subsys/video/buffer.c"
+      ],
+      "final_contents": {
+        "subsys/video/buffer.c": "/*\n * SPDX-FileCopyrightText: Copyright Linaro Limited\n * SPDX-FileCopyrightText: Copyright tinyVision.ai Inc.\n * SPDX-FileCopyrightText: The Zephyr Project Contributors\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/drivers/video.h>\n#include <zephyr/logging/log.h>\n#include <zephyr/video/video.h>\n\nLOG_MODULE_REGISTER(video_buffer, CONFIG_VIDEO_LOG_LEVEL);\n\n#if defined(CONFIG_VIDEO_BUFFER_USE_SHARED_MULTI_HEAP)\n#include <zephyr/multi_heap/shared_multi_heap.h>\n\n#define VIDEO_COMMON_HEAP_ALLOC(align, size, timeout)                                              \\\n\tshared_multi_heap_aligned_alloc(CONFIG_VIDEO_BUFFER_SMH_ATTRIBUTE, align, size)\n#define VIDEO_COMMON_FREE(block) shared_multi_heap_free(block)\n#else\n\n#if !defined(CONFIG_VIDEO_BUFFER_POOL_ZEPHYR_REGION)\n#define VIDEO_BUFFER_POOL_REGION_NAME __noinit_named(kheap_buf_video_buffer_pool)\n#else\n#define VIDEO_BUFFER_POOL_REGION_NAME Z_GENERIC_SECTION(CONFIG_VIDEO_BUFFER_POOL_ZEPHYR_REGION_NAME)\n#endif\n\n/*\n * The k_heap is manually initialized instead of using directly Z_HEAP_DEFINE_IN_SECT\n * since the section might not be yet accessible from the beginning, making it impossible\n * to initialize it if done via Z_HEAP_DEFINE_IN_SECT\n */\nstatic char VIDEO_BUFFER_POOL_REGION_NAME __aligned(8)\n\tvideo_buffer_pool_mem[MAX(CONFIG_VIDEO_BUFFER_POOL_HEAP_SIZE, Z_HEAP_MIN_SIZE)];\nstatic struct k_heap video_buffer_pool;\nstatic bool video_buffer_pool_initialized;\n\nstatic void *video_buffer_k_heap_aligned_alloc(size_t align, size_t bytes, k_timeout_t timeout)\n{\n\tif (!video_buffer_pool_initialized) {\n\t\tk_heap_init(&video_buffer_pool, video_buffer_pool_mem,\n\t\t\t    MAX(CONFIG_VIDEO_BUFFER_POOL_HEAP_SIZE, Z_HEAP_MIN_SIZE));\n\t\tvideo_buffer_pool_initialized = true;\n\t}\n\n\treturn k_heap_aligned_alloc(&video_buffer_pool, align, bytes, timeout);\n}\n\n#define VIDEO_COMMON_HEAP_ALLOC(align, size, timeout)                                              \\\n\tvideo_buffer_k_heap_aligned_alloc(align, size, timeout)\n#define VIDEO_COMMON_FREE(block) k_heap_free(&video_buffer_pool, block)\n#endif\n\nstatic struct video_buffer video_buf[CONFIG_VIDEO_BUFFER_POOL_NUM_MAX];\n\nstruct video_buffer *video_buffer_aligned_alloc(size_t size, size_t align, k_timeout_t timeout)\n{\n\tstruct video_buffer *vbuf = NULL;\n\n\t/* find available video buffer */\n\tfor (uint16_t i = 0; i < ARRAY_SIZE(video_buf); i++) {\n\t\tif (video_buf[i].buffer == NULL) {\n\t\t\tvbuf = &video_buf[i];\n\t\t\tvbuf->index = i;\n\t\t\tbreak;\n\t\t}\n\t}\n\n\tif (vbuf == NULL) {\n\t\treturn NULL;\n\t}\n\n\t/* Alloc buffer memory */\n\tvbuf->buffer = VIDEO_COMMON_HEAP_ALLOC(align, size, timeout);\n\tif (vbuf->buffer == NULL) {\n\t\treturn NULL;\n\t}\n\n\tvbuf->memory = VIDEO_MEMORY_INTERNAL;\n\tvbuf->size = size;\n\tvbuf->bytesused = 0;\n\n\treturn vbuf;\n}\n\nstruct video_buffer *video_buffer_alloc(size_t size, k_timeout_t timeout)\n{\n\treturn video_buffer_aligned_alloc(size, sizeof(void *), timeout);\n}\n\nint video_buffer_release(struct video_buffer *vbuf)\n{\n\tif (vbuf == NULL) {\n\t\tLOG_ERR(\"Invalid NULL buffer\");\n\t\treturn -EINVAL;\n\t}\n\n\tif (vbuf->index >= ARRAY_SIZE(video_buf)) {\n\t\tLOG_ERR(\"Invalid buffer index: %u\", vbuf->index);\n\t\treturn -EINVAL;\n\t}\n\n\tif (video_buf[vbuf->index].buffer == NULL) {\n\t\tLOG_ERR(\"Buffer %u is already released\", vbuf->index);\n\t\treturn -EINVAL;\n\t}\n\n\tif (video_buf[vbuf->index].memory == VIDEO_MEMORY_INTERNAL) {\n\t\tVIDEO_COMMON_FREE(video_buf[vbuf->index].buffer);\n\t}\n\n\tvideo_buf[vbuf->index].buffer = NULL;\n\n\treturn 0;\n}\n\nstruct video_buffer *video_import_buffer(uint8_t *mem, size_t sz)\n{\n\tuint16_t ind;\n\n\tif (mem == NULL || sz == 0) {\n\t\tLOG_ERR(\"Invalid memory address or size\");\n\t\treturn NULL;\n\t}\n\n\t/* Find the 1st available slot in the video buffer pool */\n\tfor (ind = 0; ind < ARRAY_SIZE(video_buf); ind++) {\n\t\tif (video_buf[ind].buffer == NULL) {\n\t\t\tbreak;\n\t\t}\n\t}\n\n\tif (ind == ARRAY_SIZE(video_buf)) {\n\t\treturn NULL;\n\t}\n\n\t/* Populate the internal buffer */\n\tvideo_buf[ind].index = ind;\n\tvideo_buf[ind].size = sz;\n\tvideo_buf[ind].memory = VIDEO_MEMORY_EXTERNAL;\n\tvideo_buf[ind].buffer = mem;\n\tvideo_buf[ind].bytesused = 0;\n\tvideo_buf[ind].timestamp = 0;\n\n\treturn &video_buf[ind];\n}\n\nint video_enqueue(const struct device *dev, struct video_buffer *buf)\n{\n\tif (dev == NULL || buf == NULL || buf->index >= CONFIG_VIDEO_BUFFER_POOL_NUM_MAX ||\n\t    (buf->type != VIDEO_BUF_TYPE_INPUT && buf->type != VIDEO_BUF_TYPE_OUTPUT)) {\n\t\treturn -EINVAL;\n\t}\n\n\tvideo_buf[buf->index].type = buf->type;\n\n\treturn video_driver_enqueue(dev, &video_buf[buf->index]);\n}\n\nint video_dequeue(const struct device *dev, struct video_buffer **vbuf,\n\t\t\t\t       k_timeout_t timeout)\n{\n\tif (dev == NULL || vbuf == NULL) {\n\t\treturn -EINVAL;\n\t}\n\n\treturn video_driver_dequeue(dev, vbuf, timeout);\n}\n\nint video_transfer_buffer(const struct device *src, const struct device *sink,\n\t\t\t  enum video_buf_type src_type, enum video_buf_type sink_type,\n\t\t\t  k_timeout_t timeout)\n{\n\tstruct video_buffer *buf = &(struct video_buffer){.type = src_type};\n\tint ret;\n\n\tret = video_driver_dequeue(src, &buf, timeout);\n\tif (ret < 0) {\n\t\treturn ret;\n\t}\n\n\tbuf->type = sink_type;\n\n\treturn video_driver_enqueue(sink, buf);\n}\n\nint video_set_signal(const struct device *dev, struct k_poll_signal *sig)\n{\n\tif (dev == NULL || sig == NULL) {\n\t\treturn -EINVAL;\n\t}\n\n\treturn video_driver_set_signal(dev, sig);\n}\n"
+      },
+      "events": [
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "SystemPromptEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "MessageEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"grep -rn \\\"test_video_buffer_release_null\\\" /zephyrproject/zephyr/tests/subsys/video/api/ && find /zephyrproject/zephyr -name \\\"*video_buffer*\\\" -o -path \\\"*/video/*\\\" -name \\\"*.c\\\"\", \"is_input\": false, \"timeout\": null, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"/zephyrproject/zephyr/tests/subsys/video/api/src/video_common.c:153:ZTEST(video_common, test_video_buffer_release_null)\\n/zephyrproject/zephyr/drivers/video/video_emul_imager.c\\n/zephyrproject/zephyr/drivers/video/video_mcux_smartdma.c\\n/zephyrproject/zephyr/drivers/video/imx335.c\\n/zephyrproject/zephyr/drivers/video/video_stm32_venc.c\\n/zephyrproject/zephyr/drivers/video/video_renesas_ra_ceu.c\\n/zephyrproject/zephyr/drivers/video/hm0360.c\\n/zephyrproject/zephyr/drivers/video/ov5642.c\\n/zephyrproject/zephyr/drivers/video/imx219.c\\n/zephyrproject/zephyr/drivers/video/ov9655.c\\n/zephyrproject/zephyr/drivers/video/ov7725.c\\n/zephyrproject/zephyr/drivers/video/mt9m114.c\\n/zephyrproject/zephyr/drivers/video/video_stm32_dcmi.c\\n/zephyrproject/zephyr/drivers/video/ov767x.c\\n/zephyrproject/zephyr/drivers/video/video_emul_rx.c\\n/zephyrproject/zephyr/drivers/video/gc2145.c\\n/zephyrproject/zephyr/drivers/video/video_mcux_mipi_csi2rx.c\\\n…[1055 chars omitted]…\n/subsys/video/api/src/video_common.c\\n/zephyrproject/zephyr/tests/subsys/video/api/src/video_emul.c\\n/zephyrproject/zephyr/tests/subsys/video/test_pattern/src/main.c\\n/zephyrproject/zephyr/samples/subsys/video/capture/src/main.c\\n/zephyrproject/zephyr/samples/subsys/video/tcpserversink/src/main.c\\n/zephyrproject/zephyr/samples/subsys/video/capture_to_lvgl/src/main.c\"}], \"is_error\": false, \"command\": \"grep -rn \\\"test_video_buffer_release_null\\\" /zephyrproject/zephyr/tests/subsys/video/api/ && find /zephyrproject/zephyr -name \\\"*video_buffer*\\\" -o -path \\\"*/video/*\\\" -name \\\"*.c\\\"\", \"exit_code\": 0, \"timeout\": false, \"metadata\": {\"exit_code\": 0, \"pid\": -1, \"username\": \"root\", \"hostname\": \"ec0fe98535a6\", \"working_dir\": \"/workspace/project\", \"py_interpreter_path\": \"/opt/python/venv/bin/python\", \"prefix\": \"\", \"suffix\": \"\\n[The command completed with exit code 0.]\"}, \"full_output_save_dir\": \"workspace/conversations/8c3e4bc524f0405592bd66a6f4c8bb12/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/video/api/src/video_common.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/video/buffer.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/drivers/video/video_common.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/tests/subsys/video/api/src/video_common.c:\\n     1\\t/*\\n     2\\t * Copyright (c) 2024 tinyVision.ai Inc.\\n     3\\t *\\n     4\\t * SPDX-License-Identifier: Apache-2.0\\n     5\\t */\\n     6\\t\\n     7\\t#include <zephyr/drivers/video.h>\\n     8\\t#include <zephyr/video/video.h>\\n     9\\t#include <zephyr/ztest.h>\\n    10\\t\\n    11\\tenum {\\n    12\\t\\tRGB565,\\n    13\\t\\tYUYV_A,\\n    14\\t\\tYUYV_B,\\n    15\\t};\\n    16\\t\\n    17\\tstatic const struct video_format_cap fmts[] = {\\n    18\\t\\t[RGB565] = {.pixelformat = VIDEO_PIX_FMT_RGB565,\\n    19\\t\\t\\t    .width_min  = 1280, .width_max  = 1280, .width_step  = 50,\\n    20\\t\\t\\t    .height_min = 720,  .height_max = 720,  .height_step = 50},\\n    21\\t\\t[YUYV_A] = {.pixelformat = VIDEO_PIX_FMT_YUYV,\\n    22\\t\\t\\t    .width_min  = 100,  .width_max  = 1000, .width_step  = 50,\\n    23\\t\\t\\t    .height_min = 100,  .height_max = 1000, .h\n…[5807 chars omitted]…\n167\\t\\tzassert_not_null(vbuf, \\\"expecting buffer allocation to succeed\\\");\\n   168\\t\\n   169\\t\\tret = video_buffer_release(vbuf);\\n   170\\t\\tzassert_ok(ret, \\\"expecting buffer release to succeed\\\");\\n   171\\t\\n   172\\t\\tret = video_buffer_release(vbuf);\\n   173\\t\\tzassert_equal(ret, -EINVAL, \\\"expecting -EINVAL when releasing a buffer twice\\\");\\n   174\\t}\\n   175\\t\\n   176\\tZTEST(video_common, test_video_buffer_release_bad_index)\\n   177\\t{\\n   178\\t\\tstruct video_buffer vbuf = {.index = CONFIG_VIDEO_BUFFER_POOL_NUM_MAX};\\n   179\\t\\tint ret;\\n   180\\t\\n   181\\t\\tret = video_buffer_release(&vbuf);\\n   182\\t\\tzassert_equal(ret, -EINVAL, \\\"expecting -EINVAL for an out-of-range buffer index\\\");\\n   183\\t}\\n   184\\t\\n   185\\tZTEST_SUITE(video_common, NULL, NULL, NULL, NULL, NULL);\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/video/api/src/video_common.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/subsys/video/buffer.c:\\n     1\\t/*\\n     2\\t * SPDX-FileCopyrightText: Copyright Linaro Limited\\n     3\\t * SPDX-FileCopyrightText: Copyright tinyVision.ai Inc.\\n     4\\t * SPDX-FileCopyrightText: The Zephyr Project Contributors\\n     5\\t * SPDX-License-Identifier: Apache-2.0\\n     6\\t */\\n     7\\t\\n     8\\t#include <zephyr/drivers/video.h>\\n     9\\t#include <zephyr/logging/log.h>\\n    10\\t#include <zephyr/video/video.h>\\n    11\\t\\n    12\\tLOG_MODULE_REGISTER(video_buffer, CONFIG_VIDEO_LOG_LEVEL);\\n    13\\t\\n    14\\t#if defined(CONFIG_VIDEO_BUFFER_USE_SHARED_MULTI_HEAP)\\n    15\\t#include <zephyr/multi_heap/shared_multi_heap.h>\\n    16\\t\\n    17\\t#define VIDEO_COMMON_HEAP_ALLOC(align, size, timeout)                                              \\\\\\n    18\\t\\tshared_multi_heap_aligned_alloc(CONFIG_VIDEO_BUFFER_SMH_ATTRIBUTE, align, size)\\n    19\\t#define VIDEO_COMMO\n…[5374 chars omitted]…\nnsfer_buffer(const struct device *src, const struct device *sink,\\n   166\\t\\t\\t\\t  enum video_buf_type src_type, enum video_buf_type sink_type,\\n   167\\t\\t\\t\\t  k_timeout_t timeout)\\n   168\\t{\\n   169\\t\\tstruct video_buffer *buf = &(struct video_buffer){.type = src_type};\\n   170\\t\\tint ret;\\n   171\\t\\n   172\\t\\tret = video_driver_dequeue(src, &buf, timeout);\\n   173\\t\\tif (ret < 0) {\\n   174\\t\\t\\treturn ret;\\n   175\\t\\t}\\n   176\\t\\n   177\\t\\tbuf->type = sink_type;\\n   178\\t\\n   179\\t\\treturn video_driver_enqueue(sink, buf);\\n   180\\t}\\n   181\\t\\n   182\\tint video_set_signal(const struct device *dev, struct k_poll_signal *sig)\\n   183\\t{\\n   184\\t\\tif (dev == NULL || sig == NULL) {\\n   185\\t\\t\\treturn -EINVAL;\\n   186\\t\\t}\\n   187\\t\\n   188\\t\\treturn video_driver_set_signal(dev, sig);\\n   189\\t}\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/video/buffer.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/drivers/video/video_common.c:\\n     1\\t/*\\n     2\\t * Copyright (c) 2019, Linaro Limited\\n     3\\t * SPDX-FileCopyrightText: Copyright tinyVision.ai Inc.\\n     4\\t * SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors\\n     5\\t * SPDX-License-Identifier: Apache-2.0\\n     6\\t */\\n     7\\t\\n     8\\t#include <string.h>\\n     9\\t\\n    10\\t#include <zephyr/device.h>\\n    11\\t#include <zephyr/drivers/i2c.h>\\n    12\\t#include <zephyr/drivers/video.h>\\n    13\\t#include <zephyr/kernel.h>\\n    14\\t#include <zephyr/logging/log.h>\\n    15\\t#include <zephyr/sys/byteorder.h>\\n    16\\t#include <zephyr/sys/util.h>\\n    17\\t#include <zephyr/video/video.h>\\n    18\\t\\n    19\\t#include \\\"video_common.h\\\"\\n    20\\t\\n    21\\tLOG_MODULE_REGISTER(video_common, CONFIG_VIDEO_LOG_LEVEL);\\n    22\\t\\n    23\\tstruct video_device *video_find_vdev(const struct device *dev)\\n    24\n…[13736 chars omitted]…\nr (int i = 0; i < num_regs; i++) {\\n   442\\t\\t\\tret = video_write_cci_reg(i2c, regs[i].addr | VIDEO_REG_ADDR8_DATA8, regs[i].data);\\n   443\\t\\t\\tif (ret < 0) {\\n   444\\t\\t\\t\\treturn ret;\\n   445\\t\\t\\t}\\n   446\\t\\t}\\n   447\\t\\n   448\\t\\treturn 0;\\n   449\\t}\\n   450\\t\\n   451\\tint video_write_cci_multiregs16(const struct i2c_dt_spec *i2c, const struct video_reg16 *regs,\\n   452\\t\\t\\t\\t\\tsize_t num_regs)\\n   453\\t{\\n   454\\t\\tint ret;\\n   455\\t\\n   456\\t\\tif (regs == NULL) {\\n   457\\t\\t\\treturn -EINVAL;\\n   458\\t\\t}\\n   459\\t\\n   460\\t\\tfor (int i = 0; i < num_regs; i++) {\\n   461\\t\\t\\tret = video_write_cci_reg(i2c, regs[i].addr | VIDEO_REG_ADDR16_DATA8, regs[i].data);\\n   462\\t\\t\\tif (ret < 0) {\\n   463\\t\\t\\t\\treturn ret;\\n   464\\t\\t\\t}\\n   465\\t\\t}\\n   466\\t\\n   467\\t\\treturn 0;\\n   468\\t}\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/drivers/video/video_common.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/video/api/src/video_emul.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/video/api/src/video_formats.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/include/zephyr/video/video.h\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/tests/subsys/video/api/src/video_emul.c:\\n     1\\t/*\\n     2\\t * SPDX-FileCopyrightText: Copyright tinyVision.ai Inc.\\n     3\\t * SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors\\n     4\\t * SPDX-License-Identifier: Apache-2.0\\n     5\\t */\\n     6\\t\\n     7\\t#include <zephyr/drivers/video.h>\\n     8\\t#include <zephyr/video/video.h>\\n     9\\t#include <zephyr/ztest.h>\\n    10\\t\\n    11\\tconst struct device *rx_dev = DEVICE_DT_GET(DT_NODELABEL(test_video_emul_rx));\\n    12\\tconst struct device *imager_dev = DEVICE_DT_GET(DT_NODELABEL(test_video_emul_imager));\\n    13\\t\\n    14\\tZTEST(video_common, test_video_device)\\n    15\\t{\\n    16\\t\\tzexpect_true(device_is_ready(rx_dev));\\n    17\\t\\tzexpect_true(device_is_ready(imager_dev));\\n    18\\t\\n    19\\t\\tzexpect_ok(video_stream_start(imager_dev, VIDEO_BUF_TYPE_OUTPUT));\\n    20\\t\\tzexpect_ok(video_stream\n…[7733 chars omitted]…\nused, vbuf->size);\\n   180\\t\\n   181\\t\\t/* Enqueue back the same buffer */\\n   182\\t\\tzexpect_ok(video_enqueue(rx_dev, vbuf));\\n   183\\t\\n   184\\t\\t/* Process the remaining buffers */\\n   185\\t\\tzexpect_ok(video_driver_flush(rx_dev, false));\\n   186\\t\\n   187\\t\\t/* Expect the buffer to immediately be available */\\n   188\\t\\tzexpect_ok(video_dequeue(rx_dev, &vbuf, K_FOREVER));\\n   189\\t\\tzexpect_not_null(vbuf);\\n   190\\t\\tzexpect_equal(vbuf->bytesused, vbuf->size);\\n   191\\t\\n   192\\t\\t/* Nothing left in the queue, possible to stop */\\n   193\\t\\tzexpect_ok(video_stream_stop(rx_dev, type));\\n   194\\t\\n   195\\t\\t/* Nothing tested, but this should not crash */\\n   196\\t\\tvideo_buffer_release(vbuf);\\n   197\\t}\\n   198\\t\\n   199\\tZTEST_SUITE(video_emul, NULL, NULL, NULL, NULL, NULL);\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/video/api/src/video_emul.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/tests/subsys/video/api/src/video_formats.c:\\n     1\\t/*\\n     2\\t * SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors\\n     3\\t * SPDX-License-Identifier: Apache-2.0\\n     4\\t */\\n     5\\t\\n     6\\t#include <zephyr/ztest.h>\\n     7\\t#include <zephyr/video/video.h>\\n     8\\t\\n     9\\tZTEST(video_formats, test_video_formats)\\n    10\\t{\\n    11\\t\\tzassert(VIDEO_FMT_IS_GRAYSCALE(VIDEO_PIX_FMT_GREY), \\\"is GRAYSCALE\\\");\\n    12\\t\\tzassert(VIDEO_FMT_IS_GRAYSCALE(VIDEO_PIX_FMT_Y14), \\\"is GRAYSCALE\\\");\\n    13\\t\\tzassert(VIDEO_FMT_IS_GRAYSCALE(VIDEO_PIX_FMT_Y14P), \\\"is GRAYSCALE\\\");\\n    14\\t\\tzassert(!VIDEO_FMT_IS_GRAYSCALE(VIDEO_PIX_FMT_RGB24), \\\"is not GRAYSCALE\\\");\\n    15\\t\\n    16\\t\\tzassert(VIDEO_FMT_IS_BAYER(VIDEO_PIX_FMT_SRGGB8), \\\"is BAYER\\\");\\n    17\\t\\tzassert(VIDEO_FMT_IS_BAYER(VIDEO_PIX_FMT_SBGGR8P16), \\\"is BAYER\\\");\\n    18\\t\\tzassert(VIDEO_\n…[1291 chars omitted]…\nO_FMT_IS_PADDED(VIDEO_PIX_FMT_GREY), \\\"is not PADDED\\\");\\n    39\\t\\n    40\\t\\tzassert(VIDEO_FMT_IS_SEMI_PLANAR(VIDEO_PIX_FMT_NV61), \\\"is SEMI_PLANAR\\\");\\n    41\\t\\tzassert(VIDEO_FMT_IS_SEMI_PLANAR(VIDEO_PIX_FMT_NV16), \\\"is SEMI_PLANAR\\\");\\n    42\\t\\tzassert(VIDEO_FMT_IS_SEMI_PLANAR(VIDEO_PIX_FMT_NV12), \\\"is SEMI_PLANAR\\\");\\n    43\\t\\tzassert(!VIDEO_FMT_IS_SEMI_PLANAR(VIDEO_PIX_FMT_YUV420), \\\"is not SEMI_PLANAR\\\");\\n    44\\t\\n    45\\t\\tzassert(VIDEO_FMT_IS_FULL_PLANAR(VIDEO_PIX_FMT_YUV420), \\\"is FULLY_PLANAR\\\");\\n    46\\t\\tzassert(VIDEO_FMT_IS_FULL_PLANAR(VIDEO_PIX_FMT_YVU420), \\\"is FULLY_PLANAR\\\");\\n    47\\t\\tzassert(!VIDEO_FMT_IS_FULL_PLANAR(VIDEO_PIX_FMT_NV12), \\\"is not FULLY_PLANAR\\\");\\n    48\\t}\\n    49\\t\\n    50\\tZTEST_SUITE(video_formats, NULL, NULL, NULL, NULL, NULL);\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/tests/subsys/video/api/src/video_formats.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/include/zephyr/video/video.h:\\n     1\\t/*\\n     2\\t * Copyright (c) 2019 Linaro Limited.\\n     3\\t * Copyright 2025 NXP\\n     4\\t * Copyright (c) 2025 STMicroelectronics\\n     5\\t * SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors\\n     6\\t * SPDX-License-Identifier: Apache-2.0\\n     7\\t */\\n     8\\t\\n     9\\t/**\\n    10\\t * @file\\n    11\\t * @brief Public APIs for video\\n    12\\t * @ingroup video_api\\n    13\\t */\\n    14\\t\\n    15\\t#ifndef ZEPHYR_INCLUDE_VIDEO_VIDEO_H\\n    16\\t#define ZEPHYR_INCLUDE_VIDEO_VIDEO_H\\n    17\\t\\n    18\\t/**\\n    19\\t * @brief Video subsystem public APIs.\\n    20\\t * @defgroup video_api Video Subsystem\\n    21\\t * @ingroup multimedia\\n    22\\t * @since 4.4\\n    23\\t * @version 0.2.0\\n    24\\t * @{\\n    25\\t */\\n    26\\t\\n    27\\t#include <stddef.h>\\n    28\\t#include <stdint.h>\\n    29\\t\\n    30\\t#include <zephyr/devic\n…[18676 chars omitted]…\n   451\\t/**\\n   452\\t * @brief Search for a format that matches in a list of capabilities\\n   453\\t *\\n   454\\t * @param fmts The format capability list to search.\\n   455\\t * @param fmt The format to find in the list.\\n   456\\t * @param idx The pointer to a number of the first format that matches.\\n   457\\t *\\n   458\\t * @return 0 when a format is found.\\n   459\\t * @return -ENOENT when no matching format is found.\\n   460\\t */\\n   461\\tint video_format_caps_index(const struct video_format_cap *fmts, const struct video_format *fmt,\\n   462\\t\\t\\t\\t    size_t *idx);\\n   463\\t\\n   464\\t/**\\n   465\\t * @}\\n   466\\t */\\n   467\\t\\n   468\\t#ifdef __cplusplus\\n   469\\t}\\n   470\\t#endif\\n   471\\t\\n   472\\t/**\\n   473\\t * @}\\n   474\\t */\\n   475\\t\\n   476\\t#endif /* ZEPHYR_INCLUDE_VIDEO_VIDEO_H */\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/include/zephyr/video/video.h\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/video/caps.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/video/format.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/video/stream.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/subsys/video/caps.c:\\n     1\\t/*\\n     2\\t * SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors\\n     3\\t * SPDX-License-Identifier: Apache-2.0\\n     4\\t */\\n     5\\t\\n     6\\t#include <zephyr/drivers/video.h>\\n     7\\t#include <zephyr/logging/log.h>\\n     8\\t#include <zephyr/video/video.h>\\n     9\\t\\n    10\\tLOG_MODULE_REGISTER(video_caps, CONFIG_VIDEO_LOG_LEVEL);\\n    11\\t\\n    12\\tint video_get_caps(const struct device *dev, struct video_caps *caps)\\n    13\\t{\\n    14\\t\\tif (dev == NULL || caps == NULL ||\\n    15\\t\\t    (caps->type != VIDEO_BUF_TYPE_INPUT && caps->type != VIDEO_BUF_TYPE_OUTPUT)) {\\n    16\\t\\t\\treturn -EINVAL;\\n    17\\t\\t}\\n    18\\t\\n    19\\t\\treturn video_driver_get_caps(dev, caps);\\n    20\\t}\\n    21\\t\\n    22\\tint video_format_caps_index(const struct video_format_cap *fmts, const struct video_format *fmt,\\n    23\\t\\t\\t\\t    si\n…[261 chars omitted]…\n1\\t\\t\\t    IN_RANGE(fmt->width, fmts[i].width_min, fmts[i].width_max) &&\\n    32\\t\\t\\t    IN_RANGE(fmt->height, fmts[i].height_min, fmts[i].height_max)) {\\n    33\\t\\t\\t\\t*idx = i;\\n    34\\t\\t\\t\\treturn 0;\\n    35\\t\\t\\t}\\n    36\\t\\t}\\n    37\\t\\treturn -ENOENT;\\n    38\\t}\\n    39\\t\\n    40\\tint video_transform_cap(const struct device *const dev,\\n    41\\t\\t\\t\\tconst struct video_format_cap *const cap,\\n    42\\t\\t\\t\\tstruct video_format_cap *const res_cap,\\n    43\\t\\t\\t\\tenum video_buf_type type, uint16_t ind)\\n    44\\t{\\n    45\\t\\tif (dev == NULL || cap == NULL || res_cap == NULL ||\\n    46\\t\\t    (type != VIDEO_BUF_TYPE_INPUT && type != VIDEO_BUF_TYPE_OUTPUT)) {\\n    47\\t\\t\\treturn -EINVAL;\\n    48\\t\\t}\\n    49\\t\\n    50\\t\\treturn video_driver_transform_cap(dev, cap, res_cap, type, ind);\\n    51\\t}\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/video/caps.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/subsys/video/format.c:\\n     1\\t/*\\n     2\\t * SPDX-FileCopyrightText: The Zephyr Project Contributors\\n     3\\t * SPDX-License-Identifier: Apache-2.0\\n     4\\t */\\n     5\\t\\n     6\\t#include <zephyr/drivers/video.h>\\n     7\\t#include <zephyr/logging/log.h>\\n     8\\t#include <zephyr/video/video.h>\\n     9\\t\\n    10\\tLOG_MODULE_REGISTER(video_format, CONFIG_VIDEO_LOG_LEVEL);\\n    11\\t\\n    12\\tint video_set_selection(const struct device *dev, struct video_selection *sel)\\n    13\\t{\\n    14\\t\\tif (dev == NULL || sel == NULL) {\\n    15\\t\\t\\treturn -EINVAL;\\n    16\\t\\t}\\n    17\\t\\n    18\\t\\treturn video_driver_set_selection(dev, sel);\\n    19\\t}\\n    20\\t\\n    21\\tint video_get_selection(const struct device *dev, struct video_selection *sel)\\n    22\\t{\\n    23\\t\\tif (dev == NULL || sel == NULL) {\\n    24\\t\\t\\treturn -EINVAL;\\n    25\\t\\t}\\n    26\\t\\n    27\\t\\treturn v\n…[1472 chars omitted]…\n  72\\t\\t\\t}\\n    73\\t\\t\\tfmt->size = fmt->pitch * fmt->height;\\n    74\\t\\t\\tbreak;\\n    75\\t\\t}\\n    76\\t\\n    77\\t\\treturn 0;\\n    78\\t}\\n    79\\t\\n    80\\tint video_set_compose_format(const struct device *dev, struct video_format *fmt)\\n    81\\t{\\n    82\\t\\tstruct video_selection sel = {\\n    83\\t\\t\\t.type = fmt->type,\\n    84\\t\\t\\t.target = VIDEO_SEL_TGT_COMPOSE,\\n    85\\t\\t\\t.rect.left = 0,\\n    86\\t\\t\\t.rect.top = 0,\\n    87\\t\\t\\t.rect.width = fmt->width,\\n    88\\t\\t\\t.rect.height = fmt->height,\\n    89\\t\\t};\\n    90\\t\\tint ret;\\n    91\\t\\n    92\\t\\tret = video_set_selection(dev, &sel);\\n    93\\t\\tif (ret < 0 && ret != -ENOSYS) {\\n    94\\t\\t\\tLOG_ERR(\\\"Unable to set selection compose\\\");\\n    95\\t\\t\\treturn ret;\\n    96\\t\\t}\\n    97\\t\\n    98\\t\\treturn video_set_format(dev, fmt);\\n    99\\t}\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/video/format.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/subsys/video/stream.c:\\n     1\\t/*\\n     2\\t * SPDX-FileCopyrightText: The Zephyr Project Contributors\\n     3\\t * SPDX-License-Identifier: Apache-2.0\\n     4\\t */\\n     5\\t\\n     6\\t#include <zephyr/video/video.h>\\n     7\\t#include <zephyr/drivers/video.h>\\n     8\\t\\n     9\\tint video_stream_start(const struct device *dev, enum video_buf_type type)\\n    10\\t{\\n    11\\t\\tif (dev == NULL || (type != VIDEO_BUF_TYPE_INPUT && type != VIDEO_BUF_TYPE_OUTPUT)) {\\n    12\\t\\t\\treturn -EINVAL;\\n    13\\t\\t}\\n    14\\t\\n    15\\t\\treturn video_driver_set_stream(dev, true, type);\\n    16\\t}\\n    17\\t\\n    18\\tint video_stream_stop(const struct device *dev, enum video_buf_type type)\\n    19\\t{\\n    20\\t\\tint ret;\\n    21\\t\\n    22\\t\\tif (dev == NULL || (type != VIDEO_BUF_TYPE_INPUT && type != VIDEO_BUF_TYPE_OUTPUT)) {\\n    23\\t\\t\\treturn -EINVAL;\\n    24\\t\\t}\\n    25\\t\\n    26\\t\\tret = video_driver_set_stream(dev, false, type);\\n    27\\t\\n    28\\t\\tvideo_driver_flush(dev, true);\\n    29\\t\\n    30\\t\\treturn ret;\\n    31\\t}\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/video/stream.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/video/ctrls.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/video/frmival.c\", \"file_text\": null, \"old_str\": null, \"new_str\": null, \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/subsys/video/ctrls.c:\\n     1\\t/*\\n     2\\t * Copyright 2025 NXP\\n     3\\t *\\n     4\\t * SPDX-License-Identifier: Apache-2.0\\n     5\\t */\\n     6\\t\\n     7\\t#include <inttypes.h>\\n     8\\t#include <stdio.h>\\n     9\\t\\n    10\\t#include <zephyr/drivers/video.h>\\n    11\\t#include <zephyr/logging/log.h>\\n    12\\t#include <zephyr/video/video.h>\\n    13\\t\\n    14\\tLOG_MODULE_REGISTER(video_controls, CONFIG_VIDEO_LOG_LEVEL);\\n    15\\t\\n    16\\t/* By definition, the cluster is in manual mode if the primary control value is 0 */\\n    17\\tstatic inline bool is_cluster_manual(const struct video_ctrl *primary)\\n    18\\t{\\n    19\\t\\treturn primary->type == VIDEO_CTRL_TYPE_INTEGER64 ? primary->val64 == 0 : primary->val == 0;\\n    20\\t}\\n    21\\t\\n    22\\tint video_cluster_ctrl(struct video_ctrl *ctrls, uint8_t sz)\\n    23\\t{\\n    24\\t\\tbool has_volatiles = false;\\n    25\\t\\n  \n…[15616 chars omitted]…\n_query);\\n   472\\t\\tif (ret < 0) {\\n   473\\t\\t\\treturn ret;\\n   474\\t\\t}\\n   475\\t\\n   476\\t\\tif (!IN_RANGE(ctrl.val, ctrl_query.range.min, ctrl_query.range.max)) {\\n   477\\t\\t\\treturn -ERANGE;\\n   478\\t\\t}\\n   479\\t\\n   480\\t\\tif (ctrl_query.int_menu == NULL) {\\n   481\\t\\t\\treturn -EINVAL;\\n   482\\t\\t}\\n   483\\t\\n   484\\t\\treturn (int64_t)ctrl_query.int_menu[ctrl.val];\\n   485\\t\\n   486\\tfallback:\\n   487\\t\\t/* If VIDEO_CID_LINK_FREQ is not available, approximate from VIDEO_CID_PIXEL_RATE */\\n   488\\t\\tctrl.id = VIDEO_CID_PIXEL_RATE;\\n   489\\t\\tret = video_get_ctrl(dev, &ctrl);\\n   490\\t\\tif (ret < 0) {\\n   491\\t\\t\\treturn ret;\\n   492\\t\\t}\\n   493\\t\\n   494\\t\\t/* CSI D-PHY is using a DDR data bus so bitrate is twice the frequency */\\n   495\\t\\treturn ctrl.val64 * bpp / (2 * lane_nb);\\n   496\\t}\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/video/ctrls.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Here's the result of running `cat -n` on /zephyrproject/zephyr/subsys/video/frmival.c:\\n     1\\t/*\\n     2\\t * SPDX-FileCopyrightText: The Zephyr Project Contributors\\n     3\\t * SPDX-License-Identifier: Apache-2.0\\n     4\\t */\\n     5\\t\\n     6\\t#include <zephyr/drivers/video.h>\\n     7\\t#include <zephyr/logging/log.h>\\n     8\\t#include <zephyr/video/video.h>\\n     9\\t\\n    10\\tLOG_MODULE_REGISTER(video_frmival, CONFIG_VIDEO_LOG_LEVEL);\\n    11\\t\\n    12\\tint video_set_frmival(const struct device *dev, struct video_frmival *frmival)\\n    13\\t{\\n    14\\t\\tif (dev == NULL || frmival == NULL) {\\n    15\\t\\t\\treturn -EINVAL;\\n    16\\t\\t}\\n    17\\t\\n    18\\t\\treturn video_driver_set_frmival(dev, frmival);\\n    19\\t}\\n    20\\t\\n    21\\tint video_get_frmival(const struct device *dev, struct video_frmival *frmival)\\n    22\\t{\\n    23\\t\\tif (dev == NULL || frmival == NULL) {\\n    24\\t\\t\\treturn -EINVAL;\\n    25\\t\\t}\\n    26\\t\\n    27\n…[2768 chars omitted]…\nmp = fie.discrete;\\n    93\\t\\t\\t\\tbreak;\\n    94\\t\\t\\tcase VIDEO_FRMIVAL_TYPE_STEPWISE:\\n    95\\t\\t\\t\\tvideo_closest_frmival_stepwise(&fie.stepwise, &desired, &tmp);\\n    96\\t\\t\\t\\tbreak;\\n    97\\t\\t\\tdefault:\\n    98\\t\\t\\t\\tCODE_UNREACHABLE;\\n    99\\t\\t\\t}\\n   100\\t\\n   101\\t\\t\\ttmp_nsec = video_frmival_nsec(&tmp);\\n   102\\t\\t\\tdiff_nsec = tmp_nsec > goal_nsec ? tmp_nsec - goal_nsec : goal_nsec - tmp_nsec;\\n   103\\t\\n   104\\t\\t\\tif (diff_nsec < best_diff_nsec) {\\n   105\\t\\t\\t\\tbest_diff_nsec = diff_nsec;\\n   106\\t\\t\\t\\tmatch->index = fie.index;\\n   107\\t\\t\\t\\tmatch->discrete = tmp;\\n   108\\t\\t\\t}\\n   109\\t\\n   110\\t\\t\\tif (diff_nsec == 0) {\\n   111\\t\\t\\t\\t/* Exact match, stop searching a better match */\\n   112\\t\\t\\t\\tbreak;\\n   113\\t\\t\\t}\\n   114\\t\\t}\\n   115\\t\\n   116\\t\\treturn 0;\\n   117\\t}\\n\"}], \"is_error\": false, \"command\": \"view\", \"path\": \"/zephyrproject/zephyr/subsys/video/frmival.c\", \"prev_exist\": true, \"old_content\": null, \"new_content\": null, \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "file_editor",
+          "action": "{\"command\": \"str_replace\", \"path\": \"/zephyrproject/zephyr/subsys/video/buffer.c\", \"file_text\": null, \"old_str\": \"int video_buffer_release(struct video_buffer *vbuf)\\n{\\n\\tif (vbuf == NULL || vbuf->index >= ARRAY_SIZE(video_buf)) {\\n\\t\\tLOG_ERR(\\\"Invalid buffer index: %u\\\", vbuf->index);\\n\\t\\treturn -EINVAL;\\n\\t}\", \"new_str\": \"int video_buffer_release(struct video_buffer *vbuf)\\n{\\n\\tif (vbuf == NULL) {\\n\\t\\tLOG_ERR(\\\"Invalid NULL buffer\\\");\\n\\t\\treturn -EINVAL;\\n\\t}\\n\\n\\tif (vbuf->index >= ARRAY_SIZE(video_buf)) {\\n\\t\\tLOG_ERR(\\\"Invalid buffer index: %u\\\", vbuf->index);\\n\\t\\treturn -EINVAL;\\n\\t}\", \"insert_line\": null, \"view_range\": null, \"kind\": \"FileEditorAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "file_editor",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"The file /zephyrproject/zephyr/subsys/video/buffer.c has been edited. Here's the result of running `cat -n` on a snippet of /zephyrproject/zephyr/subsys/video/buffer.c:\\n    88\\t\\treturn video_buffer_aligned_alloc(size, sizeof(void *), timeout);\\n    89\\t}\\n    90\\t\\n    91\\tint video_buffer_release(struct video_buffer *vbuf)\\n    92\\t{\\n    93\\t\\tif (vbuf == NULL) {\\n    94\\t\\t\\tLOG_ERR(\\\"Invalid NULL buffer\\\");\\n    95\\t\\t\\treturn -EINVAL;\\n    96\\t\\t}\\n    97\\t\\n    98\\t\\tif (vbuf->index >= ARRAY_SIZE(video_buf)) {\\n    99\\t\\t\\tLOG_ERR(\\\"Invalid buffer index: %u\\\", vbuf->index);\\n   100\\t\\t\\treturn -EINVAL;\\n   101\\t\\t}\\n   102\\t\\n   103\\t\\tif (video_buf[vbuf->index].buffer == NULL) {\\n   104\\t\\t\\tLOG_ERR(\\\"Buffer %u is already released\\\", vbuf->index);\\n   105\\t\\t\\treturn -EINVAL;\\nReview the changes and make sure they are as expected. Edit the file again if necessary.\"}], \"is_error\": false, \"command\": \"str_replace\", \"pa\n…[10258 chars omitted]…\n[buf->index].type = buf->type;\\n\\n\\treturn video_driver_enqueue(dev, &video_buf[buf->index]);\\n}\\n\\nint video_dequeue(const struct device *dev, struct video_buffer **vbuf,\\n\\t\\t\\t\\t       k_timeout_t timeout)\\n{\\n\\tif (dev == NULL || vbuf == NULL) {\\n\\t\\treturn -EINVAL;\\n\\t}\\n\\n\\treturn video_driver_dequeue(dev, vbuf, timeout);\\n}\\n\\nint video_transfer_buffer(const struct device *src, const struct device *sink,\\n\\t\\t\\t  enum video_buf_type src_type, enum video_buf_type sink_type,\\n\\t\\t\\t  k_timeout_t timeout)\\n{\\n\\tstruct video_buffer *buf = &(struct video_buffer){.type = src_type};\\n\\tint ret;\\n\\n\\tret = video_driver_dequeue(src, &buf, timeout);\\n\\tif (ret < 0) {\\n\\t\\treturn ret;\\n\\t}\\n\\n\\tbuf->type = sink_type;\\n\\n\\treturn video_driver_enqueue(sink, buf);\\n}\\n\\nint video_set_signal(const struct device *dev, struct k_poll_signal *sig)\\n{\\n\\tif (dev == NULL || sig == NULL) {\\n\\t\\treturn -EINVAL;\\n\\t}\\n\\n\\treturn video_driver_set_signal(dev, sig);\\n}\\n\", \"kind\": \"FileEditorObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "terminal",
+          "action": "{\"command\": \"cd /zephyrproject/zephyr/tests/subsys/video/api && timeout 600 west build -b native_sim -d /tmp/build -p always -t run .\", \"is_input\": false, \"timeout\": null, \"reset\": false, \"kind\": \"TerminalAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "terminal",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"-- west build: generating a build system\\nLoading Zephyr default modules (Zephyr base).\\n-- Application: /zephyrproject/zephyr/tests/subsys/video/api\\n-- CMake version: 3.28.3\\n-- Found Python3: /opt/python/venv/bin/python3 (found suitable version \\\"3.12.3\\\", minimum required is \\\"3.12\\\") found components: Interpreter\\n-- Cache files will be written to: /root/.cache/zephyr\\n-- Zephyr version: 4.4.99 (/zephyrproject/zephyr)\\n-- Found west (found suitable version \\\"1.5.0\\\", minimum required is \\\"0.14.0\\\")\\n-- Board: native_sim, qualifiers: native\\n-- Found host-tools: zephyr 1.0.1 (/opt/toolchains/zephyr-sdk-1.0.1)\\n-- Found toolchain: host (gcc/ld)\\n-- Found Dtc: /opt/toolchains/zephyr-sdk-1.0.1/hosttools/sysroots/x86_64-pokysdk-linux/usr/bin/dtc (found suitable version \\\"1.7.0\\\", minimum required is \\\"1.4.6\\\")\\n-- Found BOARD.dts: /zephyrproject/zephyr/boards/native/native_sim/native_sim.dts\\n-- Found devicetree overlay: /ze\n…[9526 chars omitted]…\n  0.00% [video_emul]: pass = 0, fail = 0, skip = 0, total = 0 duration = 0.000 seconds\\n\\nSUITE PASS - 100.00% [video_formats]: pass = 1, fail = 0, skip = 0, total = 1 duration = 0.000 seconds\\n - PASS - [video_formats.test_video_formats] duration = 0.000 seconds\\n\\n------ TESTSUITE SUMMARY END ------\\n\\n===================================================================\\nPROJECT EXECUTION SUCCESSFUL\"}], \"is_error\": false, \"command\": \"cd /zephyrproject/zephyr/tests/subsys/video/api && timeout 600 west build -b native_sim -d /tmp/build -p always -t run .\", \"exit_code\": 0, \"timeout\": false, \"metadata\": {\"exit_code\": 0, \"pid\": -1, \"username\": \"root\", \"hostname\": \"ec0fe98535a6\", \"working_dir\": \"/zephyrproject/zephyr/tests/subsys/video/api\", \"py_interpreter_path\": \"/opt/python/venv/bin/python\", \"prefix\": \"\", \"suffix\": \"\\n[The command completed with exit code 0.]\"}, \"full_output_save_dir\": \"workspace/conversations/8c3e4bc524f0405592bd66a6f4c8bb12/observations\", \"kind\": \"TerminalObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "action",
+          "tool": "finish",
+          "action": "{\"message\": \"Fixed the NULL pointer dereference in `video_buffer_release()` in `/zephyrproject/zephyr/subsys/video/buffer.c` where `vbuf->index` was dereferenced in `LOG_ERR()` when `vbuf == NULL`. All tests in `tests/subsys/video/api` now pass on `native_sim`.\", \"kind\": \"FinishAction\"}",
+          "thought": ""
+        },
+        {
+          "type": "observation",
+          "tool": "finish",
+          "observation": "{\"content\": [{\"cache_prompt\": false, \"type\": \"text\", \"text\": \"Fixed the NULL pointer dereference in `video_buffer_release()` in `/zephyrproject/zephyr/subsys/video/buffer.c` where `vbuf->index` was dereferenced in `LOG_ERR()` when `vbuf == NULL`. All tests in `tests/subsys/video/api` now pass on `native_sim`.\"}], \"is_error\": false, \"kind\": \"FinishObservation\"}"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        },
+        {
+          "type": "ConversationStateUpdateEvent"
+        }
+      ]
+    },
+    "api_events": [],
+    "started_at": "2026-11-05T11:32:42+00:00",
+    "run_meta": {
+      "code_commit": "b57a922d0be3f2bf3bcaf530f3123daaa1b1b88d",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

@@ -32,7 +32,7 @@ _HELP_CHARS = 600
 
 
 def cmake_only(app_dir: str, board: str, build_dir: str) -> bool:
-    r = subprocess.run(["west", "build", "-b", board, "-d", build_dir, "-p", "always", "--cmake-only", app_dir],
+    subprocess.run(["west", "build", "-b", board, "-d", build_dir, "-p", "always", "--cmake-only", app_dir],
                        capture_output=True, text=True, timeout=900)
     return os.path.exists(os.path.join(build_dir, "build.ninja"))
 

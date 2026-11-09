@@ -1,0 +1,91 @@
+[
+  {
+    "case_id": "v3_thread_priority_swap_sys_sem_93db4e5_tt",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 17.94543695449829,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 748,
+            "output_tokens": 1547
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": {
+            "filepath": "lib/os/sem.c",
+            "content": "/*\n * Copyright (c) 2019 Intel Corporation\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <zephyr/sys/sem.h>\n#include <zephyr/sys/atomic.h>\n\n#ifdef CONFIG_USERSPACE\nstatic inline struct k_futex *sem_to_futex(struct sys_sem *sem)\n{\n\treturn &sem->futex;\n}\n\nstatic inline atomic_t *sem_to_atomic(struct sys_sem *sem)\n{\n\treturn &sem->futex.val;\n}\n#else\nstatic inline struct k_sem *sem_to_k_sem(struct sys_sem *sem)\n{\n\treturn &sem->kernel_sem;\n}\n#endif\n\n/*\n * Look like atomic_get(), concurrency control without initial checking\n * and read it again to check if the value is greater than positive 1.\n * Otherwise, return the status of atomic_cas().\n */\nstatic inline bool atomic_dec_positive_or_zero(atomic_t *target,\n\t\t\t\t\t       atomic_val_t limit)\n{\n\tatomic_val_t old_value;\n\tatomic_val_t old_next;\n\n\told_value = atomic_get(target);\n\n\twhile (old_value > 0) {\n\t\told_next = old_value - 1;\n\t\tif (atomic_cas(target, old_value, old_next)) {\n\t\t\treturn true;\n\t\t}\n\n\t\told_value = atomic_get(target);\n\t}\n\n\treturn false;\n}\n\n/*\n * Look like atomic_get(), concurrency control without initial checking\n * and read it again to check if the value is less than the limit.\n * Otherwise, return the status of atomic_cas().\n */\nstatic inline int atomic_inc_limit(atomic_t *target, atomic_val_t limit)\n{\n\tatomic_val_t old_value;\n\tatomic_val_t old_next;\n\n\told_value = atomic_get(target);\n\n\twhile (old_value < limit) {\n\t\told_next = old_value + 1;\n\t\tif (atomic_cas(target, old_value, old_next)) {\n\t\t\treturn old_value;\n\t\t}\n\n\t\told_value = atomic_get(target);\n\t}\n\n\treturn -EAGAIN;\n}\n\nint sys_sem_init(struct sys_sem *sem, unsigned int initial_count,\n\t\t unsigned int limit)\n{\n\tif ((sem == NULL) || (limit == 0U) || (initial_count > limit) ||\n\t    (limit > INT_MAX)) {\n\t\treturn -EINVAL;\n\t}\n\n#ifdef CONFIG_USERSPACE\n\tatomic_set(sem_to_atomic(sem), initial_count);\n\tsem->limit = limit;\n#else\n\t(void)k_sem_init(sem_to_k_sem(sem), initial_count, limit);\n#endif\n\n\treturn 0;\n}\n\nint sys_sem_give(struct sys_sem *sem)\n{\n\tint ret = 0;\n\n#ifdef CONFIG_USERSPACE\n\tret = atomic_inc_limit(sem_to_atomic(sem), sem->limit);\n\tif (ret >= 0) {\n\t\tret = k_futex_wake(sem_to_futex(sem), false);\n\t\tif (ret > 0) {\n\t\t\treturn 0;\n\t\t}\n\t}\n#else\n\tk_sem_give(sem_to_k_sem(sem));\n#endif\n\treturn ret;\n}\n\nint sys_sem_take(struct sys_sem *sem, k_timeout_t timeout)\n{\n\tint ret = 0;\n\n#ifdef CONFIG_USERSPACE\n\t/*\n\t * Check the atomic value, if it is greater than 1, decrement it\n\t * and return the status.\n\t */\n\tdo {\n\t\tif (atomic_dec_positive_or_zero(sem_to_atomic(sem),\n\t\t\t\t\t\tsem->limit)) {\n\t\t\treturn 0;\n\t\t}\n\n\t\tret = k_futex_wait(sem_to_futex(sem), 0, timeout);\n\t} while (ret == 0 || ret == -EAGAIN);\n#else\n\tret = k_sem_take(sem_to_k_sem(sem), timeout);\n\tif (ret == -EBUSY) {\n\t\tret = -ETIMEDOUT;\n\t}\n#endif\n\treturn ret;\n}\n\nunsigned int sys_sem_count_get(struct sys_sem *sem)\n{\n#ifdef CONFIG_USERSPACE\n\tint value = atomic_get(sem_to_atomic(sem));\n\n\treturn (value > 0) ? value : 0;\n#else\n\treturn k_sem_count_get(sem_to_k_sem(sem));\n#endif\n}\n"
+          },
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file 'lib/os/sem.c' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Runtime Log Tail]\nSTART - test_sys_sem_take_multiple\nAssertion failed at WEST_TOPDIR/zephyr/tests/kernel/mem_protect/sys_sem/src/main.c:613: sys_sem_1cpu_test_sys_sem_take_multiple: (signal_count == 1U is false)\n\n[Build Messages]\n[Build Warning]\nwarning: MAX_THREAD_BYTES (defined at arch/Kconfig:463) was assigned the value '8' but got the value\n''. Check these unsatisfied dependencies: USERSPACE (=n). See\nhttp://docs.zephyrproject.org/latest/kconfig.html#CONFIG_MAX_THREAD_BYTES and/or look up\nMAX_THREAD_BYTES in the menuconfig/guiconfig interface. The Application Development Primer, Setting\nConfiguration Values, and Kconfig - Tips and Best Practices sections of the manual might be helpful\ntoo.",
+    "protected_file_count": 4,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3_thread_priority_swap_sys_sem_93db4e5_tt",
+    "api_events": [],
+    "started_at": "2026-11-06T02:22:48+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

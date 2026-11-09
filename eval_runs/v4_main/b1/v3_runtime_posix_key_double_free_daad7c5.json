@@ -1,0 +1,91 @@
+[
+  {
+    "case_id": "v3_runtime_posix_key_double_free_daad7c5",
+    "category": "runtime_crash",
+    "pipeline": "b1",
+    "model_provider": "gemini",
+    "single_model": true,
+    "final_status": "failed_max_retries",
+    "iterations": 1,
+    "ttr_seconds": 32.56734323501587,
+    "iteration_log": [
+      {
+        "iteration": 1,
+        "compiled": false,
+        "resolved": false,
+        "tool_invocation_error": true,
+        "token_usage": [
+          {
+            "node": "b1_zero_shot",
+            "model": "gemini-4-argon",
+            "input_tokens": 878,
+            "output_tokens": 3183
+          }
+        ],
+        "trajectory": {
+          "stage": "apply",
+          "status": "patch_format_error",
+          "patch": {
+            "filepath": "lib/posix/options/key.c",
+            "content": "/*\n * Copyright (c) 2018 Intel Corporation\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n#include \"posix_internal.h\"\n\n#include <zephyr/init.h>\n#include <zephyr/kernel.h>\n#include <zephyr/sys/bitarray.h>\n#include <zephyr/posix/pthread.h>\n#include <zephyr/sys/slist.h>\n\nstruct pthread_key_obj {\n\t/* List of pthread_key_data objects that contain thread\n\t * specific data for the key.Wait on this condition variable.\n\t */\n\tsys_slist_t key_data_l;\n\n\t/* Optional destructor that is passed to pthread_key_create() */\n\tvoid (*destructor)(void *);\n};\n\n/* This is crucial to keep track of keys across all threads */\nstatic struct k_spinlock pthread_key_lock;\n\nstatic struct pthread_key_obj posix_key_pool[CONFIG_POSIX_THREAD_KEYS_MAX];\nSYS_BITARRAY_DEFINE_STATIC(posix_key_bitarray, CONFIG_POSIX_THREAD_KEYS_MAX);\n\nstatic inline size_t posix_key_to_offset(struct pthread_key_obj *k)\n{\n\treturn k - posix_key_pool;\n}\n\nstatic inline uint32_t get_posix_key_idx(uint32_t key)\n{\n\treturn mark_posix_obj_uninitialized(key);\n}\n\nstruct pthread_key_obj *get_posix_key(pthread_key_t key)\n{\n\tint actually_initialized;\n\tsize_t bit = get_posix_key_idx(key);\n\n\t/* if the provided cond does not claim to be initialized, its invalid */\n\tif (!is_posix_obj_initialized(key)) {\n\t\treturn NULL;\n\t}\n\n\t/* Mask off the MSB to get the actual bit index */\n\tif (sys_bitarray_test_bit(&posix_key_bitarray, bit, &actually_initialized) < 0) {\n\t\treturn NULL;\n\t}\n\n\tif (actually_initialized == 0) {\n\t\t/* The key claims to be initialized, but is actually not */\n\t\treturn NULL;\n\t}\n\n\treturn (struct pthread_key_obj *)&posix_key_pool[bit];\n}\n\n/**\n * @brief Create a key for thread-specific data\n *\n * See IEEE 1003.1\n */\nint pthread_key_create(pthread_key_t *key, void (*destructor)(void *))\n{\n\tsize_t bit;\n\tint ret = ENOMEM;\n\tstruct pthread_key_obj *new_key;\n\n\t/* Acquire a key */\n\tif (sys_bitarray_alloc(&posix_key_bitarray, 1, &bit) < 0) {\n\t\treturn ENOMEM;\n\t}\n\n\tnew_key = &posix_key_pool[bit];\n\t(void)memset(new_key, 0, sizeof(*new_key));\n\n\tK_SPINLOCK(&pthread_key_lock) {\n\t\tsys_slist_init(&(new_key->key_data_l));\n\n\t\tnew_key->destructor = destructor;\n\t\t*key = mark_posix_obj_initialized(bit);\n\t\tret = 0;\n\t}\n\n\treturn ret;\n}\n\n/**\n * @brief Delete a key for thread-specific data\n *\n * See IEEE 1003.1\n */\nint pthread_key_delete(pthread_key_t key)\n{\n\tsize_t bit;\n\tint ret = EINVAL;\n\tstruct pthread_key_obj *key_obj;\n\tstruct pthread_key_data *key_data;\n\tsys_snode_t *node_l, *next_node_l;\n\tk_spinlock_key_t key_key;\n\n\tkey_key = k_spin_lock(&pthread_key_lock);\n\n\tkey_obj = get_posix_key(key);\n\tif (key_obj == NULL) {\n\t\tk_spin_unlock(&pthread_key_lock, key_key);\n\t\treturn EINVAL;\n\t}\n\n\t/* Delete thread-specific elements associated with the key */\n\tSYS_SLIST_FOR_EACH_NODE_SAFE(&(key_obj->key_data_l), node_l, next_node_l) {\n\n\t\t/* Remove the object from the list key_data_l */\n\t\tkey_data = (struct pthread_key_data *)sys_slist_get(&(key_obj->key_data_l));\n\n\t\t/* Deallocate the object's memory */\n\t\tk_spin_unlock(&pthread_key_lock, key_key);\n\t\tk_free((void *)key_data);\n\t\tkey_key = k_spin_lock(&pthread_key_lock);\n\t}\n\n\tbit = posix_key_to_offset(key_obj);\n\tret = sys_bitarray_free(&posix_key_bitarray, 1, bit);\n\t__ASSERT_NO_MSG(ret == 0);\n\n\tk_spin_unlock(&pthread_key_lock, key_key);\n\n\treturn 0;\n}\n\n/**\n * @brief Associate a thread-specific value with a key\n *\n * See IEEE 1003.1\n */\nint pthread_setspecific(pthread_key_t key, const void *value)\n{\n\tstruct pthread_key_obj *key_obj;\n\tstruct posix_thread *thread = to_posix_thread(pthread_self());\n\tstruct pthread_key_data *key_data;\n\tpthread_thread_data *thread_spec_data;\n\tk_spinlock_key_t key_key;\n\tsys_snode_t *node_l;\n\tint retval = 0;\n\n\tif (thread == NULL) {\n\t\treturn EINVAL;\n\t}\n\n\t/* Traverse the list of keys set by the thread, looking for key.\n\t * If the key is already in the list, re-assign its value.\n\t * Else add the key to the thread's list.\n\t */\n\tkey_key = k_spin_lock(&pthread_key_lock);\n\n\tkey_obj = get_posix_key(key);\n\tif (key_obj == NULL) {\n\t\tk_spin_unlock(&pthread_key_lock, key_key);\n\t\treturn EINVAL;\n\t}\n\n\tSYS_SLIST_FOR_EACH_NODE(&(thread->key_list), node_l) {\n\n\t\tthread_spec_data = (pthread_thread_data *)node_l;\n\n\t\tif (thread_spec_data->key == key_obj) {\n\n\t\t\t/* Key is already present so\n\t\t\t * associate the value with the key\n\t\t\t */\n\t\t\tthread_spec_data->data = (void *)value;\n\t\t\tgoto out;\n\t\t}\n\t}\n\n\tif (node_l == NULL) {\n\t\tk_spin_unlock(&pthread_key_lock, key_key);\n\n\t\t/* Allocate memory for new key data, Re-acquire spinlock */\n\t\tkey_data = k_malloc(sizeof(struct pthread_key_data));\n\t\tkey_key = k_spin_lock(&pthread_key_lock);\n\n\t\tif (key_data == NULL) {\n\t\t\tretval = ENOMEM;\n\t\t\tgoto out;\n\t\t} else {\n\t\t\t/* Associate thread specific data, initialize new key */\n\t\t\tkey_data->thread_data.key = key_obj;\n\t\t\tkey_data->thread_data.data = (void *)value;\n\n\t\t\t/* Append new key data to thread's key list */\n\t\t\tsys_slist_append((&thread->key_list),\n\t\t\t\t\t (sys_snode_t *)(&key_data->thread_data));\n\n\t\t\t/* Append new key data to the key object's list */\n\t\t\tsys_slist_append(&(key_obj->key_data_l), (sys_snode_t *)key_data);\n\t\t}\n\t}\n\nout:\n\tk_spin_unlock(&pthread_key_lock, key_key);\n\n\treturn retval;\n}\n\n/**\n * @brief Get the thread-specific value associated with the key\n *\n * See IEEE 1003.1\n */\nvoid *pthread_getspecific(pthread_key_t key)\n{\n\tstruct pthread_key_obj *key_obj;\n\tstruct posix_thread *thread = to_posix_thread(pthread_self());\n\tpthread_thread_data *thread_spec_data;\n\tvoid *value = NULL;\n\tsys_snode_t *node_l;\n\n\tif (thread == NULL) {\n\t\treturn NULL;\n\t}\n\n\tK_SPINLOCK(&pthread_key_lock) {\n\t\tkey_obj = get_posix_key(key);\n\t\tif (key_obj == NULL) {\n\t\t\tK_SPINLOCK_BREAK;\n\t\t}\n\n\t\tnode_l = sys_slist_peek_head(&(thread->key_list));\n\n\t\t/* Traverse the list of keys set by the thread, looking for key */\n\t\tSYS_SLIST_FOR_EACH_NODE(&(thread->key_list), node_l) {\n\t\t\tthread_spec_data = (pthread_thread_data *)node_l;\n\t\t\tif (thread_spec_data->key == key_obj) {\n\t\t\t\t/* Key is present, so get the set thread data */\n\t\t\t\tvalue = thread_spec_data->data;\n\t\t\t\tbreak;\n\t\t\t}\n\t\t}\n\t}\n\n\treturn value;\n}\n\nvoid pthread_key_ator_teardown(struct posix_thread *pt)\n{\n\tvoid *val;\n\tsys_snode_t *node_l, *next_node_l;\n\tstruct pthread_key_obj *key_obj;\n\tstruct pthread_key_data *key_data;\n\tpthread_thread_data *thread_spec_data;\n\tk_spinlock_key_t key;\n\n\t/* Perform destructor callbacks Before deallocating memory */\n\tSYS_SLIST_FOR_EACH_NODE_SAFE(&(pt->key_list), node_l, next_node_l) {\n\t\tthread_spec_data = (pthread_thread_data *)node_l;\n\t\tkey_obj = thread_spec_data->key;\n\t\tif (key_obj->destructor != NULL) {\n\t\t\tval = thread_spec_data->data;\n\t\t\tthread_spec_data->data = NULL;\n\t\t\t(key_obj->destructor)(val);\n\t\t}\n\t}\n\n\tkey = k_spin_lock(&pthread_key_lock);\n\tSYS_SLIST_FOR_EACH_NODE_SAFE(&(pt->key_list), node_l, next_node_l) {\n\t\tthread_spec_data = (pthread_thread_data *)sys_slist_get(&(pt->key_list));\n\t\tkey_obj = thread_spec_data->key;\n\t\tkey_data = CONTAINER_OF(thread_spec_data, struct pthread_key_data, thread_data);\n\t\tsys_slist_find_and_remove(&(key_obj->key_data_l), (sys_snode_t *)key_data);\n\t\tk_spin_unlock(&pthread_key_lock, key);\n\t\tk_free((void *)key_data);\n\t\tkey = k_spin_lock(&pthread_key_lock);\n\t}\n\tk_spin_unlock(&pthread_key_lock, key);\n}\n"
+          },
+          "applied_files": [],
+          "apply_error": "TargetFileNotFound: Target file 'lib/posix/options/key.c' not found.",
+          "static_check_passed": null,
+          "static_check_log": null,
+          "filtered_log": null,
+          "conflict_tag": null,
+          "graph_context": null,
+          "analyzer_diagnosis": null,
+          "retrieved_files": null,
+          "restored_files": []
+        }
+      }
+    ],
+    "first_retrieval_files": null,
+    "initial_error_log": "[Fallback Raw Tail]\nPASS - test_cond_resource_leak in 0.001 seconds\n===================================================================\nSTART - test_pthread_condattr\nPASS - test_pthread_condattr in 0.001 seconds\n===================================================================\nTESTSUITE cond succeeded\nRunning TESTSUITE key\n===================================================================\nSTART - test_correct_key_is_deleted\nPASS - test_correct_key_is_deleted in 0.031 seconds\n===================================================================\nSTART - test_key_1toN_thread\nE: heap corruption (double free?) at 0x20005c9c\nE: r0/a1:  0x00000004  r1/a2:  0x000100e2  r2/a3:  0x90000000\nE: r3/a4:  0x00000004 r12/ip:  0x00000000 r14/lr:  0x000038eb\nE:  xpsr:  0x21000000\nE: Faulting instruction address (r15/pc): 0x000038f8\nE: >>> ZEPHYR FATAL ERROR 4: Kernel panic on CPU 0\nE: Current thread: 0x20000158 (unknown)\nE: Halting system",
+    "protected_file_count": 9,
+    "workspace_path": "/Users/yangkaihao/zephyr-eval-work/v4_main_main_b1/b1/v3_runtime_posix_key_double_free_daad7c5",
+    "api_events": [],
+    "started_at": "2026-11-06T00:52:45+00:00",
+    "run_meta": {
+      "code_commit": "3a40f2822e606cbb9ed0aa6a7f3afbada0015b4b",
+      "code_dirty": false,
+      "code_dirty_paths": [],
+      "model_provider": "gemini",
+      "single_model": true,
+      "models": {
+        "fast": "gemini-4-argon",
+        "pro": "gemini-4-argon",
+        "embedding": "models/gemini-embedding-2"
+      },
+      "docker_image_id": "sha256:4210052156c603ea3ed27f4dc4506383be05855e285f2ea68fe081184300d4d5",
+      "strict_fallbacks": true,
+      "patch_llm_timeout": 900,
+      "free_tier_retry_policy": false,
+      "proposed_failed_unit_hint": false,
+      "proposed_graph_rag": false,
+      "proposed_hybrid_rag": true,
+      "proposed_opt": false,
+      "b3_gate": false,
+      "baseline_definition": "2026-11-hybrid",
+      "agentless_n": 4,
+      "openhands": {
+        "image": "zephyr-oh-agent:1.55.1-z2",
+        "image_id": "sha256:d1a817e0a33e6ac2d66ac43fa34d9c326f6e246f6843939eaa17091037dfdf10",
+        "max_steps": 50,
+        "timeout_min": 40.0
+      },
+      "gemini_key_fingerprint": "1abb4930",
+      "embedding_key_fingerprint": "1abb4930",
+      "sdk_versions": {
+        "langchain-core": "1.6.1",
+        "langgraph": "1.2.9",
+        "langchain-google-genai": "4.2.7",
+        "google-genai": "2.11.0",
+        "langchain-anthropic": "1.7.0",
+        "langchain-openai": "1.3.5"
+      }
+    }
+  }
+]

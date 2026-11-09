@@ -24,7 +24,7 @@ import tempfile
 from typing import Any, Dict, List, Tuple
 
 from agents.spec_rule import SPEC_RULE
-from core.llm_provider import PATCH_LLM_TIMEOUT, get_model_name, get_provider
+from core.llm_provider import PATCH_LLM_TIMEOUT, QWEN_BASE_URL, api_key_env_names, get_api_key, get_model_name, get_provider
 from core.protected_files import pop_restored
 from core.trajectory import build_trajectory
 from core.workflow import evaluate_repair_attempt
@@ -46,10 +46,9 @@ OH_IMAGE = os.environ.get("ZEPHYR_OH_IMAGE", "zephyr-oh-agent:1.55.1-z2")
 OH_MAX_STEPS = int(os.environ.get("ZEPHYR_OH_MAX_STEPS", "50"))
 OH_TIMEOUT_MIN = float(os.environ.get("ZEPHYR_OH_TIMEOUT_MIN", "40"))
 
-_KEY_ENV = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 # 網路隔離下 agent-server 唯一可以連的地方 (經主機的白名單代理)。The only egress allowed under the network lock.
 _LLM_API_HOST = {"gemini": "generativelanguage.googleapis.com:443", "anthropic": "api.anthropic.com:443",
-                 "openai": "api.openai.com:443"}
+                 "openai": "api.openai.com:443", "qwen": "llm-proxy.seai.cit.tum.de:443"}
 _SKIP_DIRS = {".cache", "__pycache__", ".git"}
 _MAX_RECORDED_FILES = 50
 _MAX_RECORDED_BYTES = 300_000
@@ -57,7 +56,22 @@ _FIXED_MTIME = 1788048000  # 2026-08-30 00:00 UTC，zephyr-sandbox 映像的 sna
 
 
 def litellm_model() -> str:
-    return f"{get_provider()}/{get_model_name('pro')}"
+    # Qwen 走 OpenAI 相容代理，LiteLLM 用 "openai/" 前綴加 base_url。Qwen goes through an OpenAI-compatible proxy.
+    prefix = "openai" if get_provider() == "qwen" else get_provider()
+    return f"{prefix}/{get_model_name('pro')}"
+
+
+def _extra_runner_args() -> List[str]:
+    """2026-11-08：Claude 不送 temperature (claude-sonnet-5-5 拒絕非預設值)；Qwen 要指定代理 base_url。
+    Gemini 維持原本的 temperature 0。
+    2026-11-08: no temperature for Claude (claude-sonnet-5-5 rejects non-default values); Qwen needs the
+    proxy base_url. Gemini keeps temperature 0 as before."""
+    args = []
+    if get_provider() == "anthropic":
+        args += ["--temperature", "none"]
+    if get_provider() == "qwen":
+        args += ["--base-url", QWEN_BASE_URL]
+    return args
 
 
 def build_task(state: Dict[str, Any]) -> str:
@@ -131,9 +145,9 @@ def _changed_files(root: str, before: Dict[str, Tuple[float, int]]) -> Tuple[Lis
 
 def run_openhands(state: Dict[str, Any]) -> Dict[str, Any]:
     workspace = state["workspace_path"]
-    key_env = _KEY_ENV.get(get_provider())
-    if not key_env or not os.environ.get(key_env):
-        raise RuntimeError(f"OpenHands baseline needs {key_env} for provider {get_provider()}")
+    api_key = get_api_key()
+    if not api_key:
+        raise RuntimeError(f"OpenHands baseline needs one of {api_key_env_names()} for provider {get_provider()}")
     _normalize_timestamps(workspace)
     before = _snapshot(workspace)
     with tempfile.TemporaryDirectory() as tmp:
@@ -144,8 +158,8 @@ def run_openhands(state: Dict[str, Any]) -> Dict[str, Any]:
                "--workspace", workspace, "--target-app", state["target_app"], "--task-file", task_file,
                "--model", litellm_model(), "--image", OH_IMAGE, "--max-steps", str(OH_MAX_STEPS),
                "--timeout-min", str(OH_TIMEOUT_MIN), "--llm-timeout", str(PATCH_LLM_TIMEOUT), "--out", out_file,
-               "--allow-host", _LLM_API_HOST[get_provider()]]
-        env = dict(os.environ, LLM_API_KEY=os.environ[key_env])
+               "--allow-host", _LLM_API_HOST[get_provider()]] + _extra_runner_args()
+        env = dict(os.environ, LLM_API_KEY=api_key)
         proc = subprocess.run(cmd, env=env, capture_output=True, text=True,
                               timeout=OH_TIMEOUT_MIN * 60 + 900)
         if not os.path.exists(out_file):
